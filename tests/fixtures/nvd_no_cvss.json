@@ -1,0 +1,19 @@
+{
+  "resultsPerPage": 1,
+  "startIndex": 0,
+  "totalResults": 1,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-1999-0001",
+        "published": "1999-01-01T00:00:00.000",
+        "lastModified": "2008-09-05T20:17:44.413",
+        "vulnStatus": "Modified",
+        "weaknesses": [],
+        "metrics": {}
+      }
+    }
+  ]
+}

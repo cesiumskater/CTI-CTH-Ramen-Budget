@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# Secrets and local config — never commit these
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.secret
+secrets.json
+secrets.yaml
+secrets.yml
+credentials.json
+credentials.yaml
+
+# SSH / TLS key material
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+id_rsa
+id_ed25519
+id_ecdsa
+*.pub
+
+# AWS / cloud credentials
+.aws/credentials
+.aws/config
+*.aws_credentials
+gcp-credentials.json
+service-account*.json
+
+# Claude / IDE local settings
+.claude/settings.local.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ---------------------------------------------------------------------------
+# Test and lint caches
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# ramen-cve runtime artefacts — never commit these
+# ---------------------------------------------------------------------------
+# SQLite cache database
+*.db
+.ramen-cache.db
+
+# Tool output files
+ramen-cve-*.csv
+ramen-cve-*.md
+
+# ---------------------------------------------------------------------------
+# OS / editor cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.Spotlight-V100
+.Trashes
+
+# ---------------------------------------------------------------------------
+# Miscellaneous build / packaging
+# ---------------------------------------------------------------------------
+*.zip
+*.tar.gz
+*.tgz
