@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Ramen CVE — Sample Feed List</title>
+  </head>
+  <body>
+    <outline text="Threat Intelligence">
+      <outline
+        type="rss"
+        text="Krebs on Security"
+        title="Krebs on Security"
+        xmlUrl="https://krebsonsecurity.com/feed/"
+        htmlUrl="https://krebsonsecurity.com/"
+      />
+      <outline
+        type="rss"
+        text="CISA Alerts"
+        title="CISA Alerts"
+        xmlUrl="https://www.cisa.gov/feeds/alerts.xml"
+        htmlUrl="https://www.cisa.gov/news-events/cybersecurity-advisories"
+      />
+    </outline>
+    <outline
+      type="rss"
+      text="abuse.ch Blog"
+      title="abuse.ch Blog"
+      xmlUrl="https://abuse.ch/blog/feed/"
+      htmlUrl="https://abuse.ch/blog/"
+    />
+    <outline
+      type="rss"
+      text="BleepingComputer"
+      title="BleepingComputer"
+      xmlUrl="https://www.bleepingcomputer.com/feed/"
+      htmlUrl="https://www.bleepingcomputer.com/"
+    />
+  </body>
+</opml>
