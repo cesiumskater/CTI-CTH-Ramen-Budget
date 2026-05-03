@@ -1009,3 +1009,18 @@ def test_cli_invalid_cve_id_rejected():
         text=True,
     )
     assert result.returncode != 0
+
+
+def test_cli_from_file_missing_returns_friendly_error(tmp_path):
+    """A non-existent --from-file path exits with code 1 and no traceback (regression for H1)."""
+    import subprocess
+
+    missing = tmp_path / "does-not-exist.txt"
+    result = subprocess.run(
+        [".venv/bin/python", "ramen_cve.py", "cve", "--from-file", str(missing), "--no-cache"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert "does not exist" in result.stderr or "from-file" in result.stderr

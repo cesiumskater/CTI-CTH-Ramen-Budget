@@ -932,7 +932,15 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     cve_ids: list[str] = list(args.cves or [])
 
     if args.from_file:
-        for line in args.from_file.read_text().splitlines():
+        try:
+            file_text = args.from_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _log.error("--from-file path does not exist: %s", args.from_file)
+            return 1
+        except OSError as exc:
+            _log.error("Could not read --from-file %s: %s", args.from_file, exc)
+            return 1
+        for line in file_text.splitlines():
             line = line.strip()
             if CVE_REGEX.fullmatch(line.upper()):
                 cve_ids.append(line.upper())
