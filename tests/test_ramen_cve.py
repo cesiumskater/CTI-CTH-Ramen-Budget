@@ -932,6 +932,28 @@ def test_write_markdown_cve_id_appears_once(tmp_path):
     assert heading_count == 1
 
 
+def test_write_markdown_cvss_zero_is_not_falsy(tmp_path):
+    """A CVSS score of 0.0 must render as '0.0', not 'N/A' (regression)."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        "CVE-2024-9999",
+        "test",
+        date(2024, 1, 1),
+        "feed_pub",
+        cvss_score=0.0,
+        cvss_severity="NONE",
+        epss_score=0.5,
+        epss_percentile=0.8,
+        bucket="watch_closely",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**CVSS:** 0.0 (NONE)" in text
+    assert "**CVSS:** N/A" not in text
+
+
 # ---------------------------------------------------------------------------
 # Slice 7.1 — CLI / argparse
 # ---------------------------------------------------------------------------

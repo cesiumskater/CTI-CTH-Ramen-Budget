@@ -41,6 +41,8 @@ DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
+_log = logging.getLogger(__name__)
+
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
     "patch_now": "Patch now — high CVSS and high EPSS; likely exploitable and high impact.",
@@ -257,9 +259,6 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
                 )
             )
     return records
-
-
-_log = logging.getLogger(__name__)
 
 
 def _redact_key(url: str) -> str:
@@ -577,20 +576,6 @@ CSV_COLUMNS = [
 ]
 
 
-def _fmt(value: object) -> str:
-    """Format a value for CSV output — None becomes empty string."""
-    if value is None:
-        return ""
-    if isinstance(value, float):
-        # Distinguish CVSS (1 decimal) from EPSS/percentile (4 decimals) by magnitude
-        return f"{value:.4f}"
-    if isinstance(value, list):
-        return ";".join(str(v) for v in value)
-    if isinstance(value, bool):
-        return str(value).lower()
-    return str(value)
-
-
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
     """Write the enriched CVE list to a CSV file.
 
@@ -703,7 +688,9 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
             lines.append("")
             lines.append(f"**Action:** {rec.suggested_action}")
             lines.append("")
-            lines.append(f"- **CVSS:** {rec.cvss_score or 'N/A'} ({rec.cvss_severity or 'N/A'})")
+            cvss_display = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+            severity_display = rec.cvss_severity or "N/A"
+            lines.append(f"- **CVSS:** {cvss_display} ({severity_display})")
             if rec.epss_score is not None and rec.epss_percentile is not None:
                 lines.append(f"- **EPSS:** {rec.epss_score:.4f} ({rec.epss_percentile:.4f} pct)")
             elif rec.epss_score is not None:
@@ -874,13 +861,10 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             )
             records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
 
+    enriched = enrich_cves(records, cache, api_key)
+    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = enrich_cves(records, cache, api_key)
-        enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
         enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
-    else:
-        enriched = enrich_cves(records, cache, api_key)
-        enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
 
     metadata = {
         "version": VERSION,
