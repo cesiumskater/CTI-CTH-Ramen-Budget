@@ -457,7 +457,16 @@ def enrich_cves(
         epss = epss_data.get(cve_id, {})
 
         nvd_pub_str = nvd.get("nvd_published")
-        nvd_published = date.fromisoformat(nvd_pub_str) if nvd_pub_str else None
+        nvd_published: date | None = None
+        if nvd_pub_str:
+            try:
+                nvd_published = date.fromisoformat(nvd_pub_str)
+            except (TypeError, ValueError):
+                _log.warning(
+                    "NVD returned an unparseable published date %r for %s; ignoring.",
+                    nvd_pub_str,
+                    cve_id,
+                )
 
         enriched.append(
             EnrichedCve(
@@ -1074,8 +1083,17 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     ]:
         m = _re.search(pattern, text)
         if m:
-            pub_date = date.fromisoformat(m.group(1))
-            break
+            try:
+                pub_date = date.fromisoformat(m.group(1))
+                break
+            except ValueError:
+                _log.warning(
+                    "Found publication-date-like string %r in %s but could not parse it; "
+                    "trying next pattern.",
+                    m.group(1),
+                    args.url,
+                )
+                continue
     else:
         _log.warning("Could not find publication date in %s; using today.", args.url)
 

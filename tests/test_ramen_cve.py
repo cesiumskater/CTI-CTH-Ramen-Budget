@@ -518,6 +518,86 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_run_url_handles_invalid_meta_date(tmp_path, caplog):
+    """A valid-looking but impossible date (e.g. 2024-13-45) in HTML must not crash _run_url
+    (regression for H3)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    html = (
+        '<html><head>'
+        '<meta property="article:published_time" content="2024-13-45T10:00:00Z">'
+        '</head><body>No CVEs here.</body></html>'
+    )
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.text = html
+        mock_resp.json.return_value = {}
+        return mock_resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        caplog.at_level(logging.WARNING, logger="ramen_cve"),
+    ):
+        rc = ramen_cve.main(
+            ["url", "https://example.com/post", "--no-cache",
+             "--out-dir", str(tmp_path), "--format", "csv"]
+        )
+
+    assert rc == 0
+    assert any("could not parse" in rec.message.lower() for rec in caplog.records)
+
+
+def test_enrich_cves_handles_unparseable_nvd_published_date(caplog):
+    """A garbage nvd_published string must not crash enrich_cves (regression for H2)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    epss_resp = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        if "epss" in url:
+            mock_resp.json.return_value = epss_resp
+        else:
+            # Build a minimal NVD payload with a malformed published date
+            mock_resp.json.return_value = {
+                "vulnerabilities": [
+                    {
+                        "cve": {
+                            "id": "CVE-2021-44228",
+                            "published": "not-a-real-date",
+                            "metrics": {},
+                            "weaknesses": [],
+                            "cisaExploitAdd": None,
+                        }
+                    }
+                ]
+            }
+        return mock_resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        caplog.at_level(logging.WARNING, logger="ramen_cve"),
+    ):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert len(result) == 1
+    assert result[0].nvd_published is None
+    assert any("unparseable" in rec.message for rec in caplog.records)
+
+
 def test_enrich_cves_deduplicates_and_picks_earliest():
     """3 records covering 2 unique CVEs → 2 enriched, earliest first_seen kept."""
     from unittest.mock import MagicMock, patch
