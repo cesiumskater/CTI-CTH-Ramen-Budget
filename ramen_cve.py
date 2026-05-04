@@ -849,7 +849,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         _log.info("Fetching feed: %s", entry.url)
         sources.append(entry.title or entry.url)
         feed = feedparser.parse(entry.url)
-        for item in feed.entries:
+        for item in feed.entries or []:
             pub = item.get("published_parsed") or item.get("updated_parsed")
             item_date = date(*pub[:3]) if pub else date.today()
             text = " ".join(

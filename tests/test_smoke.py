@@ -98,3 +98,27 @@ def test_smoke_opml_pipeline(tmp_path):
         section in md_text
         for section in ["## KEV Override", "## Patch Now", "## Watch Closely", "## Plan and Patch"]
     )
+
+
+def test_smoke_opml_handles_none_entries(tmp_path):
+    """Feedparser returning entries=None must not crash _run_opml (regression for H4)."""
+    import ramen_cve
+
+    class FeedWithNoneEntries:
+        bozo = 0
+        entries = None
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        patch("feedparser.parse", return_value=FeedWithNoneEntries()),
+    ):
+        exit_code = ramen_cve.main(
+            ["opml", str(SAMPLE_OPML), "--out-dir", str(tmp_path), "--format", "csv"]
+        )
+
+    assert exit_code == 0
+    csv_files = list(tmp_path.glob("ramen-cve-*.csv"))
+    assert len(csv_files) == 1
+    # No CVEs found because no entries were parsed; header row only.
+    assert csv_files[0].read_text().count("\n") == 1
