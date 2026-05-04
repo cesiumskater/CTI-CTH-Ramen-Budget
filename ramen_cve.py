@@ -291,7 +291,13 @@ def _save_api_key_to_env(key: str, env_path: Path = ENV_FILE_PATH) -> None:
     If the file exists, replace any existing NVD_API_KEY line; otherwise
     append. The file is created with mode 0o600 so the key is not
     world-readable. Other variables already in .env are preserved.
+
+    Raises ValueError if the key contains a newline, carriage return, or
+    NUL byte. Without this guard, an attacker who controls the input
+    could inject additional VAR=value lines into .env.
     """
+    if any(ch in key for ch in ("\n", "\r", "\x00")):
+        raise ValueError("API key contains illegal control characters; refusing to write .env.")
     new_line = f"NVD_API_KEY={key}\n"
     if env_path.exists():
         existing = env_path.read_text().splitlines(keepends=True)
