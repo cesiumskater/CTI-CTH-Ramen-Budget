@@ -10,6 +10,7 @@ override); and writes a CSV and a Markdown report.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -271,6 +272,103 @@ def _redact_key(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=safe_query))
 
 
+NVD_API_KEY_REGEX = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+NVD_KEY_REQUEST_URL = "https://nvd.nist.gov/developers/request-an-api-key"
+ENV_FILE_PATH = Path(".env")
+
+
+def _is_interactive() -> bool:
+    """True if both stdin and stderr are TTYs (so prompting makes sense)."""
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _save_api_key_to_env(key: str, env_path: Path = ENV_FILE_PATH) -> None:
+    """Persist NVD_API_KEY=<key> to a local .env file.
+
+    If the file exists, replace any existing NVD_API_KEY line; otherwise
+    append. The file is created with mode 0o600 so the key is not
+    world-readable. Other variables already in .env are preserved.
+    """
+    new_line = f"NVD_API_KEY={key}\n"
+    if env_path.exists():
+        existing = env_path.read_text().splitlines(keepends=True)
+        replaced = False
+        out_lines: list[str] = []
+        for line in existing:
+            if line.strip().startswith("NVD_API_KEY="):
+                out_lines.append(new_line)
+                replaced = True
+            else:
+                out_lines.append(line)
+        if not replaced:
+            if out_lines and not out_lines[-1].endswith("\n"):
+                out_lines[-1] += "\n"
+            out_lines.append(new_line)
+        env_path.write_text("".join(out_lines))
+    else:
+        env_path.write_text(new_line)
+    with contextlib.suppress(OSError):
+        env_path.chmod(0o600)  # Best-effort; some filesystems (e.g. Windows) don't support it.
+
+
+def _prompt_for_api_key(reason: str = "missing") -> str | None:
+    """Interactively ask the user for an NVD API key and save it to .env.
+
+    `reason` is one of "missing" (no key on disk) or "expired" (server
+    rejected the existing key). Returns the new key string, or None if
+    the user declined to enter one.
+    """
+    if not _is_interactive():
+        return None
+
+    if reason == "expired":
+        message = (
+            "\nThe NVD API key currently in use was rejected by the server "
+            "(likely expired or revoked)."
+        )
+    else:
+        message = "\nNo NVD API key found in environment or .env file."
+    print(message, file=sys.stderr)
+    print(
+        f"You can request a free key at: {NVD_KEY_REQUEST_URL}\n"
+        "  - With a key: ~50 requests per 30s window (recommended)\n"
+        "  - Without a key: ~5 requests per 30s window\n",
+        file=sys.stderr,
+    )
+
+    try:
+        import questionary
+
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Enter a key now (saved to .env)", value="enter"),
+                questionary.Choice("Continue without a key (slower)", value="skip"),
+            ],
+        ).unsafe_ask()
+        if action != "enter":
+            return None
+        key = questionary.password(
+            "Paste your NVD API key (input is hidden):",
+            validate=lambda s: (
+                True if NVD_API_KEY_REGEX.match(s.strip())
+                else "Expected UUID format (8-4-4-4-12 hex chars)."
+            ),
+        ).unsafe_ask()
+    except (KeyboardInterrupt, ImportError):
+        return None
+
+    if not key:
+        return None
+    key = key.strip()
+    _save_api_key_to_env(key)
+    print(f"Saved NVD_API_KEY to {ENV_FILE_PATH} (mode 0600).", file=sys.stderr)
+    return key
+
+
 def _safe_url_for_log(url: str) -> str:
     """Strip query string and fragment from a user-supplied URL before logging it.
 
@@ -318,6 +416,16 @@ def fetch_nvd(cve_id: str, cache: Cache, api_key: str | None) -> dict:
 
     try:
         resp = requests.get(NVD_API_BASE, params=params, headers=headers, timeout=30)
+        if resp.status_code in (401, 403):
+            safe_url = _redact_key(f"{NVD_API_BASE}?cveId={cve_id}")
+            _log.warning(
+                "NVD rejected the API key for %s (%s status %s)",
+                cve_id,
+                safe_url,
+                resp.status_code,
+            )
+            # Auth errors are NOT cached: a fresh key should be retried immediately.
+            return _empty_nvd(cve_id, status="auth_error")
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -469,10 +577,20 @@ def enrich_cves(
 
     unique_ids = list(earliest.keys())
 
-    # Fetch NVD data for each unique CVE
+    # Fetch NVD data for each unique CVE. If the server rejects the API key
+    # (401/403), prompt for a new one ONCE and retry the failed CVE plus all
+    # remaining ones with the fresh key.
     nvd_data: dict[str, dict] = {}
+    reprompted = False
     for cve_id in unique_ids:
-        nvd_data[cve_id] = fetch_nvd(cve_id, cache, api_key)
+        result = fetch_nvd(cve_id, cache, api_key)
+        if result.get("nvd_status") == "auth_error" and not reprompted and api_key:
+            reprompted = True
+            new_key = _prompt_for_api_key(reason="expired")
+            if new_key:
+                api_key = new_key
+                result = fetch_nvd(cve_id, cache, api_key)
+        nvd_data[cve_id] = result
 
     # Fetch EPSS data in one batched call
     epss_data = fetch_epss(unique_ids, cache)
@@ -1033,6 +1151,10 @@ def main(argv: list[str] | None = None) -> int:
 
     load_dotenv()
     api_key = os.getenv("NVD_API_KEY") or None
+    if api_key is None:
+        prompted = _prompt_for_api_key(reason="missing")
+        if prompted:
+            api_key = prompted
 
     if args.subcommand == "opml":
         return _run_opml(args, cache, api_key)
