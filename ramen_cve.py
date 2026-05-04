@@ -152,8 +152,17 @@ class Cache:
         self._conn.commit()
 
     def _is_fresh(self, fetched_at: str) -> bool:
-        """Return True if fetched_at timestamp is within the TTL window."""
-        ts = datetime.fromisoformat(fetched_at)
+        """Return True if fetched_at timestamp is within the TTL window.
+
+        A corrupt timestamp (from a hand-edited cache, a downgrade, or
+        a partial write) is treated as stale rather than raising — the
+        row will be re-fetched from the API and overwritten.
+        """
+        try:
+            ts = datetime.fromisoformat(fetched_at)
+        except (TypeError, ValueError):
+            _log.warning("Cache row has unparseable fetched_at %r; treating as stale.", fetched_at)
+            return False
         return datetime.utcnow() - ts < self._ttl
 
     def get_nvd(self, cve_id: str) -> dict | None:

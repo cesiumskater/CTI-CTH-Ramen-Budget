@@ -242,6 +242,24 @@ def test_cache_nvd_stale_returns_none():
     assert c.get_nvd("CVE-2021-44228") is None
 
 
+def test_cache_corrupt_timestamp_treated_as_stale(caplog):
+    """A row with a malformed fetched_at must not crash get_nvd (regression for H1)."""
+    import logging
+
+    c = _mem_cache()
+    c._conn.execute(
+        "INSERT INTO nvd_cache VALUES (?, ?, ?)",
+        ("CVE-2021-44228", '{"x": 1}', "NOT-A-TIMESTAMP"),
+    )
+    c._conn.commit()
+
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        result = c.get_nvd("CVE-2021-44228")
+
+    assert result is None
+    assert any("unparseable fetched_at" in rec.message for rec in caplog.records)
+
+
 def test_cache_epss_round_trip():
     """set_epss followed by get_epss returns the same payload."""
     c = _mem_cache()
