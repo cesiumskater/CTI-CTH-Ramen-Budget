@@ -122,3 +122,28 @@ def test_smoke_opml_handles_none_entries(tmp_path):
     assert len(csv_files) == 1
     # No CVEs found because no entries were parsed; header row only.
     assert csv_files[0].read_text().count("\n") == 1
+
+
+def test_smoke_opml_warns_on_bozo_feed(tmp_path, caplog):
+    """A feedparser result with bozo=1 logs a WARNING but does not abort (regression for H5)."""
+    import logging
+
+    import ramen_cve
+
+    class BozoFeed:
+        bozo = 1
+        bozo_exception = "mismatched tag at line 7"
+        entries = []
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        patch("feedparser.parse", return_value=BozoFeed()),
+        caplog.at_level(logging.WARNING, logger="ramen_cve"),
+    ):
+        exit_code = ramen_cve.main(
+            ["opml", str(SAMPLE_OPML), "--out-dir", str(tmp_path), "--format", "csv"]
+        )
+
+    assert exit_code == 0
+    assert any("parsed with errors" in rec.message for rec in caplog.records)
