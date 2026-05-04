@@ -518,6 +518,14 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_validate_args_rejects_epss_mode_without_dates():
+    """--date-mode epss with no --start/--end must error out, not crash mid-run (M1)."""
+    import ramen_cve
+
+    with pytest.raises(SystemExit):
+        ramen_cve.main(["cve", "CVE-2021-44228", "--date-mode", "epss", "--no-cache"])
+
+
 def test_run_url_handles_invalid_meta_date(tmp_path, caplog):
     """A valid-looking but impossible date (e.g. 2024-13-45) in HTML must not crash _run_url
     (regression for H3)."""

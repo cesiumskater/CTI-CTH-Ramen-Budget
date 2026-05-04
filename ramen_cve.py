@@ -799,8 +799,14 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Cross-field validation that argparse can't express natively."""
-    if args.date_mode == "epss" and args.start != args.end:
-        parser.error("--date-mode epss requires --start and --end to be the same date.")
+    if args.date_mode == "epss":
+        if args.start is None or args.end is None:
+            parser.error(
+                "--date-mode epss requires both --start and --end (set to the same date "
+                "for the EPSS snapshot you want)."
+            )
+        if args.start != args.end:
+            parser.error("--date-mode epss requires --start and --end to be the same date.")
 
 
 def _run_wizard() -> list[str]:
