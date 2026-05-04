@@ -518,6 +518,177 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_fetch_nvd_does_not_sleep_on_first_call():
+    """The first NVD fetch in a fresh process should not pay the full per-call delay (L1)."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    # Reset the module-level last-call timestamp so the test is deterministic
+    if hasattr(ramen_cve.fetch_nvd, "_last_call"):
+        del ramen_cve.fetch_nvd._last_call
+
+    cache = _mem_cache()
+    fixture = _load_fixture("nvd_log4shell_v31.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = fixture
+        return resp
+
+    sleep_calls: list[float] = []
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep", side_effect=lambda s: sleep_calls.append(s)),
+    ):
+        ramen_cve.fetch_nvd("CVE-2021-44228", cache, api_key=None)
+
+    # First call: elapsed since the (uninitialized) last_call is huge,
+    # so the if-guard short-circuits and no sleep should have fired.
+    assert sleep_calls == [], f"first-call slept unexpectedly: {sleep_calls}"
+
+
+def test_safe_url_for_log_strips_query_and_fragment():
+    """Query strings and fragments must be stripped before logging (regression for M3)."""
+    from ramen_cve import _safe_url_for_log
+
+    out = _safe_url_for_log("https://example.com/path?token=secret&id=1#trackingid")
+    assert "secret" not in out
+    assert "token" not in out
+    assert "trackingid" not in out
+    assert out.startswith("https://example.com/path")
+    assert "redacted" in out
+
+    # No query/fragment → unchanged, no redaction note
+    plain = _safe_url_for_log("https://example.com/path")
+    assert plain == "https://example.com/path"
+
+
+def test_write_markdown_sanitizes_newlines_in_source(tmp_path):
+    """A source string containing newlines must not break the bullet layout (regression for M2)."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="Multi\nline\rsource\twith\nweird whitespace",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        epss_percentile=0.99,
+        bucket="patch_now",
+        suggested_action="Patch.",
+    )
+    out = tmp_path / "report.md"
+    write_markdown(
+        [rec],
+        out,
+        {
+            "version": "0.1",
+            "sources": ["Feed\nName\rwith breaks"],
+            "cvss_threshold": 7.0,
+            "epss_threshold": 0.10,
+        },
+    )
+    text = out.read_text()
+    # Every "- **Source:**" or "- " bullet should occupy exactly one line
+    for line in text.splitlines():
+        assert "\n" not in line and "\r" not in line
+    assert "Multi line source with weird whitespace" in text
+    assert "Feed Name with breaks" in text
+
+
+def test_validate_args_rejects_epss_mode_without_dates():
+    """--date-mode epss with no --start/--end must error out, not crash mid-run (M1)."""
+    import ramen_cve
+
+    with pytest.raises(SystemExit):
+        ramen_cve.main(["cve", "CVE-2021-44228", "--date-mode", "epss", "--no-cache"])
+
+
+def test_run_url_handles_invalid_meta_date(tmp_path, caplog):
+    """A valid-looking but impossible date (e.g. 2024-13-45) in HTML must not crash _run_url
+    (regression for H3)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    html = (
+        '<html><head>'
+        '<meta property="article:published_time" content="2024-13-45T10:00:00Z">'
+        '</head><body>No CVEs here.</body></html>'
+    )
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.text = html
+        mock_resp.json.return_value = {}
+        return mock_resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        caplog.at_level(logging.WARNING, logger="ramen_cve"),
+    ):
+        rc = ramen_cve.main(
+            ["url", "https://example.com/post", "--no-cache",
+             "--out-dir", str(tmp_path), "--format", "csv"]
+        )
+
+    assert rc == 0
+    assert any("could not parse" in rec.message.lower() for rec in caplog.records)
+
+
+def test_enrich_cves_handles_unparseable_nvd_published_date(caplog):
+    """A garbage nvd_published string must not crash enrich_cves (regression for H2)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    epss_resp = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        if "epss" in url:
+            mock_resp.json.return_value = epss_resp
+        else:
+            # Build a minimal NVD payload with a malformed published date
+            mock_resp.json.return_value = {
+                "vulnerabilities": [
+                    {
+                        "cve": {
+                            "id": "CVE-2021-44228",
+                            "published": "not-a-real-date",
+                            "metrics": {},
+                            "weaknesses": [],
+                            "cisaExploitAdd": None,
+                        }
+                    }
+                ]
+            }
+        return mock_resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        caplog.at_level(logging.WARNING, logger="ramen_cve"),
+    ):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert len(result) == 1
+    assert result[0].nvd_published is None
+    assert any("unparseable" in rec.message for rec in caplog.records)
+
+
 def test_enrich_cves_deduplicates_and_picks_earliest():
     """3 records covering 2 unique CVEs → 2 enriched, earliest first_seen kept."""
     from unittest.mock import MagicMock, patch
@@ -932,6 +1103,28 @@ def test_write_markdown_cve_id_appears_once(tmp_path):
     assert heading_count == 1
 
 
+def test_write_markdown_cvss_zero_is_not_falsy(tmp_path):
+    """A CVSS score of 0.0 must render as '0.0', not 'N/A' (regression)."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        "CVE-2024-9999",
+        "test",
+        date(2024, 1, 1),
+        "feed_pub",
+        cvss_score=0.0,
+        cvss_severity="NONE",
+        epss_score=0.5,
+        epss_percentile=0.8,
+        bucket="watch_closely",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**CVSS:** 0.0 (NONE)" in text
+    assert "**CVSS:** N/A" not in text
+
+
 # ---------------------------------------------------------------------------
 # Slice 7.1 — CLI / argparse
 # ---------------------------------------------------------------------------
@@ -987,3 +1180,18 @@ def test_cli_invalid_cve_id_rejected():
         text=True,
     )
     assert result.returncode != 0
+
+
+def test_cli_from_file_missing_returns_friendly_error(tmp_path):
+    """A non-existent --from-file path exits with code 1 and no traceback (regression for H1)."""
+    import subprocess
+
+    missing = tmp_path / "does-not-exist.txt"
+    result = subprocess.run(
+        [".venv/bin/python", "ramen_cve.py", "cve", "--from-file", str(missing), "--no-cache"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert "does not exist" in result.stderr or "from-file" in result.stderr

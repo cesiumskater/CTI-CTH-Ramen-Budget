@@ -10,6 +10,7 @@ override); and writes a CSV and a Markdown report.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -40,6 +41,8 @@ DEFAULT_CACHE_PATH = ".ramen-cache.db"
 DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
+
+_log = logging.getLogger(__name__)
 
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
@@ -259,9 +262,6 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
     return records
 
 
-_log = logging.getLogger(__name__)
-
-
 def _redact_key(url: str) -> str:
     """Replace the apiKey query parameter value with REDACTED."""
     parsed = urllib.parse.urlparse(url)
@@ -272,19 +272,142 @@ def _redact_key(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=safe_query))
 
 
+NVD_API_KEY_REGEX = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+NVD_KEY_REQUEST_URL = "https://nvd.nist.gov/developers/request-an-api-key"
+ENV_FILE_PATH = Path(".env")
+
+
+def _is_interactive() -> bool:
+    """True if both stdin and stderr are TTYs (so prompting makes sense)."""
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _save_api_key_to_env(key: str, env_path: Path = ENV_FILE_PATH) -> None:
+    """Persist NVD_API_KEY=<key> to a local .env file.
+
+    If the file exists, replace any existing NVD_API_KEY line; otherwise
+    append. The file is created with mode 0o600 so the key is not
+    world-readable. Other variables already in .env are preserved.
+    """
+    new_line = f"NVD_API_KEY={key}\n"
+    if env_path.exists():
+        existing = env_path.read_text().splitlines(keepends=True)
+        replaced = False
+        out_lines: list[str] = []
+        for line in existing:
+            if line.strip().startswith("NVD_API_KEY="):
+                out_lines.append(new_line)
+                replaced = True
+            else:
+                out_lines.append(line)
+        if not replaced:
+            if out_lines and not out_lines[-1].endswith("\n"):
+                out_lines[-1] += "\n"
+            out_lines.append(new_line)
+        env_path.write_text("".join(out_lines))
+    else:
+        env_path.write_text(new_line)
+    with contextlib.suppress(OSError):
+        env_path.chmod(0o600)  # Best-effort; some filesystems (e.g. Windows) don't support it.
+
+
+def _prompt_for_api_key(reason: str = "missing") -> str | None:
+    """Interactively ask the user for an NVD API key and save it to .env.
+
+    `reason` is one of "missing" (no key on disk) or "expired" (server
+    rejected the existing key). Returns the new key string, or None if
+    the user declined to enter one.
+    """
+    if not _is_interactive():
+        return None
+
+    if reason == "expired":
+        message = (
+            "\nThe NVD API key currently in use was rejected by the server "
+            "(likely expired or revoked)."
+        )
+    else:
+        message = "\nNo NVD API key found in environment or .env file."
+    print(message, file=sys.stderr)
+    print(
+        f"You can request a free key at: {NVD_KEY_REQUEST_URL}\n"
+        "  - With a key: ~50 requests per 30s window (recommended)\n"
+        "  - Without a key: ~5 requests per 30s window\n",
+        file=sys.stderr,
+    )
+
+    try:
+        import questionary
+
+        action = questionary.select(
+            "What would you like to do?",
+            choices=[
+                questionary.Choice("Enter a key now (saved to .env)", value="enter"),
+                questionary.Choice("Continue without a key (slower)", value="skip"),
+            ],
+        ).unsafe_ask()
+        if action != "enter":
+            return None
+        key = questionary.password(
+            "Paste your NVD API key (input is hidden):",
+            validate=lambda s: (
+                True if NVD_API_KEY_REGEX.match(s.strip())
+                else "Expected UUID format (8-4-4-4-12 hex chars)."
+            ),
+        ).unsafe_ask()
+    except (KeyboardInterrupt, ImportError):
+        return None
+
+    if not key:
+        return None
+    key = key.strip()
+    _save_api_key_to_env(key)
+    print(f"Saved NVD_API_KEY to {ENV_FILE_PATH} (mode 0600).", file=sys.stderr)
+    return key
+
+
+def _safe_url_for_log(url: str) -> str:
+    """Strip query string and fragment from a user-supplied URL before logging it.
+
+    Arbitrary URLs may carry tokens, session IDs, or other secrets in the
+    query string. We can't tell which params are sensitive, so the safest
+    thing to log is scheme + host + path only.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return "<unparseable url>"
+    sanitized = parsed._replace(query="", fragment="")
+    rendered = urllib.parse.urlunparse(sanitized)
+    if parsed.query or parsed.fragment:
+        rendered += " (query/fragment redacted)"
+    return rendered
+
+
 def fetch_nvd(cve_id: str, cache: Cache, api_key: str | None) -> dict:
     """Fetch NVD CVSS data for a single CVE, using the cache when possible.
 
     Returns a normalized dict with keys: cvss_score, cvss_severity,
     cvss_vector, cvss_version, kev_listed, cwe, nvd_published, nvd_status.
     Never raises — on HTTP error returns a record with nvd_status='error'.
+
+    Rate limit: sleeps just enough to keep us under the NVD per-window
+    limit, but only if a previous call was made recently. The first call
+    in a run does not pay the full delay.
     """
     cached = cache.get_nvd(cve_id)
     if cached is not None:
         return cached
 
     delay = 0.6 if api_key else 6.0
-    time.sleep(delay)
+    last = getattr(fetch_nvd, "_last_call", 0.0)
+    elapsed = time.monotonic() - last
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
+    fetch_nvd._last_call = time.monotonic()
 
     headers = {"User-Agent": USER_AGENT}
     params: dict[str, str] = {"cveId": cve_id}
@@ -293,6 +416,16 @@ def fetch_nvd(cve_id: str, cache: Cache, api_key: str | None) -> dict:
 
     try:
         resp = requests.get(NVD_API_BASE, params=params, headers=headers, timeout=30)
+        if resp.status_code in (401, 403):
+            safe_url = _redact_key(f"{NVD_API_BASE}?cveId={cve_id}")
+            _log.warning(
+                "NVD rejected the API key for %s (%s status %s)",
+                cve_id,
+                safe_url,
+                resp.status_code,
+            )
+            # Auth errors are NOT cached: a fresh key should be retried immediately.
+            return _empty_nvd(cve_id, status="auth_error")
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
@@ -444,10 +577,20 @@ def enrich_cves(
 
     unique_ids = list(earliest.keys())
 
-    # Fetch NVD data for each unique CVE
+    # Fetch NVD data for each unique CVE. If the server rejects the API key
+    # (401/403), prompt for a new one ONCE and retry the failed CVE plus all
+    # remaining ones with the fresh key.
     nvd_data: dict[str, dict] = {}
+    reprompted = False
     for cve_id in unique_ids:
-        nvd_data[cve_id] = fetch_nvd(cve_id, cache, api_key)
+        result = fetch_nvd(cve_id, cache, api_key)
+        if result.get("nvd_status") == "auth_error" and not reprompted and api_key:
+            reprompted = True
+            new_key = _prompt_for_api_key(reason="expired")
+            if new_key:
+                api_key = new_key
+                result = fetch_nvd(cve_id, cache, api_key)
+        nvd_data[cve_id] = result
 
     # Fetch EPSS data in one batched call
     epss_data = fetch_epss(unique_ids, cache)
@@ -458,7 +601,16 @@ def enrich_cves(
         epss = epss_data.get(cve_id, {})
 
         nvd_pub_str = nvd.get("nvd_published")
-        nvd_published = date.fromisoformat(nvd_pub_str) if nvd_pub_str else None
+        nvd_published: date | None = None
+        if nvd_pub_str:
+            try:
+                nvd_published = date.fromisoformat(nvd_pub_str)
+            except (TypeError, ValueError):
+                _log.warning(
+                    "NVD returned an unparseable published date %r for %s; ignoring.",
+                    nvd_pub_str,
+                    cve_id,
+                )
 
         enriched.append(
             EnrichedCve(
@@ -489,6 +641,11 @@ def bucket_and_suggest(
     epss_thr: float = DEFAULT_EPSS_THRESHOLD,
 ) -> list[EnrichedCve]:
     """Assign a bucket and suggested action to each enriched CVE.
+
+    NOTE: this function MUTATES the records in `enriched` in place
+    (setting `rec.bucket` and `rec.suggested_action`) and returns the
+    same list for chaining. Callers should not rely on the input being
+    untouched.
 
     Precedence:
       1. kev_listed=True → kev_override (always wins)
@@ -577,20 +734,6 @@ CSV_COLUMNS = [
 ]
 
 
-def _fmt(value: object) -> str:
-    """Format a value for CSV output — None becomes empty string."""
-    if value is None:
-        return ""
-    if isinstance(value, float):
-        # Distinguish CVSS (1 decimal) from EPSS/percentile (4 decimals) by magnitude
-        return f"{value:.4f}"
-    if isinstance(value, list):
-        return ";".join(str(v) for v in value)
-    if isinstance(value, bool):
-        return str(value).lower()
-    return str(value)
-
-
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
     """Write the enriched CVE list to a CSV file.
 
@@ -643,6 +786,14 @@ BUCKET_DISPLAY = {
 }
 
 
+def _md_safe(text: str) -> str:
+    """Collapse newlines and control whitespace so a string is safe in a Markdown bullet."""
+    if not text:
+        return ""
+    # Replace any run of \r/\n/\t/etc. with a single space so the bullet stays on one line.
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) -> None:
     """Write a human-readable Markdown triage report.
 
@@ -674,7 +825,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
     if run_metadata.get("sources"):
         lines += ["## Sources", ""]
         for src in run_metadata["sources"]:
-            lines.append(f"- {src}")
+            lines.append(f"- {_md_safe(src)}")
         lines.append("")
 
     by_bucket: dict[str, list[EnrichedCve]] = {b: [] for b in BUCKET_ORDER}
@@ -703,7 +854,9 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
             lines.append("")
             lines.append(f"**Action:** {rec.suggested_action}")
             lines.append("")
-            lines.append(f"- **CVSS:** {rec.cvss_score or 'N/A'} ({rec.cvss_severity or 'N/A'})")
+            cvss_display = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+            severity_display = rec.cvss_severity or "N/A"
+            lines.append(f"- **CVSS:** {cvss_display} ({severity_display})")
             if rec.epss_score is not None and rec.epss_percentile is not None:
                 lines.append(f"- **EPSS:** {rec.epss_score:.4f} ({rec.epss_percentile:.4f} pct)")
             elif rec.epss_score is not None:
@@ -712,7 +865,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
                 lines.append("- **EPSS:** N/A")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
-            lines.append(f"- **Source:** {rec.source}")
+            lines.append(f"- **Source:** {_md_safe(rec.source)}")
             lines.append("")
 
     version = run_metadata.get("version", "0.1")
@@ -803,12 +956,187 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Cross-field validation that argparse can't express natively."""
-    if args.date_mode == "epss" and args.start != args.end:
-        parser.error("--date-mode epss requires --start and --end to be the same date.")
+    if args.date_mode == "epss":
+        if args.start is None or args.end is None:
+            parser.error(
+                "--date-mode epss requires both --start and --end (set to the same date "
+                "for the EPSS snapshot you want)."
+            )
+        if args.start != args.end:
+            parser.error("--date-mode epss requires --start and --end to be the same date.")
+
+
+def _run_wizard() -> list[str]:
+    """Interactively collect every CLI flag and return an argv list.
+
+    Activated when ramen_cve is invoked with no arguments. Uses questionary
+    for menus, text prompts, and confirmations. Returns an argv list shaped
+    exactly like what the user could have typed, then main() re-parses it
+    so all the normal argparse validation still applies.
+    """
+    import questionary
+
+    print("Ramen CVE — interactive wizard\n", file=sys.stderr)
+
+    mode = questionary.select(
+        "What would you like to triage?",
+        choices=[
+            questionary.Choice("OPML feed list (a file of RSS/Atom feeds)", value="opml"),
+            questionary.Choice("A single URL (article, blog post, advisory)", value="url"),
+            questionary.Choice("A list of CVE IDs", value="cve"),
+        ],
+    ).unsafe_ask()
+
+    argv: list[str] = [mode]
+
+    if mode == "opml":
+        path = questionary.path(
+            "Path to your OPML file:",
+            default="examples/sample.opml",
+            validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+        ).unsafe_ask()
+        argv.append(str(Path(path).expanduser()))
+    elif mode == "url":
+        url = questionary.text(
+            "URL to scan:",
+            validate=lambda s: (
+                True if s.startswith(("http://", "https://")) else "Must start with http:// or https://"
+            ),
+        ).unsafe_ask()
+        argv.append(url)
+    else:  # cve
+        from_file = questionary.confirm(
+            "Read CVE IDs from a text file? (No = type them in)", default=False
+        ).unsafe_ask()
+        if from_file:
+            file_path = questionary.path(
+                "Path to CVE list file:",
+                validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+            ).unsafe_ask()
+            argv.extend(["--from-file", str(Path(file_path).expanduser())])
+        else:
+            cves_raw = questionary.text(
+                "CVE IDs (space- or comma-separated):",
+                validate=lambda s: True if s.strip() else "Enter at least one CVE ID.",
+            ).unsafe_ask()
+            for token in re.split(r"[,\s]+", cves_raw.strip()):
+                if token:
+                    argv.append(token)
+
+    date_mode = questionary.select(
+        "Which date should the start/end window filter on?",
+        choices=[
+            questionary.Choice("feed — when the feed item was published", value="feed"),
+            questionary.Choice("disclosure — when NVD published the CVE", value="disclosure"),
+            questionary.Choice(
+                "epss — single-day EPSS snapshot (start must equal end)", value="epss"
+            ),
+        ],
+        default="feed",
+    ).unsafe_ask()
+    argv.extend(["--date-mode", date_mode])
+
+    apply_window = questionary.confirm(
+        "Restrict to a date window?", default=False
+    ).unsafe_ask()
+    if apply_window or date_mode == "epss":
+        if date_mode == "epss":
+            single = questionary.text(
+                "EPSS snapshot date (YYYY-MM-DD):",
+                validate=_wizard_validate_date,
+            ).unsafe_ask()
+            argv.extend(["--start", single, "--end", single])
+        else:
+            start = questionary.text(
+                "Start date (YYYY-MM-DD), blank to skip:",
+                validate=lambda s: _wizard_validate_date(s) if s else True,
+            ).unsafe_ask()
+            end = questionary.text(
+                "End date (YYYY-MM-DD), blank to skip:",
+                validate=lambda s: _wizard_validate_date(s) if s else True,
+            ).unsafe_ask()
+            if start:
+                argv.extend(["--start", start])
+            if end:
+                argv.extend(["--end", end])
+
+    cvss = questionary.text(
+        f"CVSS threshold (0.0-10.0) [{DEFAULT_CVSS_THRESHOLD}]:",
+        default=str(DEFAULT_CVSS_THRESHOLD),
+        validate=lambda s: _wizard_validate_float(s, 0.0, 10.0),
+    ).unsafe_ask()
+    argv.extend(["--cvss-threshold", cvss])
+
+    epss = questionary.text(
+        f"EPSS threshold (0.0-1.0) [{DEFAULT_EPSS_THRESHOLD}]:",
+        default=str(DEFAULT_EPSS_THRESHOLD),
+        validate=lambda s: _wizard_validate_float(s, 0.0, 1.0),
+    ).unsafe_ask()
+    argv.extend(["--epss-threshold", epss])
+
+    out_dir = questionary.path(
+        "Output directory:",
+        default=".",
+        only_directories=True,
+    ).unsafe_ask()
+    argv.extend(["--out-dir", str(Path(out_dir).expanduser())])
+
+    fmt = questionary.select(
+        "Output format:",
+        choices=["both", "csv", "md"],
+        default="both",
+    ).unsafe_ask()
+    argv.extend(["--format", fmt])
+
+    if questionary.confirm("Skip the local SQLite cache?", default=False).unsafe_ask():
+        argv.append("--no-cache")
+
+    verbosity = questionary.select(
+        "Log verbosity:",
+        choices=[
+            questionary.Choice("normal (INFO)", value="normal"),
+            questionary.Choice("quiet (WARNING)", value="quiet"),
+            questionary.Choice("verbose (DEBUG)", value="verbose"),
+        ],
+        default="normal",
+    ).unsafe_ask()
+    if verbosity == "quiet":
+        argv.append("--quiet")
+    elif verbosity == "verbose":
+        argv.append("--verbose")
+
+    return argv
+
+
+def _wizard_validate_date(value: str) -> bool | str:
+    """Questionary validator for ISO dates."""
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return "Expected YYYY-MM-DD."
+
+
+def _wizard_validate_float(value: str, lo: float, hi: float) -> bool | str:
+    """Questionary validator for floats inside a range."""
+    try:
+        f = float(value)
+    except ValueError:
+        return "Enter a number."
+    if not lo <= f <= hi:
+        return f"Must be between {lo} and {hi}."
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns exit code."""
+    if argv is None and len(sys.argv) <= 1:
+        try:
+            argv = _run_wizard()
+        except KeyboardInterrupt:
+            print("\nCancelled.", file=sys.stderr)
+            return 130
+
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args)
@@ -823,6 +1151,10 @@ def main(argv: list[str] | None = None) -> int:
 
     load_dotenv()
     api_key = os.getenv("NVD_API_KEY") or None
+    if api_key is None:
+        prompted = _prompt_for_api_key(reason="missing")
+        if prompted:
+            api_key = prompted
 
     if args.subcommand == "opml":
         return _run_opml(args, cache, api_key)
@@ -859,10 +1191,14 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     sources: list[str] = []
 
     for entry in entries:
-        _log.info("Fetching feed: %s", entry.url)
+        safe_url = _safe_url_for_log(entry.url)
+        _log.info("Fetching feed: %s", safe_url)
         sources.append(entry.title or entry.url)
         feed = feedparser.parse(entry.url)
-        for item in feed.entries:
+        if getattr(feed, "bozo", 0):
+            reason = getattr(feed, "bozo_exception", "unknown parse error")
+            _log.warning("Feed %s parsed with errors: %s", safe_url, reason)
+        for item in feed.entries or []:
             pub = item.get("published_parsed") or item.get("updated_parsed")
             item_date = date(*pub[:3]) if pub else date.today()
             text = " ".join(
@@ -874,13 +1210,10 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             )
             records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
 
+    enriched = enrich_cves(records, cache, api_key)
+    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = enrich_cves(records, cache, api_key)
-        enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
         enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
-    else:
-        enriched = enrich_cves(records, cache, api_key)
-        enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
 
     metadata = {
         "version": VERSION,
@@ -898,30 +1231,37 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
 def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Execute the url subcommand."""
-    _log.info("Fetching URL: %s", args.url)
+    safe_url = _safe_url_for_log(args.url)
+    _log.info("Fetching URL: %s", safe_url)
     try:
         resp = requests.get(args.url, headers={"User-Agent": USER_AGENT}, timeout=30)
         resp.raise_for_status()
     except Exception as exc:
-        _log.error("Failed to fetch URL %s: %s", args.url, exc)
+        _log.error("Failed to fetch URL %s: %s", safe_url, exc)
         return 1
 
     text = resp.text
-    # Try to extract publication date
-    import re as _re
-
     pub_date = date.today()
     for pattern in [
         r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})',
         r'<time[^>]+datetime=["\'](\d{4}-\d{2}-\d{2})',
         r'<meta[^>]+property=["\']og:published_time["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})',
     ]:
-        m = _re.search(pattern, text)
+        m = re.search(pattern, text)
         if m:
-            pub_date = date.fromisoformat(m.group(1))
-            break
+            try:
+                pub_date = date.fromisoformat(m.group(1))
+                break
+            except ValueError:
+                _log.warning(
+                    "Found publication-date-like string %r in %s but could not parse it; "
+                    "trying next pattern.",
+                    m.group(1),
+                    safe_url,
+                )
+                continue
     else:
-        _log.warning("Could not find publication date in %s; using today.", args.url)
+        _log.warning("Could not find publication date in %s; using today.", safe_url)
 
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
@@ -948,7 +1288,15 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     cve_ids: list[str] = list(args.cves or [])
 
     if args.from_file:
-        for line in args.from_file.read_text().splitlines():
+        try:
+            file_text = args.from_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _log.error("--from-file path does not exist: %s", args.from_file)
+            return 1
+        except OSError as exc:
+            _log.error("Could not read --from-file %s: %s", args.from_file, exc)
+            return 1
+        for line in file_text.splitlines():
             line = line.strip()
             if CVE_REGEX.fullmatch(line.upper()):
                 cve_ids.append(line.upper())

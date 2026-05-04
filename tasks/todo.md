@@ -43,6 +43,9 @@ The v1 is done when all of the following are true:
 - Slice 7.x: all three _run_* subcommands implemented in one pass alongside the argparse skeleton; at 989 lines, past the 500-line soft ceiling — user should decide whether to refactor to package before adding more.
 - Slice 8.4: live integration confirmed — OPML produced 15 CVEs from 4 feeds, CVE mode correctly KEV-overrode Log4Shell, URL mode extracted CVE-2022-42475 from a CISA advisory. No secrets leaked. gitignore expanded to cover TLS keys, cloud credentials, SSH keys, and common secret file patterns.
 - gitignore pattern ramen-cve-*.csv/md only matches timestamped outputs; examples/sample-output.csv and examples/sample-report.md are not ignored.
+- Audit pass: fixed Markdown CVSS-zero falsy bug (`{rec.cvss_score or 'N/A'}` → explicit None check + `:.1f`); removed unused `_fmt` helper; moved `_log` next to constants; deduplicated `_run_opml` enrich/bucket calls. Added regression test `test_write_markdown_cvss_zero_is_not_falsy`.
+- Open follow-up: CLAUDE.md DoD asks for byte-for-byte reproducible bundled samples via frozen mock-API fixture. Current `examples/sample-output.csv` and `sample-report.md` are from a live run with live timestamps; not byte-reproducible. Would need a `RAMEN_FROZEN_NOW`-style env override or post-processing script. Deferred — slice 8.4 (todo.md) acceptance only required "save one of the runs."
+- Dependency exception (post-v1, user-approved): added `questionary` (4th runtime dep) to power the no-args interactive wizard. CLAUDE.md sets a 3-dep ceiling; user explicitly approved the addition for usability when running the tool live. Stdlib `input()` was the alternative but produces clunky menus and no validation. `questionary` is widely used, MIT-licensed, and only loads when the wizard runs (imported lazily inside `_run_wizard`).
 
 ---
 
