@@ -794,8 +794,177 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--date-mode epss requires --start and --end to be the same date.")
 
 
+def _run_wizard() -> list[str]:
+    """Interactively collect every CLI flag and return an argv list.
+
+    Activated when ramen_cve is invoked with no arguments. Uses questionary
+    for menus, text prompts, and confirmations. Returns an argv list shaped
+    exactly like what the user could have typed, then main() re-parses it
+    so all the normal argparse validation still applies.
+    """
+    import questionary
+
+    print("Ramen CVE — interactive wizard\n", file=sys.stderr)
+
+    mode = questionary.select(
+        "What would you like to triage?",
+        choices=[
+            questionary.Choice("OPML feed list (a file of RSS/Atom feeds)", value="opml"),
+            questionary.Choice("A single URL (article, blog post, advisory)", value="url"),
+            questionary.Choice("A list of CVE IDs", value="cve"),
+        ],
+    ).unsafe_ask()
+
+    argv: list[str] = [mode]
+
+    if mode == "opml":
+        path = questionary.path(
+            "Path to your OPML file:",
+            default="examples/sample.opml",
+            validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+        ).unsafe_ask()
+        argv.append(str(Path(path).expanduser()))
+    elif mode == "url":
+        url = questionary.text(
+            "URL to scan:",
+            validate=lambda s: (
+                True if s.startswith(("http://", "https://")) else "Must start with http:// or https://"
+            ),
+        ).unsafe_ask()
+        argv.append(url)
+    else:  # cve
+        from_file = questionary.confirm(
+            "Read CVE IDs from a text file? (No = type them in)", default=False
+        ).unsafe_ask()
+        if from_file:
+            file_path = questionary.path(
+                "Path to CVE list file:",
+                validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+            ).unsafe_ask()
+            argv.extend(["--from-file", str(Path(file_path).expanduser())])
+        else:
+            cves_raw = questionary.text(
+                "CVE IDs (space- or comma-separated):",
+                validate=lambda s: True if s.strip() else "Enter at least one CVE ID.",
+            ).unsafe_ask()
+            for token in re.split(r"[,\s]+", cves_raw.strip()):
+                if token:
+                    argv.append(token)
+
+    date_mode = questionary.select(
+        "Which date should the start/end window filter on?",
+        choices=[
+            questionary.Choice("feed — when the feed item was published", value="feed"),
+            questionary.Choice("disclosure — when NVD published the CVE", value="disclosure"),
+            questionary.Choice(
+                "epss — single-day EPSS snapshot (start must equal end)", value="epss"
+            ),
+        ],
+        default="feed",
+    ).unsafe_ask()
+    argv.extend(["--date-mode", date_mode])
+
+    apply_window = questionary.confirm(
+        "Restrict to a date window?", default=False
+    ).unsafe_ask()
+    if apply_window or date_mode == "epss":
+        if date_mode == "epss":
+            single = questionary.text(
+                "EPSS snapshot date (YYYY-MM-DD):",
+                validate=_wizard_validate_date,
+            ).unsafe_ask()
+            argv.extend(["--start", single, "--end", single])
+        else:
+            start = questionary.text(
+                "Start date (YYYY-MM-DD), blank to skip:",
+                validate=lambda s: _wizard_validate_date(s) if s else True,
+            ).unsafe_ask()
+            end = questionary.text(
+                "End date (YYYY-MM-DD), blank to skip:",
+                validate=lambda s: _wizard_validate_date(s) if s else True,
+            ).unsafe_ask()
+            if start:
+                argv.extend(["--start", start])
+            if end:
+                argv.extend(["--end", end])
+
+    cvss = questionary.text(
+        f"CVSS threshold (0.0-10.0) [{DEFAULT_CVSS_THRESHOLD}]:",
+        default=str(DEFAULT_CVSS_THRESHOLD),
+        validate=lambda s: _wizard_validate_float(s, 0.0, 10.0),
+    ).unsafe_ask()
+    argv.extend(["--cvss-threshold", cvss])
+
+    epss = questionary.text(
+        f"EPSS threshold (0.0-1.0) [{DEFAULT_EPSS_THRESHOLD}]:",
+        default=str(DEFAULT_EPSS_THRESHOLD),
+        validate=lambda s: _wizard_validate_float(s, 0.0, 1.0),
+    ).unsafe_ask()
+    argv.extend(["--epss-threshold", epss])
+
+    out_dir = questionary.path(
+        "Output directory:",
+        default=".",
+        only_directories=True,
+    ).unsafe_ask()
+    argv.extend(["--out-dir", str(Path(out_dir).expanduser())])
+
+    fmt = questionary.select(
+        "Output format:",
+        choices=["both", "csv", "md"],
+        default="both",
+    ).unsafe_ask()
+    argv.extend(["--format", fmt])
+
+    if questionary.confirm("Skip the local SQLite cache?", default=False).unsafe_ask():
+        argv.append("--no-cache")
+
+    verbosity = questionary.select(
+        "Log verbosity:",
+        choices=[
+            questionary.Choice("normal (INFO)", value="normal"),
+            questionary.Choice("quiet (WARNING)", value="quiet"),
+            questionary.Choice("verbose (DEBUG)", value="verbose"),
+        ],
+        default="normal",
+    ).unsafe_ask()
+    if verbosity == "quiet":
+        argv.append("--quiet")
+    elif verbosity == "verbose":
+        argv.append("--verbose")
+
+    return argv
+
+
+def _wizard_validate_date(value: str) -> bool | str:
+    """Questionary validator for ISO dates."""
+    try:
+        date.fromisoformat(value)
+        return True
+    except ValueError:
+        return "Expected YYYY-MM-DD."
+
+
+def _wizard_validate_float(value: str, lo: float, hi: float) -> bool | str:
+    """Questionary validator for floats inside a range."""
+    try:
+        f = float(value)
+    except ValueError:
+        return "Enter a number."
+    if not lo <= f <= hi:
+        return f"Must be between {lo} and {hi}."
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns exit code."""
+    if argv is None and len(sys.argv) <= 1:
+        try:
+            argv = _run_wizard()
+        except KeyboardInterrupt:
+            print("\nCancelled.", file=sys.stderr)
+            return 130
+
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args)
