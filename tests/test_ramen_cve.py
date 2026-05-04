@@ -382,6 +382,42 @@ def test_fetch_nvd_v30_fallback():
     assert result["kev_listed"] is False
 
 
+def test_fetch_nvd_kev_null_value_is_false():
+    """cisaExploitAdd present but null must not set kev_listed=True (regression M2)."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_nvd
+
+    cache = _mem_cache()
+    # Build a minimal NVD response where cisaExploitAdd is present but null.
+    payload = {
+        "resultsPerPage": 1,
+        "totalResults": 1,
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2021-44228",
+                    "cisaExploitAdd": None,
+                    "metrics": {},
+                    "weaknesses": [],
+                    "published": "2021-12-10T00:00:00.000",
+                }
+            }
+        ],
+    }
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+    with (
+        patch("ramen_cve.requests.get", return_value=resp),
+        patch("ramen_cve.time.sleep"),
+    ):
+        result = fetch_nvd("CVE-2021-44228", cache, api_key=None)
+
+    assert result["kev_listed"] is False, "null cisaExploitAdd must not be treated as KEV"
+
+
 def test_fetch_nvd_no_cvss():
     """Old CVE with no CVSS metrics returns empty score fields, no crash."""
     from ramen_cve import fetch_nvd

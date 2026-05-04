@@ -505,7 +505,7 @@ def _parse_nvd_response(data: dict) -> dict:
             cvss_version = version
             break
 
-    kev_listed = "cisaExploitAdd" in cve_data
+    kev_listed = bool(cve_data.get("cisaExploitAdd"))
 
     cwe: list[str] = []
     for weakness in cve_data.get("weaknesses", []):
