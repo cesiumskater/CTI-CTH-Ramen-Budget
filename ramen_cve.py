@@ -271,6 +271,24 @@ def _redact_key(url: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=safe_query))
 
 
+def _safe_url_for_log(url: str) -> str:
+    """Strip query string and fragment from a user-supplied URL before logging it.
+
+    Arbitrary URLs may carry tokens, session IDs, or other secrets in the
+    query string. We can't tell which params are sensitive, so the safest
+    thing to log is scheme + host + path only.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return "<unparseable url>"
+    sanitized = parsed._replace(query="", fragment="")
+    rendered = urllib.parse.urlunparse(sanitized)
+    if parsed.query or parsed.fragment:
+        rendered += " (query/fragment redacted)"
+    return rendered
+
+
 def fetch_nvd(cve_id: str, cache: Cache, api_key: str | None) -> dict:
     """Fetch NVD CVSS data for a single CVE, using the cache when possible.
 
@@ -1038,12 +1056,13 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     sources: list[str] = []
 
     for entry in entries:
-        _log.info("Fetching feed: %s", entry.url)
+        safe_url = _safe_url_for_log(entry.url)
+        _log.info("Fetching feed: %s", safe_url)
         sources.append(entry.title or entry.url)
         feed = feedparser.parse(entry.url)
         if getattr(feed, "bozo", 0):
             reason = getattr(feed, "bozo_exception", "unknown parse error")
-            _log.warning("Feed %s parsed with errors: %s", entry.url, reason)
+            _log.warning("Feed %s parsed with errors: %s", safe_url, reason)
         for item in feed.entries or []:
             pub = item.get("published_parsed") or item.get("updated_parsed")
             item_date = date(*pub[:3]) if pub else date.today()
@@ -1077,12 +1096,13 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
 def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Execute the url subcommand."""
-    _log.info("Fetching URL: %s", args.url)
+    safe_url = _safe_url_for_log(args.url)
+    _log.info("Fetching URL: %s", safe_url)
     try:
         resp = requests.get(args.url, headers={"User-Agent": USER_AGENT}, timeout=30)
         resp.raise_for_status()
     except Exception as exc:
-        _log.error("Failed to fetch URL %s: %s", args.url, exc)
+        _log.error("Failed to fetch URL %s: %s", safe_url, exc)
         return 1
 
     text = resp.text
@@ -1105,11 +1125,11 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
                     "Found publication-date-like string %r in %s but could not parse it; "
                     "trying next pattern.",
                     m.group(1),
-                    args.url,
+                    safe_url,
                 )
                 continue
     else:
-        _log.warning("Could not find publication date in %s; using today.", args.url)
+        _log.warning("Could not find publication date in %s; using today.", safe_url)
 
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)

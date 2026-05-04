@@ -518,6 +518,22 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_safe_url_for_log_strips_query_and_fragment():
+    """Query strings and fragments must be stripped before logging (regression for M3)."""
+    from ramen_cve import _safe_url_for_log
+
+    out = _safe_url_for_log("https://example.com/path?token=secret&id=1#trackingid")
+    assert "secret" not in out
+    assert "token" not in out
+    assert "trackingid" not in out
+    assert out.startswith("https://example.com/path")
+    assert "redacted" in out
+
+    # No query/fragment → unchanged, no redaction note
+    plain = _safe_url_for_log("https://example.com/path")
+    assert plain == "https://example.com/path"
+
+
 def test_write_markdown_sanitizes_newlines_in_source(tmp_path):
     """A source string containing newlines must not break the bullet layout (regression for M2)."""
     from ramen_cve import EnrichedCve, write_markdown
