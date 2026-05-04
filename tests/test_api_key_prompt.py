@@ -53,6 +53,32 @@ def test_save_api_key_appends_when_missing(tmp_path):
     assert text.endswith("NVD_API_KEY=3c488890-269e-4cf6-a21e-e7618cbf5533\n")
 
 
+def test_save_api_key_rejects_newline_injection(tmp_path):
+    """A key containing \\n must be refused so it can't inject extra .env lines (C2)."""
+    import pytest
+
+    import ramen_cve
+
+    env = tmp_path / ".env"
+    malicious = "abc\nNVD_API_KEY=attacker-controlled\nMALICIOUS_VAR=evil"
+    with pytest.raises(ValueError, match="control characters"):
+        ramen_cve._save_api_key_to_env(malicious, env_path=env)
+    assert not env.exists(), ".env must not be written when the key is rejected"
+
+
+def test_save_api_key_rejects_carriage_return_and_nul(tmp_path):
+    """\\r and NUL must also be refused (C2)."""
+    import pytest
+
+    import ramen_cve
+
+    env = tmp_path / ".env"
+    for bad in ("abc\rmore", "abc\x00more"):
+        with pytest.raises(ValueError):
+            ramen_cve._save_api_key_to_env(bad, env_path=env)
+    assert not env.exists()
+
+
 def test_save_api_key_handles_no_trailing_newline(tmp_path):
     """If existing .env doesn't end with newline, the appended line still parses cleanly."""
     import ramen_cve

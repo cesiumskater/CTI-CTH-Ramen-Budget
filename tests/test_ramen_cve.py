@@ -242,6 +242,24 @@ def test_cache_nvd_stale_returns_none():
     assert c.get_nvd("CVE-2021-44228") is None
 
 
+def test_cache_corrupt_timestamp_treated_as_stale(caplog):
+    """A row with a malformed fetched_at must not crash get_nvd (regression for H1)."""
+    import logging
+
+    c = _mem_cache()
+    c._conn.execute(
+        "INSERT INTO nvd_cache VALUES (?, ?, ?)",
+        ("CVE-2021-44228", '{"x": 1}', "NOT-A-TIMESTAMP"),
+    )
+    c._conn.commit()
+
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        result = c.get_nvd("CVE-2021-44228")
+
+    assert result is None
+    assert any("unparseable fetched_at" in rec.message for rec in caplog.records)
+
+
 def test_cache_epss_round_trip():
     """set_epss followed by get_epss returns the same payload."""
     c = _mem_cache()
@@ -548,6 +566,28 @@ def test_fetch_nvd_does_not_sleep_on_first_call():
     # First call: elapsed since the (uninitialized) last_call is huge,
     # so the if-guard short-circuits and no sleep should have fired.
     assert sleep_calls == [], f"first-call slept unexpectedly: {sleep_calls}"
+
+
+def test_unique_output_path_disambiguates_collisions(tmp_path):
+    """Two _output() calls in the same wall-clock second must not overwrite each other (C1)."""
+    from ramen_cve import _unique_output_path
+
+    ts = "20260101T120000123456"
+    p1 = _unique_output_path(tmp_path, ts, "csv")
+    assert p1.name == f"ramen-cve-{ts}.csv"
+    p1.write_text("first")  # simulate the first run claiming the name
+
+    p2 = _unique_output_path(tmp_path, ts, "csv")
+    assert p2 != p1
+    assert p2.name == f"ramen-cve-{ts}-1.csv"
+    p2.write_text("second")
+
+    p3 = _unique_output_path(tmp_path, ts, "csv")
+    assert p3.name == f"ramen-cve-{ts}-2.csv"
+
+    # First file is untouched
+    assert p1.read_text() == "first"
+    assert p2.read_text() == "second"
 
 
 def test_safe_url_for_log_strips_query_and_fragment():
