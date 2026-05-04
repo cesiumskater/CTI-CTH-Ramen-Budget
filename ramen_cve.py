@@ -933,7 +933,7 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the flags shared by all three subcommands."""
     parser.add_argument("--start", type=_parse_iso_date, metavar="YYYY-MM-DD")
     parser.add_argument("--end", type=_parse_iso_date, metavar="YYYY-MM-DD")
-    parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default="feed")
+    parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default=None)
     parser.add_argument("--cvss-threshold", type=float, default=DEFAULT_CVSS_THRESHOLD)
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
     parser.add_argument("--out-dir", type=Path, default=Path("."))
@@ -1259,10 +1259,11 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             )
             records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
 
+    date_mode = args.date_mode or "feed"
     enriched = enrich_cves(records, cache, api_key)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
+        enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
     metadata = {
         "version": VERSION,
@@ -1270,7 +1271,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "sources": sources,
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
-        "date_mode": args.date_mode,
+        "date_mode": date_mode,
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
@@ -1312,11 +1313,12 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     else:
         _log.warning("Could not find publication date in %s; using today.", safe_url)
 
+    date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
+        enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
     metadata = {
         "version": VERSION,
@@ -1324,7 +1326,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "sources": [args.url],
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
-        "date_mode": args.date_mode,
+        "date_mode": date_mode,
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
@@ -1356,10 +1358,9 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         _log.error("No valid CVE IDs provided.")
         return 1
 
-    date_mode = args.date_mode
-    if date_mode == "feed":
-        _log.info("Switching date-mode from 'feed' to 'disclosure' for manual CVE input.")
-        date_mode = "disclosure"
+    # Default for manual CVE input is "disclosure" because there is no feed date.
+    # Honor an explicit --date-mode from the user without overriding it.
+    date_mode = args.date_mode or "disclosure"
 
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]

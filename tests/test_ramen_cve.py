@@ -1209,6 +1209,23 @@ def test_cli_cve_subcommand_parses():
     assert "CVE-2021-44228" in args.cves
 
 
+def test_cli_cve_date_mode_defaults_to_disclosure():
+    """cve subcommand argparse default is None (resolved to disclosure at runtime) — H3."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["cve", "CVE-2021-44228"])
+    assert args.date_mode is None, "sentinel must be None so _run_cve defaults to disclosure"
+
+
+def test_cli_cve_date_mode_feed_is_honored():
+    """Explicit --date-mode feed on the cve subcommand must not be overridden (regression H3)."""
+    from ramen_cve import build_parser
+
+    # Argparse must preserve the user's explicit choice.
+    args = build_parser().parse_args(["cve", "CVE-2021-44228", "--date-mode", "feed"])
+    assert args.date_mode == "feed"
+
+
 def test_cli_invalid_date_rejected():
     """A bad --start date format is rejected before any work runs."""
     import subprocess
