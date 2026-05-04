@@ -518,6 +518,38 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_fetch_nvd_does_not_sleep_on_first_call():
+    """The first NVD fetch in a fresh process should not pay the full per-call delay (L1)."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    # Reset the module-level last-call timestamp so the test is deterministic
+    if hasattr(ramen_cve.fetch_nvd, "_last_call"):
+        del ramen_cve.fetch_nvd._last_call
+
+    cache = _mem_cache()
+    fixture = _load_fixture("nvd_log4shell_v31.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = fixture
+        return resp
+
+    sleep_calls: list[float] = []
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep", side_effect=lambda s: sleep_calls.append(s)),
+    ):
+        ramen_cve.fetch_nvd("CVE-2021-44228", cache, api_key=None)
+
+    # First call: elapsed since the (uninitialized) last_call is huge,
+    # so the if-guard short-circuits and no sleep should have fired.
+    assert sleep_calls == [], f"first-call slept unexpectedly: {sleep_calls}"
+
+
 def test_safe_url_for_log_strips_query_and_fragment():
     """Query strings and fragments must be stripped before logging (regression for M3)."""
     from ramen_cve import _safe_url_for_log

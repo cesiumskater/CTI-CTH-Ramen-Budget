@@ -295,13 +295,21 @@ def fetch_nvd(cve_id: str, cache: Cache, api_key: str | None) -> dict:
     Returns a normalized dict with keys: cvss_score, cvss_severity,
     cvss_vector, cvss_version, kev_listed, cwe, nvd_published, nvd_status.
     Never raises — on HTTP error returns a record with nvd_status='error'.
+
+    Rate limit: sleeps just enough to keep us under the NVD per-window
+    limit, but only if a previous call was made recently. The first call
+    in a run does not pay the full delay.
     """
     cached = cache.get_nvd(cve_id)
     if cached is not None:
         return cached
 
     delay = 0.6 if api_key else 6.0
-    time.sleep(delay)
+    last = getattr(fetch_nvd, "_last_call", 0.0)
+    elapsed = time.monotonic() - last
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
+    fetch_nvd._last_call = time.monotonic()
 
     headers = {"User-Agent": USER_AGENT}
     params: dict[str, str] = {"cveId": cve_id}
@@ -515,6 +523,11 @@ def bucket_and_suggest(
     epss_thr: float = DEFAULT_EPSS_THRESHOLD,
 ) -> list[EnrichedCve]:
     """Assign a bucket and suggested action to each enriched CVE.
+
+    NOTE: this function MUTATES the records in `enriched` in place
+    (setting `rec.bucket` and `rec.suggested_action`) and returns the
+    same list for chaining. Callers should not rely on the input being
+    untouched.
 
     Precedence:
       1. kev_listed=True → kev_override (always wins)
@@ -1106,16 +1119,13 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         return 1
 
     text = resp.text
-    # Try to extract publication date
-    import re as _re
-
     pub_date = date.today()
     for pattern in [
         r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})',
         r'<time[^>]+datetime=["\'](\d{4}-\d{2}-\d{2})',
         r'<meta[^>]+property=["\']og:published_time["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})',
     ]:
-        m = _re.search(pattern, text)
+        m = re.search(pattern, text)
         if m:
             try:
                 pub_date = date.fromisoformat(m.group(1))
