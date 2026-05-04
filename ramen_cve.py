@@ -983,6 +983,8 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Cross-field validation that argparse can't express natively."""
+    if args.start is not None and args.end is not None and args.start > args.end:
+        parser.error(f"--start ({args.start}) must not be later than --end ({args.end}).")
     if args.date_mode == "epss":
         if args.start is None or args.end is None:
             parser.error(

@@ -1239,6 +1239,22 @@ def test_cli_invalid_date_rejected():
     assert "Invalid date" in result.stderr or "error" in result.stderr.lower()
 
 
+def test_cli_start_after_end_rejected():
+    """--start later than --end must be rejected with a non-zero exit code (regression M1)."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            ".venv/bin/python", "ramen_cve.py", "opml", "x.opml",
+            "--start", "2024-12-31", "--end", "2024-01-01",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "start" in result.stderr.lower() or "end" in result.stderr.lower()
+
+
 def test_cli_invalid_cve_id_rejected():
     """A CVE ID that doesn't match the regex is rejected before any work runs."""
     import subprocess
