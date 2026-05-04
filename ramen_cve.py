@@ -1165,19 +1165,41 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
+    """Return a path that does not yet exist by appending -N if needed.
+
+    Two runs that land in the same wall-clock second must not silently
+    overwrite each other. We probe -1, -2, ... and return the first
+    free name. Bounded at 1000 attempts so we don't loop forever in a
+    pathological setup.
+    """
+    base = out_dir / f"ramen-cve-{ts}.{suffix}"
+    if not base.exists():
+        return base
+    for i in range(1, 1000):
+        candidate = out_dir / f"ramen-cve-{ts}-{i}.{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
+
+
 def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dict) -> None:
     """Write CSV and/or Markdown output based on --format flag."""
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    # Microsecond resolution makes single-process collisions essentially
+    # impossible; the -N suffix loop in _unique_output_path covers
+    # cross-process collisions and any clock that lacks sub-second
+    # resolution.
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.format in ("csv", "both"):
-        csv_path = out_dir / f"ramen-cve-{ts}.csv"
+        csv_path = _unique_output_path(out_dir, ts, "csv")
         write_csv(enriched, csv_path)
         print(str(csv_path))
 
     if args.format in ("md", "both"):
-        md_path = out_dir / f"ramen-cve-{ts}.md"
+        md_path = _unique_output_path(out_dir, ts, "md")
         write_markdown(enriched, md_path, metadata)
         print(str(md_path))
 

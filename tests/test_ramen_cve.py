@@ -550,6 +550,28 @@ def test_fetch_nvd_does_not_sleep_on_first_call():
     assert sleep_calls == [], f"first-call slept unexpectedly: {sleep_calls}"
 
 
+def test_unique_output_path_disambiguates_collisions(tmp_path):
+    """Two _output() calls in the same wall-clock second must not overwrite each other (C1)."""
+    from ramen_cve import _unique_output_path
+
+    ts = "20260101T120000123456"
+    p1 = _unique_output_path(tmp_path, ts, "csv")
+    assert p1.name == f"ramen-cve-{ts}.csv"
+    p1.write_text("first")  # simulate the first run claiming the name
+
+    p2 = _unique_output_path(tmp_path, ts, "csv")
+    assert p2 != p1
+    assert p2.name == f"ramen-cve-{ts}-1.csv"
+    p2.write_text("second")
+
+    p3 = _unique_output_path(tmp_path, ts, "csv")
+    assert p3.name == f"ramen-cve-{ts}-2.csv"
+
+    # First file is untouched
+    assert p1.read_text() == "first"
+    assert p2.read_text() == "second"
+
+
 def test_safe_url_for_log_strips_query_and_fragment():
     """Query strings and fragments must be stripped before logging (regression for M3)."""
     from ramen_cve import _safe_url_for_log
