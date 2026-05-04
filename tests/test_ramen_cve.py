@@ -260,6 +260,18 @@ def test_cache_corrupt_timestamp_treated_as_stale(caplog):
     assert any("unparseable fetched_at" in rec.message for rec in caplog.records)
 
 
+def test_utcnow_returns_naive_utc():
+    """_utcnow() must return a naive datetime that is close to real UTC (regression for H2)."""
+    from datetime import timezone
+
+    import ramen_cve
+
+    result = ramen_cve._utcnow()
+    assert result.tzinfo is None, "_utcnow() must return a naive datetime"
+    delta = abs((result - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds())
+    assert delta < 2, f"_utcnow() drifted {delta}s from UTC"
+
+
 def test_cache_epss_round_trip():
     """set_epss followed by get_epss returns the same payload."""
     c = _mem_cache()

@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -43,6 +43,18 @@ DEFAULT_CACHE_TTL_HOURS = 24
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
 _log = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time as a naive datetime.
+
+    datetime.utcnow() is deprecated in Python 3.12+. We use
+    datetime.now(timezone.utc).replace(tzinfo=None) so the rest of the
+    code can keep treating timestamps as naive UTC (they are written
+    to and read from SQLite as ISO-8601 strings without timezone, and
+    the cache TTL math compares two naive UTC datetimes).
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
@@ -118,7 +130,7 @@ class EnrichedCve:
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
 
-    enriched_at: datetime = field(default_factory=datetime.utcnow)
+    enriched_at: datetime = field(default_factory=lambda: _utcnow())
 
 
 class Cache:
@@ -163,7 +175,7 @@ class Cache:
         except (TypeError, ValueError):
             _log.warning("Cache row has unparseable fetched_at %r; treating as stale.", fetched_at)
             return False
-        return datetime.utcnow() - ts < self._ttl
+        return _utcnow() - ts < self._ttl
 
     def get_nvd(self, cve_id: str) -> dict | None:
         """Return cached NVD payload if present and within TTL, else None."""
@@ -178,7 +190,7 @@ class Cache:
         """Upsert an NVD payload into the cache."""
         self._conn.execute(
             "INSERT OR REPLACE INTO nvd_cache VALUES (?, ?, ?)",
-            (cve_id, json.dumps(payload), datetime.utcnow().isoformat()),
+            (cve_id, json.dumps(payload), _utcnow().isoformat()),
         )
         self._conn.commit()
 
@@ -196,13 +208,13 @@ class Cache:
         """Upsert an EPSS payload into the cache."""
         self._conn.execute(
             "INSERT OR REPLACE INTO epss_cache VALUES (?, ?, ?, ?)",
-            (cve_id, score_date, json.dumps(payload), datetime.utcnow().isoformat()),
+            (cve_id, score_date, json.dumps(payload), _utcnow().isoformat()),
         )
         self._conn.commit()
 
     def purge(self) -> None:
         """Delete entries older than the TTL from both tables."""
-        cutoff = (datetime.utcnow() - self._ttl).isoformat()
+        cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
@@ -817,7 +829,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
     cvss_threshold (float), epss_threshold (float).
     """
     lines: list[str] = []
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = len(enriched)
 
     lines += [
@@ -1204,7 +1216,7 @@ def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dic
     # impossible; the -N suffix loop in _unique_output_path covers
     # cross-process collisions and any clock that lacks sub-second
     # resolution.
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
