@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -43,6 +43,18 @@ DEFAULT_CACHE_TTL_HOURS = 24
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
 _log = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return current UTC time as a naive datetime.
+
+    datetime.utcnow() is deprecated in Python 3.12+. We use
+    datetime.now(timezone.utc).replace(tzinfo=None) so the rest of the
+    code can keep treating timestamps as naive UTC (they are written
+    to and read from SQLite as ISO-8601 strings without timezone, and
+    the cache TTL math compares two naive UTC datetimes).
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
@@ -118,7 +130,7 @@ class EnrichedCve:
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
 
-    enriched_at: datetime = field(default_factory=datetime.utcnow)
+    enriched_at: datetime = field(default_factory=lambda: _utcnow())
 
 
 class Cache:
@@ -163,7 +175,7 @@ class Cache:
         except (TypeError, ValueError):
             _log.warning("Cache row has unparseable fetched_at %r; treating as stale.", fetched_at)
             return False
-        return datetime.utcnow() - ts < self._ttl
+        return _utcnow() - ts < self._ttl
 
     def get_nvd(self, cve_id: str) -> dict | None:
         """Return cached NVD payload if present and within TTL, else None."""
@@ -178,7 +190,7 @@ class Cache:
         """Upsert an NVD payload into the cache."""
         self._conn.execute(
             "INSERT OR REPLACE INTO nvd_cache VALUES (?, ?, ?)",
-            (cve_id, json.dumps(payload), datetime.utcnow().isoformat()),
+            (cve_id, json.dumps(payload), _utcnow().isoformat()),
         )
         self._conn.commit()
 
@@ -196,13 +208,13 @@ class Cache:
         """Upsert an EPSS payload into the cache."""
         self._conn.execute(
             "INSERT OR REPLACE INTO epss_cache VALUES (?, ?, ?, ?)",
-            (cve_id, score_date, json.dumps(payload), datetime.utcnow().isoformat()),
+            (cve_id, score_date, json.dumps(payload), _utcnow().isoformat()),
         )
         self._conn.commit()
 
     def purge(self) -> None:
         """Delete entries older than the TTL from both tables."""
-        cutoff = (datetime.utcnow() - self._ttl).isoformat()
+        cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
@@ -493,7 +505,7 @@ def _parse_nvd_response(data: dict) -> dict:
             cvss_version = version
             break
 
-    kev_listed = "cisaExploitAdd" in cve_data
+    kev_listed = bool(cve_data.get("cisaExploitAdd"))
 
     cwe: list[str] = []
     for weakness in cve_data.get("weaknesses", []):
@@ -817,7 +829,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
     cvss_threshold (float), epss_threshold (float).
     """
     lines: list[str] = []
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = len(enriched)
 
     lines += [
@@ -921,7 +933,7 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the flags shared by all three subcommands."""
     parser.add_argument("--start", type=_parse_iso_date, metavar="YYYY-MM-DD")
     parser.add_argument("--end", type=_parse_iso_date, metavar="YYYY-MM-DD")
-    parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default="feed")
+    parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default=None)
     parser.add_argument("--cvss-threshold", type=float, default=DEFAULT_CVSS_THRESHOLD)
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
     parser.add_argument("--out-dir", type=Path, default=Path("."))
@@ -971,6 +983,8 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Cross-field validation that argparse can't express natively."""
+    if args.start is not None and args.end is not None and args.start > args.end:
+        parser.error(f"--start ({args.start}) must not be later than --end ({args.end}).")
     if args.date_mode == "epss":
         if args.start is None or args.end is None:
             parser.error(
@@ -1204,7 +1218,7 @@ def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dic
     # impossible; the -N suffix loop in _unique_output_path covers
     # cross-process collisions and any clock that lacks sub-second
     # resolution.
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+    ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1247,10 +1261,11 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             )
             records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
 
+    date_mode = args.date_mode or "feed"
     enriched = enrich_cves(records, cache, api_key)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
+        enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
     metadata = {
         "version": VERSION,
@@ -1258,7 +1273,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "sources": sources,
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
-        "date_mode": args.date_mode,
+        "date_mode": date_mode,
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
@@ -1300,11 +1315,12 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     else:
         _log.warning("Could not find publication date in %s; using today.", safe_url)
 
+    date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
-        enriched = filter_by_date(enriched, args.start, args.end, args.date_mode)
+        enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
     metadata = {
         "version": VERSION,
@@ -1312,7 +1328,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "sources": [args.url],
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
-        "date_mode": args.date_mode,
+        "date_mode": date_mode,
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
@@ -1344,10 +1360,9 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         _log.error("No valid CVE IDs provided.")
         return 1
 
-    date_mode = args.date_mode
-    if date_mode == "feed":
-        _log.info("Switching date-mode from 'feed' to 'disclosure' for manual CVE input.")
-        date_mode = "disclosure"
+    # Default for manual CVE input is "disclosure" because there is no feed date.
+    # Honor an explicit --date-mode from the user without overriding it.
+    date_mode = args.date_mode or "disclosure"
 
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]

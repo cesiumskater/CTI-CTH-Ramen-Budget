@@ -260,6 +260,18 @@ def test_cache_corrupt_timestamp_treated_as_stale(caplog):
     assert any("unparseable fetched_at" in rec.message for rec in caplog.records)
 
 
+def test_utcnow_returns_naive_utc():
+    """_utcnow() must return a naive datetime that is close to real UTC (regression for H2)."""
+    from datetime import timezone
+
+    import ramen_cve
+
+    result = ramen_cve._utcnow()
+    assert result.tzinfo is None, "_utcnow() must return a naive datetime"
+    delta = abs((result - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds())
+    assert delta < 2, f"_utcnow() drifted {delta}s from UTC"
+
+
 def test_cache_epss_round_trip():
     """set_epss followed by get_epss returns the same payload."""
     c = _mem_cache()
@@ -368,6 +380,42 @@ def test_fetch_nvd_v30_fallback():
     assert result["cvss_score"] == 9.8
     assert result["cvss_version"] == "3.0"
     assert result["kev_listed"] is False
+
+
+def test_fetch_nvd_kev_null_value_is_false():
+    """cisaExploitAdd present but null must not set kev_listed=True (regression M2)."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_nvd
+
+    cache = _mem_cache()
+    # Build a minimal NVD response where cisaExploitAdd is present but null.
+    payload = {
+        "resultsPerPage": 1,
+        "totalResults": 1,
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2021-44228",
+                    "cisaExploitAdd": None,
+                    "metrics": {},
+                    "weaknesses": [],
+                    "published": "2021-12-10T00:00:00.000",
+                }
+            }
+        ],
+    }
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+    with (
+        patch("ramen_cve.requests.get", return_value=resp),
+        patch("ramen_cve.time.sleep"),
+    ):
+        result = fetch_nvd("CVE-2021-44228", cache, api_key=None)
+
+    assert result["kev_listed"] is False, "null cisaExploitAdd must not be treated as KEV"
 
 
 def test_fetch_nvd_no_cvss():
@@ -1197,6 +1245,23 @@ def test_cli_cve_subcommand_parses():
     assert "CVE-2021-44228" in args.cves
 
 
+def test_cli_cve_date_mode_defaults_to_disclosure():
+    """cve subcommand argparse default is None (resolved to disclosure at runtime) — H3."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["cve", "CVE-2021-44228"])
+    assert args.date_mode is None, "sentinel must be None so _run_cve defaults to disclosure"
+
+
+def test_cli_cve_date_mode_feed_is_honored():
+    """Explicit --date-mode feed on the cve subcommand must not be overridden (regression H3)."""
+    from ramen_cve import build_parser
+
+    # Argparse must preserve the user's explicit choice.
+    args = build_parser().parse_args(["cve", "CVE-2021-44228", "--date-mode", "feed"])
+    assert args.date_mode == "feed"
+
+
 def test_cli_invalid_date_rejected():
     """A bad --start date format is rejected before any work runs."""
     import subprocess
@@ -1208,6 +1273,22 @@ def test_cli_invalid_date_rejected():
     )
     assert result.returncode != 0
     assert "Invalid date" in result.stderr or "error" in result.stderr.lower()
+
+
+def test_cli_start_after_end_rejected():
+    """--start later than --end must be rejected with a non-zero exit code (regression M1)."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            ".venv/bin/python", "ramen_cve.py", "opml", "x.opml",
+            "--start", "2024-12-31", "--end", "2024-01-01",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "start" in result.stderr.lower() or "end" in result.stderr.lower()
 
 
 def test_cli_invalid_cve_id_rejected():
