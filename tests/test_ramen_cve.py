@@ -518,6 +518,41 @@ def test_fetch_epss_empty_input():
 # ---------------------------------------------------------------------------
 
 
+def test_write_markdown_sanitizes_newlines_in_source(tmp_path):
+    """A source string containing newlines must not break the bullet layout (regression for M2)."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="Multi\nline\rsource\twith\nweird whitespace",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        epss_percentile=0.99,
+        bucket="patch_now",
+        suggested_action="Patch.",
+    )
+    out = tmp_path / "report.md"
+    write_markdown(
+        [rec],
+        out,
+        {
+            "version": "0.1",
+            "sources": ["Feed\nName\rwith breaks"],
+            "cvss_threshold": 7.0,
+            "epss_threshold": 0.10,
+        },
+    )
+    text = out.read_text()
+    # Every "- **Source:**" or "- " bullet should occupy exactly one line
+    for line in text.splitlines():
+        assert "\n" not in line and "\r" not in line
+    assert "Multi line source with weird whitespace" in text
+    assert "Feed Name with breaks" in text
+
+
 def test_validate_args_rejects_epss_mode_without_dates():
     """--date-mode epss with no --start/--end must error out, not crash mid-run (M1)."""
     import ramen_cve

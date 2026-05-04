@@ -637,6 +637,14 @@ BUCKET_DISPLAY = {
 }
 
 
+def _md_safe(text: str) -> str:
+    """Collapse newlines and control whitespace so a string is safe in a Markdown bullet."""
+    if not text:
+        return ""
+    # Replace any run of \r/\n/\t/etc. with a single space so the bullet stays on one line.
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) -> None:
     """Write a human-readable Markdown triage report.
 
@@ -668,7 +676,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
     if run_metadata.get("sources"):
         lines += ["## Sources", ""]
         for src in run_metadata["sources"]:
-            lines.append(f"- {src}")
+            lines.append(f"- {_md_safe(src)}")
         lines.append("")
 
     by_bucket: dict[str, list[EnrichedCve]] = {b: [] for b in BUCKET_ORDER}
@@ -708,7 +716,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
                 lines.append("- **EPSS:** N/A")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
-            lines.append(f"- **Source:** {rec.source}")
+            lines.append(f"- **Source:** {_md_safe(rec.source)}")
             lines.append("")
 
     version = run_metadata.get("version", "0.1")
