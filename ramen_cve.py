@@ -1160,11 +1160,19 @@ def _wizard_validate_float(value: str, lo: float, hi: float) -> bool | str:
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns exit code."""
     if argv is None and len(sys.argv) <= 1:
-        try:
-            argv = _run_wizard()
-        except KeyboardInterrupt:
-            print("\nCancelled.", file=sys.stderr)
-            return 130
+        if _is_interactive():
+            try:
+                argv = _run_wizard()
+            except KeyboardInterrupt:
+                print("\nCancelled.", file=sys.stderr)
+                return 130
+        else:
+            print(
+                "ramen_cve: no arguments supplied and stdin is not a TTY.\n"
+                "Run with --help for usage, or invoke interactively to use the wizard.",
+                file=sys.stderr,
+            )
+            return 2
 
     parser = build_parser()
     args = parser.parse_args(argv)

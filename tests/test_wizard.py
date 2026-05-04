@@ -186,6 +186,7 @@ def test_main_invokes_wizard_when_no_args(tmp_path, monkeypatch):
     ]
 
     with (
+        patch("ramen_cve._is_interactive", return_value=True),
         patch("ramen_cve._run_wizard", return_value=fake_argv) as wizard,
         patch("ramen_cve._run_cve", return_value=0) as runner,
     ):
