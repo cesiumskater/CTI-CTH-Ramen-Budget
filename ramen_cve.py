@@ -97,6 +97,87 @@ DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
+# Curated CWE → MITRE ATT&CK technique-ID mapping. Each CWE may map to one or
+# more techniques. This is intrinsically lossy: a CWE describes a *type* of
+# weakness and a technique describes an adversary action — the mapping captures
+# the techniques an adversary is most likely to use *given* the CWE, not a
+# guaranteed observation. References:
+#   https://attack.mitre.org/techniques/enterprise/
+#   https://github.com/center-for-threat-informed-defense/attack_to_cve
+CWE_TO_ATTACK: dict[str, list[str]] = {
+    "CWE-22": ["T1083"],                      # Path Traversal → File and Directory Discovery
+    "CWE-77": ["T1059"],                      # Command Injection → Cmd & Scripting Interpreter
+    "CWE-78": ["T1059"],                      # OS Command Injection
+    "CWE-79": ["T1059.007"],                  # XSS → JavaScript
+    "CWE-89": ["T1190"],                      # SQL Injection → Exploit Public-Facing App
+    "CWE-94": ["T1059", "T1203"],             # Code Injection
+    "CWE-119": ["T1190", "T1203"],            # Buffer Overread/Overwrite
+    "CWE-120": ["T1190", "T1203"],            # Classic Buffer Overflow
+    "CWE-121": ["T1190", "T1203"],            # Stack-based Buffer Overflow
+    "CWE-122": ["T1190", "T1203"],            # Heap-based Buffer Overflow
+    "CWE-125": ["T1212"],                     # Out-of-bounds Read
+    "CWE-200": ["T1083"],                     # Information Disclosure
+    "CWE-269": ["T1068"],                     # Improper Privilege Mgmt → PrivEsc
+    "CWE-276": ["T1222"],                     # Incorrect Default Permissions
+    "CWE-287": ["T1190", "T1078"],            # Improper Authentication
+    "CWE-295": ["T1557"],                     # Improper Cert Validation → AiTM
+    "CWE-306": ["T1190"],                     # Missing Authentication
+    "CWE-319": ["T1040", "T1557"],            # Cleartext Transmission
+    "CWE-352": ["T1190"],                     # CSRF
+    "CWE-400": ["T1499"],                     # Resource Exhaustion → Endpoint DoS
+    "CWE-416": ["T1203", "T1068"],            # Use After Free
+    "CWE-426": ["T1574.001"],                 # Untrusted Search Path → DLL Hijack
+    "CWE-434": ["T1190"],                     # Unrestricted File Upload
+    "CWE-502": ["T1190", "T1059"],            # Deserialization of Untrusted Data
+    "CWE-521": ["T1110"],                     # Weak Password Requirements → Brute Force
+    "CWE-522": ["T1552"],                     # Insufficiently Protected Credentials
+    "CWE-552": ["T1083", "T1213"],            # Files Accessible to External Parties
+    "CWE-601": ["T1566.002"],                 # Open Redirect → Spearphishing Link
+    "CWE-611": ["T1190", "T1083"],            # XXE
+    "CWE-732": ["T1222"],                     # Incorrect Permission Assignment
+    "CWE-787": ["T1190", "T1203"],            # Out-of-bounds Write
+    "CWE-798": ["T1078"],                     # Hardcoded Credentials → Valid Accounts
+    "CWE-863": ["T1190"],                     # Incorrect Authorization
+    "CWE-918": ["T1090", "T1190"],            # SSRF → Proxy + Exploit Public-Facing App
+    "CWE-1021": ["T1185"],                    # UI Restriction Bypass → Browser Hijack
+    "CWE-1188": ["T1078"],                    # Insecure Default Initialization → Valid Accounts
+}
+
+# Technique-ID → human-readable name lookup, used in Markdown cross-tab output.
+ATTACK_TECHNIQUE_NAMES: dict[str, str] = {
+    "T1040": "Network Sniffing",
+    "T1059": "Command and Scripting Interpreter",
+    "T1059.007": "Command and Scripting Interpreter: JavaScript",
+    "T1068": "Exploitation for Privilege Escalation",
+    "T1078": "Valid Accounts",
+    "T1083": "File and Directory Discovery",
+    "T1090": "Proxy",
+    "T1110": "Brute Force",
+    "T1185": "Browser Session Hijacking",
+    "T1190": "Exploit Public-Facing Application",
+    "T1203": "Exploitation for Client Execution",
+    "T1212": "Exploitation for Credential Access",
+    "T1213": "Data from Information Repositories",
+    "T1222": "File and Directory Permissions Modification",
+    "T1499": "Endpoint Denial of Service",
+    "T1552": "Unsecured Credentials",
+    "T1557": "Adversary-in-the-Middle",
+    "T1566.002": "Phishing: Spearphishing Link",
+    "T1574.001": "Hijack Execution Flow: DLL Search Order Hijacking",
+}
+
+
+def map_cwes_to_attack_techniques(cwes: list[str]) -> list[str]:
+    """Return a deduplicated, sorted list of ATT&CK technique IDs for the CWEs.
+
+    Empty input or unmapped CWEs return an empty list. Sorting keeps CSV and
+    Markdown output deterministic across runs.
+    """
+    techniques: set[str] = set()
+    for cwe in cwes:
+        techniques.update(CWE_TO_ATTACK.get(cwe.upper(), []))
+    return sorted(techniques)
+
 _log = logging.getLogger(__name__)
 
 
@@ -209,6 +290,9 @@ class EnrichedCve:
     epss_score: float | None = None
     epss_percentile: float | None = None
     epss_date: str | None = None
+
+    # MITRE ATT&CK technique IDs derived from the CWE list (best-effort, lossy).
+    attack_techniques: list[str] = field(default_factory=list)
 
     # Bucket
     bucket: str = "unknown"
@@ -933,6 +1017,7 @@ def enrich_cves(
                 kev_vendor_project=kev.get("vendorProject") if kev else None,
                 kev_product=kev.get("product") if kev else None,
                 kev_short_description=kev.get("shortDescription") if kev else None,
+                attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
             )
         )
 
@@ -1037,6 +1122,7 @@ CSV_COLUMNS = [
     "bucket",
     "suggested_action",
     "cwe",
+    "attack_techniques",
     "nvd_published",
     "enriched_at",
 ]
@@ -1105,6 +1191,7 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     rec.bucket,
                     rec.suggested_action,
                     ";".join(rec.cwe),
+                    ";".join(rec.attack_techniques),
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -1210,6 +1297,23 @@ def write_markdown(
         lines.append(f"| {BUCKET_DISPLAY[bucket]} | {count} | {action} |")
     lines.append("")
 
+    technique_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for tid in rec.attack_techniques:
+            technique_rollup.setdefault(tid, []).append(rec.cve_id)
+    if technique_rollup:
+        lines += [
+            "## By ATT&CK Technique",
+            "",
+            "| Technique | Name | CVEs |",
+            "| --- | --- | --- |",
+        ]
+        for tid in sorted(technique_rollup):
+            name = ATTACK_TECHNIQUE_NAMES.get(tid, "(unmapped)")
+            cves = technique_rollup[tid]
+            lines.append(f"| {tid} | {name} | {len(cves)} |")
+        lines.append("")
+
     if total == 0:
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
@@ -1234,6 +1338,14 @@ def write_markdown(
             else:
                 lines.append("- **EPSS:** N/A")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
+            if rec.attack_techniques:
+                techniques_display = ", ".join(
+                    f"{tid} ({ATTACK_TECHNIQUE_NAMES[tid]})"
+                    if tid in ATTACK_TECHNIQUE_NAMES
+                    else tid
+                    for tid in rec.attack_techniques
+                )
+                lines.append(f"- **ATT&CK:** {techniques_display}")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:

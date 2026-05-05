@@ -1902,3 +1902,176 @@ def test_extract_iocs_defanged_at_marker_email():
     emails = [i.value for i in iocs if i.ioc_type == "email"]
     # Note: this test will only succeed if the TLD has length ≥ 2; "example" is 7 chars
     assert "attacker@evil.example" in emails
+
+
+# ---------------------------------------------------------------------------
+# Slice 10 — MITRE ATT&CK technique mapping
+# ---------------------------------------------------------------------------
+
+
+def test_map_cwes_to_attack_basic():
+    """Known CWEs map to their curated technique IDs."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert "T1190" in map_cwes_to_attack_techniques(["CWE-89"])
+    assert "T1059" in map_cwes_to_attack_techniques(["CWE-78"])
+    assert "T1190" in map_cwes_to_attack_techniques(["CWE-502"])
+    assert "T1059" in map_cwes_to_attack_techniques(["CWE-502"])
+
+
+def test_map_cwes_to_attack_dedupes_and_sorts():
+    """Multiple CWEs that share a technique produce one sorted output."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    out = map_cwes_to_attack_techniques(["CWE-89", "CWE-352", "CWE-306"])
+    # All three map to T1190 → expect a single T1190 entry
+    assert out == sorted(set(out))
+    assert out.count("T1190") == 1
+
+
+def test_map_cwes_to_attack_unknown_returns_empty():
+    """An unmapped CWE produces no techniques (and no error)."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert map_cwes_to_attack_techniques(["CWE-99999"]) == []
+
+
+def test_map_cwes_to_attack_case_insensitive():
+    """Lower-case CWE input is normalized before lookup."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert "T1190" in map_cwes_to_attack_techniques(["cwe-89"])
+
+
+def test_map_cwes_to_attack_empty_input():
+    """Empty CWE list returns an empty technique list."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert map_cwes_to_attack_techniques([]) == []
+
+
+def test_attack_technique_names_cover_mapping():
+    """Every technique referenced in CWE_TO_ATTACK has a display name."""
+    from ramen_cve import ATTACK_TECHNIQUE_NAMES, CWE_TO_ATTACK
+
+    referenced = {tid for tids in CWE_TO_ATTACK.values() for tid in tids}
+    missing = referenced - ATTACK_TECHNIQUE_NAMES.keys()
+    assert not missing, f"missing technique names for: {sorted(missing)}"
+
+
+def test_enrich_cves_populates_attack_techniques():
+    """End-to-end: CWE-502 in the NVD response surfaces T1190 + T1059 on the EnrichedCve."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    # Log4Shell CWE-502 → T1059 + T1190 per CWE_TO_ATTACK
+    techniques = result[0].attack_techniques
+    assert "T1190" in techniques
+    assert "T1059" in techniques
+    # Output is deterministic (sorted)
+    assert techniques == sorted(techniques)
+
+
+def test_write_csv_includes_attack_techniques_column(tmp_path):
+    """CSV header includes attack_techniques and the row joins values with ';'."""
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        attack_techniques=["T1059", "T1190"],
+        bucket="patch_now",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    assert "attack_techniques" in rows[0]
+    assert rows[0] == CSV_COLUMNS
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["attack_techniques"] == "T1059;T1190"
+
+
+def test_write_markdown_renders_attack_per_cve_and_cross_tab(tmp_path):
+    """Markdown shows per-CVE ATT&CK list and a 'By ATT&CK Technique' summary table."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            cvss_severity="CRITICAL",
+            epss_score=0.97,
+            attack_techniques=["T1059", "T1190"],
+            bucket="patch_now",
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            cvss_severity="CRITICAL",
+            epss_score=0.97,
+            attack_techniques=["T1190"],
+            bucket="patch_now",
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    # Per-CVE
+    assert "**ATT&CK:** T1059" in text
+    assert "T1190 (Exploit Public-Facing Application)" in text
+    # Cross-tab
+    assert "## By ATT&CK Technique" in text
+    assert "| T1190 | Exploit Public-Facing Application | 2 |" in text
+    assert "| T1059 | Command and Scripting Interpreter | 1 |" in text
+
+
+def test_write_markdown_no_attack_section_when_empty(tmp_path):
+    """If no enriched record has attack_techniques, the cross-tab section is omitted."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        attack_techniques=[],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "## By ATT&CK Technique" not in text
+    assert "**ATT&CK:**" not in text
