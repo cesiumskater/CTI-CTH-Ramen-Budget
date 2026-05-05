@@ -90,6 +90,25 @@ CISA_KEV_URL = (
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 )
 
+# Exploit / PoC tracking endpoints. All are free; only the GitHub search benefits
+# from an authenticated token (rate-limit jumps from 10 → 30 req/min).
+EXPLOITDB_CSV_URL = (
+    "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+)
+NUCLEI_TEMPLATES_TREE_URL = (
+    "https://api.github.com/repos/projectdiscovery/nuclei-templates/git/trees/main?recursive=1"
+)
+GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
+
+# Display order for the per-CVE "Exploit Status" line — most authoritative first.
+EXPLOIT_STATUS_VALUES = (
+    "metasploit",        # Metasploit module (not yet auto-detected; reserved)
+    "exploit_db",        # Exploit-DB entry exists for this CVE
+    "nuclei_template",   # Nuclei community template exists for this CVE
+    "github_poc",        # GitHub repo name/description references the CVE
+    "none",              # No public exploit signal we recognize
+)
+
 DEFAULT_CVSS_THRESHOLD = 7.0
 DEFAULT_EPSS_THRESHOLD = 0.10
 DEFAULT_CACHE_PATH = ".ramen-cache.db"
@@ -294,6 +313,9 @@ class EnrichedCve:
     # MITRE ATT&CK technique IDs derived from the CWE list (best-effort, lossy).
     attack_techniques: list[str] = field(default_factory=list)
 
+    # Public exploit / PoC availability signal: one of EXPLOIT_STATUS_VALUES.
+    exploit_status: str = "none"
+
     # Bucket
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
@@ -326,6 +348,13 @@ class Cache:
             id          TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL,
             fetched_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS exploit_cache (
+            source      TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (source, key)
         );
     """
 
@@ -407,12 +436,35 @@ class Cache:
         )
         self._conn.commit()
 
+    def get_exploit(self, source: str, key: str) -> dict | None:
+        """Return cached exploit-tracker payload for (source, key) if fresh, else None.
+
+        `source` is one of 'exploitdb' | 'nuclei' | 'github'. `key` is 'index' for
+        global indices, or a CVE ID for per-CVE GitHub-search results.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json, fetched_at FROM exploit_cache WHERE source = ? AND key = ?",
+            (source, key),
+        ).fetchone()
+        if row and self._is_fresh(row[1]):
+            return json.loads(row[0])
+        return None
+
+    def set_exploit(self, source: str, key: str, payload: dict) -> None:
+        """Upsert an exploit-tracker payload."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO exploit_cache VALUES (?, ?, ?, ?)",
+            (source, key, json.dumps(payload), _utcnow().isoformat()),
+        )
+        self._conn.commit()
+
     def purge(self) -> None:
         """Delete entries older than the TTL from all tables."""
         cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM kev_cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.execute("DELETE FROM exploit_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
 
 
@@ -1024,6 +1076,137 @@ def enrich_cves(
     return enriched
 
 
+def fetch_exploitdb_cve_set(cache: Cache) -> set[str]:
+    """Return the set of CVE IDs that have at least one Exploit-DB entry.
+
+    The Exploit-DB project publishes a CSV mirror of every entry; the `codes`
+    column carries CVE IDs (semicolon-separated, sometimes mixed with OSVDB IDs
+    or other refs). We pull the file once per cache TTL, scan the codes column,
+    and persist the resulting set. On any error returns an empty set.
+    """
+    cached = cache.get_exploit("exploitdb", "index")
+    if cached is not None:
+        return set(cached.get("cve_ids", []))
+
+    cve_ids: set[str] = set()
+    try:
+        resp = requests.get(EXPLOITDB_CSV_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
+        resp.raise_for_status()
+        reader = csv.DictReader(resp.text.splitlines())
+        for row in reader:
+            codes = row.get("codes") or ""
+            for code in codes.split(";"):
+                normalized = code.strip().upper()
+                if CVE_REGEX.fullmatch(normalized):
+                    cve_ids.add(normalized)
+    except Exception as exc:
+        _log.warning("Exploit-DB index fetch failed: %s", exc)
+        return set()
+
+    cache.set_exploit("exploitdb", "index", {"cve_ids": sorted(cve_ids)})
+    _log.info("Loaded Exploit-DB index: %d CVEs.", len(cve_ids))
+    return cve_ids
+
+
+def fetch_nuclei_cve_set(cache: Cache) -> set[str]:
+    """Return the set of CVE IDs that have a Nuclei community template.
+
+    Hits the GitHub Git Trees API once and filters paths under `cves/` ending
+    in `.yaml`. Cached per the cache TTL. On any error returns an empty set.
+    """
+    cached = cache.get_exploit("nuclei", "index")
+    if cached is not None:
+        return set(cached.get("cve_ids", []))
+
+    cve_ids: set[str] = set()
+    try:
+        resp = requests.get(
+            NUCLEI_TEMPLATES_TREE_URL,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for entry in data.get("tree") or []:
+            path = entry.get("path") or ""
+            if "cves/" in path and path.endswith(".yaml"):
+                for m in CVE_REGEX.finditer(path):
+                    cve_ids.add(m.group(0).upper())
+    except Exception as exc:
+        _log.warning("Nuclei templates index fetch failed: %s", exc)
+        return set()
+
+    cache.set_exploit("nuclei", "index", {"cve_ids": sorted(cve_ids)})
+    _log.info("Loaded Nuclei templates index: %d CVEs.", len(cve_ids))
+    return cve_ids
+
+
+def search_github_for_cve(cve_id: str, cache: Cache, github_token: str | None) -> bool:
+    """Return True if a GitHub repository name or description references this CVE.
+
+    Returns False (without an HTTP call) when no GITHUB_TOKEN is configured —
+    the unauthenticated rate limit (10 req/min) is too low to be useful for a
+    CVE-by-CVE scan. Cached per CVE for the cache TTL.
+    """
+    if not github_token:
+        return False
+
+    cached = cache.get_exploit("github", cve_id)
+    if cached is not None:
+        return bool(cached.get("found", False))
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+    }
+    params = {"q": f"{cve_id} in:name,description", "per_page": "1"}
+    try:
+        resp = requests.get(GITHUB_SEARCH_URL, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _log.warning("GitHub search failed for %s: %s", cve_id, exc)
+        return False
+
+    found = (data.get("total_count") or 0) > 0
+    cache.set_exploit("github", cve_id, {"found": found})
+    return found
+
+
+def enrich_with_exploit_status(
+    enriched: list[EnrichedCve],
+    cache: Cache,
+    github_token: str | None = None,
+    *,
+    skip_github: bool = False,
+) -> list[EnrichedCve]:
+    """Set rec.exploit_status on each EnrichedCve in place.
+
+    Resolution order (highest priority wins):
+      1. exploit_db
+      2. nuclei_template
+      3. github_poc (only when github_token is set and skip_github=False)
+      Default: 'none'.
+
+    The bucket assignment is intentionally NOT changed — exploit_status is a
+    parallel signal that consumers can act on directly. Returns the same list
+    for chaining.
+    """
+    edb = fetch_exploitdb_cve_set(cache)
+    nuclei = fetch_nuclei_cve_set(cache)
+    for rec in enriched:
+        if rec.cve_id in edb:
+            rec.exploit_status = "exploit_db"
+        elif rec.cve_id in nuclei:
+            rec.exploit_status = "nuclei_template"
+        elif not skip_github and github_token and search_github_for_cve(
+            rec.cve_id, cache, github_token
+        ):
+            rec.exploit_status = "github_poc"
+    return enriched
+
+
 def bucket_and_suggest(
     enriched: list[EnrichedCve],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
@@ -1123,6 +1306,7 @@ CSV_COLUMNS = [
     "suggested_action",
     "cwe",
     "attack_techniques",
+    "exploit_status",
     "nvd_published",
     "enriched_at",
 ]
@@ -1192,6 +1376,7 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     rec.suggested_action,
                     ";".join(rec.cwe),
                     ";".join(rec.attack_techniques),
+                    rec.exploit_status,
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -1346,6 +1531,8 @@ def write_markdown(
                     for tid in rec.attack_techniques
                 )
                 lines.append(f"- **ATT&CK:** {techniques_display}")
+            if rec.exploit_status and rec.exploit_status != "none":
+                lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:
@@ -1430,6 +1617,11 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("."))
     parser.add_argument("--format", choices=["csv", "md", "both"], default="both")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--no-exploit-lookup",
+        action="store_true",
+        help="Skip Exploit-DB / Nuclei / GitHub PoC lookups (offline mode).",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
@@ -1693,6 +1885,18 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _get_github_token() -> str | None:
+    """Return GITHUB_TOKEN from the environment, or None if absent.
+
+    The token is only used to lift GitHub Search rate limits when
+    enrich_with_exploit_status is enabled. We never log it and never persist it.
+    """
+    import os
+
+    token = os.getenv("GITHUB_TOKEN") or None
+    return token
+
+
 def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
     """Return a path that does not yet exist by appending -N if needed.
 
@@ -1782,6 +1986,8 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
     date_mode = args.date_mode or "feed"
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1838,6 +2044,8 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1918,6 +2126,8 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)

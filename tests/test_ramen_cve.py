@@ -2075,3 +2075,307 @@ def test_write_markdown_no_attack_section_when_empty(tmp_path):
     text = out.read_text()
     assert "## By ATT&CK Technique" not in text
     assert "**ATT&CK:**" not in text
+
+
+# ---------------------------------------------------------------------------
+# Slice 11 — Exploit / PoC availability tracking
+# ---------------------------------------------------------------------------
+
+
+_EDB_CSV_FIXTURE = (
+    "id,file,description,date_published,author,type,platform,port,date_added,"
+    "date_updated,verified,codes,tags,aliases,screenshot_url,application_url,source_url\n"
+    "50562,exploits/multiple/remote/50562.py,Apache Log4j 2 - RCE,2021-12-14,Anonymous,"
+    "remote,multiple,,2021-12-14,2022-04-12,1,CVE-2021-44228;CVE-2021-45046,,,,,\n"
+    "49637,exploits/windows/remote/49637.py,Microsoft Exchange Server SSRF,2021-03-15,"
+    "Anonymous,remote,windows,,2021-03-15,2022-04-12,1,CVE-2021-26855,,,,,\n"
+    "10000,exploits/local/foo.py,Stub,2024-01-01,A,local,linux,,2024-01-01,2024-01-01,1,,,,,,\n"
+)
+
+_NUCLEI_TREE_FIXTURE = {
+    "tree": [
+        {"path": "http/cves/2021/CVE-2021-44228.yaml", "type": "blob"},
+        {"path": "http/cves/2021/CVE-2021-26855.yaml", "type": "blob"},
+        {"path": "README.md", "type": "blob"},
+        {"path": "http/cves/2024/CVE-2024-9999.yaml", "type": "blob"},
+        {"path": "http/cves/", "type": "tree"},  # not a yaml file
+    ]
+}
+
+
+def _patch_exploit_get(edb_text: str | None = None, nuclei_data: dict | None = None,
+                      github_total: int | None = None):
+    """Patch requests.get to differentiate the EDB / Nuclei / GitHub URLs."""
+    from unittest.mock import MagicMock, patch
+
+    edb_text = edb_text if edb_text is not None else _EDB_CSV_FIXTURE
+    nuclei_data = nuclei_data if nuclei_data is not None else _NUCLEI_TREE_FIXTURE
+
+    def _fake(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "exploit-database" in url or "exploitdb" in url:
+            resp.text = edb_text
+        elif "nuclei-templates" in url:
+            resp.json.return_value = nuclei_data
+        elif "search/repositories" in url:
+            resp.json.return_value = {"total_count": github_total or 0}
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    return patch("ramen_cve.requests.get", side_effect=_fake)
+
+
+def test_fetch_exploitdb_cve_set_parses_codes_column():
+    """Each non-empty 'codes' cell yields one or more CVE IDs."""
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get():
+        edb = fetch_exploitdb_cve_set(cache)
+
+    assert "CVE-2021-44228" in edb
+    assert "CVE-2021-45046" in edb
+    assert "CVE-2021-26855" in edb
+
+
+def test_fetch_exploitdb_cve_set_caches_index():
+    """A second call returns the cached set without an HTTP request."""
+
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get() as mock_get:
+        first = fetch_exploitdb_cve_set(cache)
+        second = fetch_exploitdb_cve_set(cache)
+    # Only one call to the EDB URL on the first invocation
+    assert first == second
+    edb_calls = [c for c in mock_get.call_args_list if "exploit" in c.args[0]]
+    assert len(edb_calls) == 1
+
+
+def test_fetch_exploitdb_cve_set_handles_error(caplog):
+    """A network error returns an empty set and logs a warning."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("boom")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        result = fetch_exploitdb_cve_set(cache)
+    assert result == set()
+    assert any("Exploit-DB index fetch failed" in r.message for r in caplog.records)
+
+
+def test_fetch_nuclei_cve_set_extracts_from_paths():
+    """Paths under 'cves/' ending in '.yaml' yield the CVE IDs in the path."""
+    from ramen_cve import fetch_nuclei_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get():
+        nuclei = fetch_nuclei_cve_set(cache)
+
+    assert "CVE-2021-44228" in nuclei
+    assert "CVE-2021-26855" in nuclei
+    assert "CVE-2024-9999" in nuclei
+
+
+def test_fetch_nuclei_cve_set_caches():
+    """A second call returns cached results without re-hitting the HTTP API."""
+
+    from ramen_cve import fetch_nuclei_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get() as mock_get:
+        first = fetch_nuclei_cve_set(cache)
+        second = fetch_nuclei_cve_set(cache)
+    assert first == second
+    nuclei_calls = [c for c in mock_get.call_args_list if "nuclei-templates" in c.args[0]]
+    assert len(nuclei_calls) == 1
+
+
+def test_search_github_no_token_returns_false_without_http():
+    """Without GITHUB_TOKEN, no HTTP call happens and the function returns False."""
+    from unittest.mock import patch
+
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with patch("ramen_cve.requests.get") as mock_get:
+        result = search_github_for_cve("CVE-2021-44228", cache, github_token=None)
+    assert result is False
+    mock_get.assert_not_called()
+
+
+def test_search_github_returns_true_when_total_count_positive():
+    """When the GitHub API reports total_count > 0, the function returns True."""
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=5):
+        result = search_github_for_cve("CVE-2099-9999", cache, github_token="ghp_test")
+    assert result is True
+
+
+def test_search_github_caches_per_cve():
+    """A second call for the same CVE comes from cache."""
+
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=3) as mock_get:
+        first = search_github_for_cve("CVE-2099-1234", cache, github_token="ghp_test")
+        second = search_github_for_cve("CVE-2099-1234", cache, github_token="ghp_test")
+    assert first is True and second is True
+    gh_calls = [c for c in mock_get.call_args_list if "search/repositories" in c.args[0]]
+    assert len(gh_calls) == 1
+
+
+def test_enrich_with_exploit_status_priority_exploitdb_wins():
+    """If a CVE is in Exploit-DB it is tagged exploit_db regardless of nuclei/github."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    rec = EnrichedCve("CVE-2021-44228", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=10):
+        enrich_with_exploit_status([rec], cache, github_token="ghp_test")
+    assert rec.exploit_status == "exploit_db"
+
+
+def test_enrich_with_exploit_status_falls_back_to_nuclei_then_github():
+    """A CVE only in nuclei is tagged nuclei_template; only in GH is tagged github_poc."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    nuclei_rec = EnrichedCve("CVE-2024-9999", "x", date(2024, 1, 1), "feed_pub")
+    only_gh_rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+
+    # CVE-2024-9999 is in our nuclei fixture; CVE-2099-0001 is in neither so
+    # falls through to GitHub which we mock as having matches.
+    with _patch_exploit_get(github_total=2):
+        enrich_with_exploit_status(
+            [nuclei_rec, only_gh_rec], cache, github_token="ghp_test"
+        )
+    assert nuclei_rec.exploit_status == "nuclei_template"
+    assert only_gh_rec.exploit_status == "github_poc"
+
+
+def test_enrich_with_exploit_status_skip_github_flag():
+    """skip_github=True suppresses the GitHub fallback even when a token is set."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    only_gh_rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=10):
+        enrich_with_exploit_status(
+            [only_gh_rec], cache, github_token="ghp_test", skip_github=True
+        )
+    assert only_gh_rec.exploit_status == "none"
+
+
+def test_enrich_with_exploit_status_default_none():
+    """A CVE that nobody has exploit code for stays exploit_status='none'."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=0):
+        enrich_with_exploit_status([rec], cache, github_token=None)
+    assert rec.exploit_status == "none"
+
+
+def test_cache_exploit_round_trip():
+    """Cache.set_exploit / get_exploit round-trips a payload."""
+    c = _mem_cache()
+    c.set_exploit("exploitdb", "index", {"cve_ids": ["CVE-2021-44228"]})
+    assert c.get_exploit("exploitdb", "index") == {"cve_ids": ["CVE-2021-44228"]}
+
+
+def test_cache_exploit_keyed_separately_per_source():
+    """Same key under different sources are independent rows."""
+    c = _mem_cache()
+    c.set_exploit("exploitdb", "index", {"cve_ids": ["CVE-A"]})
+    c.set_exploit("nuclei", "index", {"cve_ids": ["CVE-B"]})
+    assert c.get_exploit("exploitdb", "index") == {"cve_ids": ["CVE-A"]}
+    assert c.get_exploit("nuclei", "index") == {"cve_ids": ["CVE-B"]}
+
+
+def test_write_csv_includes_exploit_status_column(tmp_path):
+    """exploit_status appears in the CSV header and rows."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        exploit_status="exploit_db",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "exploit_status" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["exploit_status"] == "exploit_db"
+
+
+def test_write_markdown_renders_exploit_status_when_not_none(tmp_path):
+    """Markdown shows the Exploit Status line for CVEs with exploit_status != 'none'."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        exploit_status="nuclei_template",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Exploit Status:** `nuclei_template`" in text
+
+
+def test_write_markdown_omits_exploit_status_line_when_none(tmp_path):
+    """A 'none' exploit_status does not produce an Exploit Status line."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        exploit_status="none",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Exploit Status" not in text
+
+
+def test_cli_no_exploit_lookup_flag_parses():
+    """--no-exploit-lookup is accepted on every subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--no-exploit-lookup"]
+    )
+    assert args.no_exploit_lookup is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.no_exploit_lookup is False
