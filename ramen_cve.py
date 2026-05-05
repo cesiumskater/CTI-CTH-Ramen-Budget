@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import ipaddress
 import json
 import logging
 import re
@@ -32,8 +33,81 @@ import requests
 
 CVE_REGEX = re.compile(r"CVE-\d{4}-\d{4,7}(?!\d)", re.IGNORECASE)
 
+# Non-CVE IOC regexes. These are intentionally simple — high-precision matches on
+# defanged-aware text rather than perfect RFC compliance. extract_iocs() defangs
+# the input (hxxp → http, [.] → ., etc.) before running these.
+IPV4_REGEX = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
+)
+URL_REGEX = re.compile(r"https?://[^\s<>\"'`)\],]+", re.IGNORECASE)
+EMAIL_REGEX = re.compile(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", re.IGNORECASE)
+MD5_REGEX = re.compile(r"\b[a-f0-9]{32}\b", re.IGNORECASE)
+SHA1_REGEX = re.compile(r"\b[a-f0-9]{40}\b", re.IGNORECASE)
+SHA256_REGEX = re.compile(r"\b[a-f0-9]{64}\b", re.IGNORECASE)
+DOMAIN_REGEX = re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b",
+    re.IGNORECASE,
+)
+
+# Defang substitutions. Applied in order; each is a literal needle/replacement
+# pair so an attacker can't inject regex metacharacters via a feed item.
+_DEFANG_MAP: list[tuple[str, str]] = [
+    ("hxxps://", "https://"),
+    ("hxxp://", "http://"),
+    ("[://]", "://"),
+    ("[.]", "."),
+    ("(.)", "."),
+    ("[dot]", "."),
+    ("(dot)", "."),
+    ("[@]", "@"),
+    ("(@)", "@"),
+    ("[at]", "@"),
+    ("(at)", "@"),
+    ("[:]", ":"),
+]
+_DEFANG_DETECT = re.compile(
+    r"hxxps?://|\[\.\]|\(\.\)|\[dot\]|\(dot\)|\[at\]|\(at\)|\[:\]",
+    re.IGNORECASE,
+)
+
+# Suffixes that DOMAIN_REGEX would happily match but which are almost never
+# real domain names in CTI feeds. Skipping these stops `report.pdf` and
+# `payload.exe` from being emitted as IOCs.
+_FILE_EXT_TLDS: frozenset[str] = frozenset(
+    {
+        "exe", "dll", "bin", "iso", "img", "tar", "gz", "bz2", "xz", "7z", "rar",
+        "zip", "txt", "md", "pdf", "doc", "docx", "rtf", "odt", "ods", "ppt",
+        "pptx", "xls", "xlsx", "py", "js", "ts", "jsx", "tsx", "html", "htm",
+        "css", "json", "yaml", "yml", "xml", "sh", "bat", "ps1", "cmd", "go",
+        "rs", "rb", "php", "java", "class", "jar", "war", "log", "csv", "tsv",
+        "ini", "cfg", "conf", "lnk", "msi", "vbs", "vbe", "wsh", "ipynb",
+    }
+)
+
 NVD_API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 EPSS_API_BASE = "https://api.first.org/data/v1/epss"
+CISA_KEV_URL = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
+
+# Exploit / PoC tracking endpoints. All are free; only the GitHub search benefits
+# from an authenticated token (rate-limit jumps from 10 → 30 req/min).
+EXPLOITDB_CSV_URL = (
+    "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
+)
+NUCLEI_TEMPLATES_TREE_URL = (
+    "https://api.github.com/repos/projectdiscovery/nuclei-templates/git/trees/main?recursive=1"
+)
+GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
+
+# Display order for the per-CVE "Exploit Status" line — most authoritative first.
+EXPLOIT_STATUS_VALUES = (
+    "metasploit",        # Metasploit module (not yet auto-detected; reserved)
+    "exploit_db",        # Exploit-DB entry exists for this CVE
+    "nuclei_template",   # Nuclei community template exists for this CVE
+    "github_poc",        # GitHub repo name/description references the CVE
+    "none",              # No public exploit signal we recognize
+)
 
 DEFAULT_CVSS_THRESHOLD = 7.0
 DEFAULT_EPSS_THRESHOLD = 0.10
@@ -41,6 +115,87 @@ DEFAULT_CACHE_PATH = ".ramen-cache.db"
 DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
+
+# Curated CWE → MITRE ATT&CK technique-ID mapping. Each CWE may map to one or
+# more techniques. This is intrinsically lossy: a CWE describes a *type* of
+# weakness and a technique describes an adversary action — the mapping captures
+# the techniques an adversary is most likely to use *given* the CWE, not a
+# guaranteed observation. References:
+#   https://attack.mitre.org/techniques/enterprise/
+#   https://github.com/center-for-threat-informed-defense/attack_to_cve
+CWE_TO_ATTACK: dict[str, list[str]] = {
+    "CWE-22": ["T1083"],                      # Path Traversal → File and Directory Discovery
+    "CWE-77": ["T1059"],                      # Command Injection → Cmd & Scripting Interpreter
+    "CWE-78": ["T1059"],                      # OS Command Injection
+    "CWE-79": ["T1059.007"],                  # XSS → JavaScript
+    "CWE-89": ["T1190"],                      # SQL Injection → Exploit Public-Facing App
+    "CWE-94": ["T1059", "T1203"],             # Code Injection
+    "CWE-119": ["T1190", "T1203"],            # Buffer Overread/Overwrite
+    "CWE-120": ["T1190", "T1203"],            # Classic Buffer Overflow
+    "CWE-121": ["T1190", "T1203"],            # Stack-based Buffer Overflow
+    "CWE-122": ["T1190", "T1203"],            # Heap-based Buffer Overflow
+    "CWE-125": ["T1212"],                     # Out-of-bounds Read
+    "CWE-200": ["T1083"],                     # Information Disclosure
+    "CWE-269": ["T1068"],                     # Improper Privilege Mgmt → PrivEsc
+    "CWE-276": ["T1222"],                     # Incorrect Default Permissions
+    "CWE-287": ["T1190", "T1078"],            # Improper Authentication
+    "CWE-295": ["T1557"],                     # Improper Cert Validation → AiTM
+    "CWE-306": ["T1190"],                     # Missing Authentication
+    "CWE-319": ["T1040", "T1557"],            # Cleartext Transmission
+    "CWE-352": ["T1190"],                     # CSRF
+    "CWE-400": ["T1499"],                     # Resource Exhaustion → Endpoint DoS
+    "CWE-416": ["T1203", "T1068"],            # Use After Free
+    "CWE-426": ["T1574.001"],                 # Untrusted Search Path → DLL Hijack
+    "CWE-434": ["T1190"],                     # Unrestricted File Upload
+    "CWE-502": ["T1190", "T1059"],            # Deserialization of Untrusted Data
+    "CWE-521": ["T1110"],                     # Weak Password Requirements → Brute Force
+    "CWE-522": ["T1552"],                     # Insufficiently Protected Credentials
+    "CWE-552": ["T1083", "T1213"],            # Files Accessible to External Parties
+    "CWE-601": ["T1566.002"],                 # Open Redirect → Spearphishing Link
+    "CWE-611": ["T1190", "T1083"],            # XXE
+    "CWE-732": ["T1222"],                     # Incorrect Permission Assignment
+    "CWE-787": ["T1190", "T1203"],            # Out-of-bounds Write
+    "CWE-798": ["T1078"],                     # Hardcoded Credentials → Valid Accounts
+    "CWE-863": ["T1190"],                     # Incorrect Authorization
+    "CWE-918": ["T1090", "T1190"],            # SSRF → Proxy + Exploit Public-Facing App
+    "CWE-1021": ["T1185"],                    # UI Restriction Bypass → Browser Hijack
+    "CWE-1188": ["T1078"],                    # Insecure Default Initialization → Valid Accounts
+}
+
+# Technique-ID → human-readable name lookup, used in Markdown cross-tab output.
+ATTACK_TECHNIQUE_NAMES: dict[str, str] = {
+    "T1040": "Network Sniffing",
+    "T1059": "Command and Scripting Interpreter",
+    "T1059.007": "Command and Scripting Interpreter: JavaScript",
+    "T1068": "Exploitation for Privilege Escalation",
+    "T1078": "Valid Accounts",
+    "T1083": "File and Directory Discovery",
+    "T1090": "Proxy",
+    "T1110": "Brute Force",
+    "T1185": "Browser Session Hijacking",
+    "T1190": "Exploit Public-Facing Application",
+    "T1203": "Exploitation for Client Execution",
+    "T1212": "Exploitation for Credential Access",
+    "T1213": "Data from Information Repositories",
+    "T1222": "File and Directory Permissions Modification",
+    "T1499": "Endpoint Denial of Service",
+    "T1552": "Unsecured Credentials",
+    "T1557": "Adversary-in-the-Middle",
+    "T1566.002": "Phishing: Spearphishing Link",
+    "T1574.001": "Hijack Execution Flow: DLL Search Order Hijacking",
+}
+
+
+def map_cwes_to_attack_techniques(cwes: list[str]) -> list[str]:
+    """Return a deduplicated, sorted list of ATT&CK technique IDs for the CWEs.
+
+    Empty input or unmapped CWEs return an empty list. Sorting keeps CSV and
+    Markdown output deterministic across runs.
+    """
+    techniques: set[str] = set()
+    for cwe in cwes:
+        techniques.update(CWE_TO_ATTACK.get(cwe.upper(), []))
+    return sorted(techniques)
 
 _log = logging.getLogger(__name__)
 
@@ -102,6 +257,27 @@ class CveRecord:
     first_seen_type: str  # "feed_pub" | "disclosure" | "manual_input"
 
 
+# IOC types are kept open-coded as strings so the rest of the pipeline (CSV
+# columns, Markdown sections) can grow new types without a schema migration.
+# Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
+@dataclass
+class IocRecord:
+    """A non-CVE indicator extracted from feed/URL text.
+
+    `defanged_in_source` is a per-text confidence signal: True when the
+    original text contained at least one defang marker (hxxp, [.], (at), etc.).
+    Defanged feeds are typically authoritative IOC publications; un-defanged
+    matches are more likely to be incidental references.
+    """
+
+    ioc_type: str
+    value: str
+    source: str
+    first_seen: date
+    first_seen_type: str
+    defanged_in_source: bool = False
+
+
 @dataclass
 class EnrichedCve:
     """A CveRecord merged with NVD and EPSS data and a bucket assignment."""
@@ -121,10 +297,24 @@ class EnrichedCve:
     nvd_published: date | None = None
     nvd_status: str = "ok"
 
+    # CISA KEV authoritative fields (only populated when the CVE is in the KEV catalog).
+    kev_due_date: date | None = None
+    kev_required_action: str | None = None
+    kev_known_ransomware_use: bool = False
+    kev_vendor_project: str | None = None
+    kev_product: str | None = None
+    kev_short_description: str | None = None
+
     # EPSS fields
     epss_score: float | None = None
     epss_percentile: float | None = None
     epss_date: str | None = None
+
+    # MITRE ATT&CK technique IDs derived from the CWE list (best-effort, lossy).
+    attack_techniques: list[str] = field(default_factory=list)
+
+    # Public exploit / PoC availability signal: one of EXPLOIT_STATUS_VALUES.
+    exploit_status: str = "none"
 
     # Bucket
     bucket: str = "unknown"
@@ -153,6 +343,18 @@ class Cache:
             payload_json TEXT NOT NULL,
             fetched_at  TEXT NOT NULL,
             PRIMARY KEY (cve_id, score_date)
+        );
+        CREATE TABLE IF NOT EXISTS kev_cache (
+            id          TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS exploit_cache (
+            source      TEXT NOT NULL,
+            key         TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (source, key)
         );
     """
 
@@ -212,11 +414,57 @@ class Cache:
         )
         self._conn.commit()
 
+    def get_kev_catalog(self) -> dict[str, dict] | None:
+        """Return the cached CISA KEV catalog if fresh, else None.
+
+        The catalog is stored as a single row keyed on 'catalog'; we treat the
+        whole JSON-serialized {cve_id: kev_record} dict as the cache payload.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json, fetched_at FROM kev_cache WHERE id = ?",
+            ("catalog",),
+        ).fetchone()
+        if row and self._is_fresh(row[1]):
+            return json.loads(row[0])
+        return None
+
+    def set_kev_catalog(self, catalog: dict[str, dict]) -> None:
+        """Upsert the CISA KEV catalog into the cache as a single blob."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO kev_cache VALUES (?, ?, ?)",
+            ("catalog", json.dumps(catalog), _utcnow().isoformat()),
+        )
+        self._conn.commit()
+
+    def get_exploit(self, source: str, key: str) -> dict | None:
+        """Return cached exploit-tracker payload for (source, key) if fresh, else None.
+
+        `source` is one of 'exploitdb' | 'nuclei' | 'github'. `key` is 'index' for
+        global indices, or a CVE ID for per-CVE GitHub-search results.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json, fetched_at FROM exploit_cache WHERE source = ? AND key = ?",
+            (source, key),
+        ).fetchone()
+        if row and self._is_fresh(row[1]):
+            return json.loads(row[0])
+        return None
+
+    def set_exploit(self, source: str, key: str, payload: dict) -> None:
+        """Upsert an exploit-tracker payload."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO exploit_cache VALUES (?, ?, ?, ?)",
+            (source, key, json.dumps(payload), _utcnow().isoformat()),
+        )
+        self._conn.commit()
+
     def purge(self) -> None:
-        """Delete entries older than the TTL from both tables."""
+        """Delete entries older than the TTL from all tables."""
         cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.execute("DELETE FROM kev_cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.execute("DELETE FROM exploit_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
 
 
@@ -281,6 +529,108 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
                 )
             )
     return records
+
+
+def _defang_text(text: str) -> str:
+    """Refang common IOC obfuscations: hxxp → http, [.] → ., (at) → @, etc.
+
+    Substitutions are literal-string, case-insensitive, and applied in order.
+    The original CTI convention is to defang so links don't auto-render; we
+    refang first so a single regex pass can match either form.
+    """
+    for needle, replacement in _DEFANG_MAP:
+        # re.escape on the needle so brackets/parens aren't treated as metacharacters.
+        text = re.sub(re.escape(needle), replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def _is_public_ip(ip_str: str) -> bool:
+    """True if ip_str parses to a globally-routable unicast IPv4/IPv6 address."""
+    try:
+        return ipaddress.ip_address(ip_str).is_global
+    except ValueError:
+        return False
+
+
+def _is_likely_filename(domain_value: str) -> bool:
+    """True if the trailing label of domain_value is a common file extension."""
+    return domain_value.rsplit(".", 1)[-1].lower() in _FILE_EXT_TLDS
+
+
+def extract_iocs(
+    text: str,
+    source: str,
+    first_seen: date,
+    first_seen_type: str,
+) -> list[IocRecord]:
+    """Extract a deduplicated list of non-CVE indicators from text.
+
+    Pipeline:
+      1. Detect whether the original text contained any defang markers.
+      2. Refang the text via _defang_text.
+      3. Run regexes for URL, email, IPv4, SHA-256/SHA-1/MD5 (in that order).
+      4. If defang markers were present, additionally run the domain regex
+         (false-positive rate is too high in fanged blog text to enable it
+         unconditionally).
+      5. Drop private/reserved IPv4 addresses and filename-shaped domains.
+      6. Deduplicate by (ioc_type, value.lower()), preserving first-seen order.
+    """
+    defanged_in_source = bool(_DEFANG_DETECT.search(text))
+    refanged = _defang_text(text)
+
+    seen: set[tuple[str, str]] = set()
+    out: list[IocRecord] = []
+
+    def _emit(ioc_type: str, value: str) -> None:
+        key = (ioc_type, value.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            IocRecord(
+                ioc_type=ioc_type,
+                value=value,
+                source=source,
+                first_seen=first_seen,
+                first_seen_type=first_seen_type,
+                defanged_in_source=defanged_in_source,
+            )
+        )
+
+    for m in URL_REGEX.finditer(refanged):
+        # Strip trailing sentence punctuation that the URL regex greedily ate.
+        _emit("url", m.group(0).rstrip(".,;:!?"))
+
+    for m in EMAIL_REGEX.finditer(refanged):
+        _emit("email", m.group(0))
+
+    for m in IPV4_REGEX.finditer(refanged):
+        candidate = m.group(0)
+        if _is_public_ip(candidate):
+            _emit("ipv4", candidate)
+
+    # Hash regexes are mutually exclusive (different fixed lengths bounded by
+    # \b) so the order is purely cosmetic. Hashes are emitted lower-case.
+    for regex, label in (
+        (SHA256_REGEX, "sha256"),
+        (SHA1_REGEX, "sha1"),
+        (MD5_REGEX, "md5"),
+    ):
+        for m in regex.finditer(refanged):
+            _emit(label, m.group(0).lower())
+
+    if defanged_in_source:
+        url_values = [r.value for r in out if r.ioc_type == "url"]
+        for m in DOMAIN_REGEX.finditer(refanged):
+            value = m.group(0)
+            if _is_likely_filename(value):
+                continue
+            # Skip a domain that is the host of an already-emitted URL.
+            if any(value.lower() in url_v.lower() for url_v in url_values):
+                continue
+            _emit("domain", value)
+
+    return out
 
 
 def _redact_key(url: str) -> str:
@@ -586,12 +936,58 @@ def fetch_epss(
     return result
 
 
+def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
+    """Fetch the CISA Known Exploited Vulnerabilities catalog.
+
+    Returns a dict keyed by upper-case CVE ID, where each value is the raw
+    KEV record (dueDate, requiredAction, knownRansomwareCampaignUse,
+    vendorProject, product, shortDescription, etc.). The catalog is cached
+    as a single blob for the cache TTL (24h by default).
+
+    Never raises: on network/parse failure, returns an empty dict and logs a
+    warning so the rest of the pipeline can fall back to the NVD-derived
+    kev_listed flag without the authoritative metadata.
+    """
+    cached = cache.get_kev_catalog()
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(CISA_KEV_URL, headers={"User-Agent": USER_AGENT}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _log.warning("CISA KEV catalog fetch failed: %s", exc)
+        return {}
+
+    catalog: dict[str, dict] = {}
+    for entry in data.get("vulnerabilities", []):
+        cve_id = (entry.get("cveID") or "").upper()
+        if cve_id:
+            catalog[cve_id] = entry
+
+    cache.set_kev_catalog(catalog)
+    _log.info("Loaded CISA KEV catalog: %d entries.", len(catalog))
+    return catalog
+
+
+def _parse_kev_due_date(value: str | None) -> date | None:
+    """Parse a KEV dueDate string (YYYY-MM-DD) tolerating malformed input."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        _log.warning("KEV catalog returned an unparseable dueDate %r; ignoring.", value)
+        return None
+
+
 def enrich_cves(
     records: list[CveRecord],
     cache: Cache,
     api_key: str | None,
 ) -> list[EnrichedCve]:
-    """Fetch NVD and EPSS data for each unique CVE and return enriched records.
+    """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
     Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
     multiple records, only the earliest first_seen date is kept.
@@ -622,10 +1018,14 @@ def enrich_cves(
     # Fetch EPSS data in one batched call
     epss_data = fetch_epss(unique_ids, cache)
 
+    # Fetch the authoritative CISA KEV catalog (one HTTP call, cached).
+    kev_catalog = fetch_kev_catalog(cache)
+
     enriched: list[EnrichedCve] = []
     for cve_id, rec in earliest.items():
         nvd = nvd_data.get(cve_id, {})
         epss = epss_data.get(cve_id, {})
+        kev = kev_catalog.get(cve_id, {})
 
         nvd_pub_str = nvd.get("nvd_published")
         nvd_published: date | None = None
@@ -639,6 +1039,11 @@ def enrich_cves(
                     cve_id,
                 )
 
+        # CISA's catalog is the authoritative source for KEV membership; if it
+        # answers, prefer it over NVD's cisaExploitAdd flag. Either signal alone
+        # is enough to treat the CVE as KEV-listed.
+        kev_listed = bool(kev) or nvd.get("kev_listed", False)
+
         enriched.append(
             EnrichedCve(
                 cve_id=cve_id,
@@ -649,16 +1054,156 @@ def enrich_cves(
                 cvss_severity=nvd.get("cvss_severity"),
                 cvss_vector=nvd.get("cvss_vector"),
                 cvss_version=nvd.get("cvss_version"),
-                kev_listed=nvd.get("kev_listed", False),
+                kev_listed=kev_listed,
                 cwe=nvd.get("cwe", []),
                 nvd_published=nvd_published,
                 nvd_status=nvd.get("nvd_status", "ok"),
                 epss_score=epss.get("epss"),
                 epss_percentile=epss.get("percentile"),
                 epss_date=epss.get("date"),
+                kev_due_date=_parse_kev_due_date(kev.get("dueDate")) if kev else None,
+                kev_required_action=kev.get("requiredAction") if kev else None,
+                kev_known_ransomware_use=(
+                    (kev.get("knownRansomwareCampaignUse") or "").strip().lower() == "known"
+                ),
+                kev_vendor_project=kev.get("vendorProject") if kev else None,
+                kev_product=kev.get("product") if kev else None,
+                kev_short_description=kev.get("shortDescription") if kev else None,
+                attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
             )
         )
 
+    return enriched
+
+
+def fetch_exploitdb_cve_set(cache: Cache) -> set[str]:
+    """Return the set of CVE IDs that have at least one Exploit-DB entry.
+
+    The Exploit-DB project publishes a CSV mirror of every entry; the `codes`
+    column carries CVE IDs (semicolon-separated, sometimes mixed with OSVDB IDs
+    or other refs). We pull the file once per cache TTL, scan the codes column,
+    and persist the resulting set. On any error returns an empty set.
+    """
+    cached = cache.get_exploit("exploitdb", "index")
+    if cached is not None:
+        return set(cached.get("cve_ids", []))
+
+    cve_ids: set[str] = set()
+    try:
+        resp = requests.get(EXPLOITDB_CSV_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
+        resp.raise_for_status()
+        reader = csv.DictReader(resp.text.splitlines())
+        for row in reader:
+            codes = row.get("codes") or ""
+            for code in codes.split(";"):
+                normalized = code.strip().upper()
+                if CVE_REGEX.fullmatch(normalized):
+                    cve_ids.add(normalized)
+    except Exception as exc:
+        _log.warning("Exploit-DB index fetch failed: %s", exc)
+        return set()
+
+    cache.set_exploit("exploitdb", "index", {"cve_ids": sorted(cve_ids)})
+    _log.info("Loaded Exploit-DB index: %d CVEs.", len(cve_ids))
+    return cve_ids
+
+
+def fetch_nuclei_cve_set(cache: Cache) -> set[str]:
+    """Return the set of CVE IDs that have a Nuclei community template.
+
+    Hits the GitHub Git Trees API once and filters paths under `cves/` ending
+    in `.yaml`. Cached per the cache TTL. On any error returns an empty set.
+    """
+    cached = cache.get_exploit("nuclei", "index")
+    if cached is not None:
+        return set(cached.get("cve_ids", []))
+
+    cve_ids: set[str] = set()
+    try:
+        resp = requests.get(
+            NUCLEI_TEMPLATES_TREE_URL,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for entry in data.get("tree") or []:
+            path = entry.get("path") or ""
+            if "cves/" in path and path.endswith(".yaml"):
+                for m in CVE_REGEX.finditer(path):
+                    cve_ids.add(m.group(0).upper())
+    except Exception as exc:
+        _log.warning("Nuclei templates index fetch failed: %s", exc)
+        return set()
+
+    cache.set_exploit("nuclei", "index", {"cve_ids": sorted(cve_ids)})
+    _log.info("Loaded Nuclei templates index: %d CVEs.", len(cve_ids))
+    return cve_ids
+
+
+def search_github_for_cve(cve_id: str, cache: Cache, github_token: str | None) -> bool:
+    """Return True if a GitHub repository name or description references this CVE.
+
+    Returns False (without an HTTP call) when no GITHUB_TOKEN is configured —
+    the unauthenticated rate limit (10 req/min) is too low to be useful for a
+    CVE-by-CVE scan. Cached per CVE for the cache TTL.
+    """
+    if not github_token:
+        return False
+
+    cached = cache.get_exploit("github", cve_id)
+    if cached is not None:
+        return bool(cached.get("found", False))
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+    }
+    params = {"q": f"{cve_id} in:name,description", "per_page": "1"}
+    try:
+        resp = requests.get(GITHUB_SEARCH_URL, params=params, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _log.warning("GitHub search failed for %s: %s", cve_id, exc)
+        return False
+
+    found = (data.get("total_count") or 0) > 0
+    cache.set_exploit("github", cve_id, {"found": found})
+    return found
+
+
+def enrich_with_exploit_status(
+    enriched: list[EnrichedCve],
+    cache: Cache,
+    github_token: str | None = None,
+    *,
+    skip_github: bool = False,
+) -> list[EnrichedCve]:
+    """Set rec.exploit_status on each EnrichedCve in place.
+
+    Resolution order (highest priority wins):
+      1. exploit_db
+      2. nuclei_template
+      3. github_poc (only when github_token is set and skip_github=False)
+      Default: 'none'.
+
+    The bucket assignment is intentionally NOT changed — exploit_status is a
+    parallel signal that consumers can act on directly. Returns the same list
+    for chaining.
+    """
+    edb = fetch_exploitdb_cve_set(cache)
+    nuclei = fetch_nuclei_cve_set(cache)
+    for rec in enriched:
+        if rec.cve_id in edb:
+            rec.exploit_status = "exploit_db"
+        elif rec.cve_id in nuclei:
+            rec.exploit_status = "nuclei_template"
+        elif not skip_github and github_token and search_github_for_cve(
+            rec.cve_id, cache, github_token
+        ):
+            rec.exploit_status = "github_poc"
     return enriched
 
 
@@ -753,12 +1298,50 @@ CSV_COLUMNS = [
     "epss_score",
     "epss_percentile",
     "kev_listed",
+    "kev_due_date",
+    "kev_known_ransomware_use",
+    "kev_vendor_project",
+    "kev_product",
     "bucket",
     "suggested_action",
     "cwe",
+    "attack_techniques",
+    "exploit_status",
     "nvd_published",
     "enriched_at",
 ]
+
+
+IOC_CSV_COLUMNS = [
+    "ioc_type",
+    "value",
+    "source",
+    "first_seen",
+    "first_seen_type",
+    "defanged_in_source",
+]
+
+
+def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
+    """Write a CSV of non-CVE indicators alongside the main CVE CSV.
+
+    Columns are in IOC_CSV_COLUMNS order. defanged_in_source is rendered as
+    'true'/'false' so consumers can grep the file directly.
+    """
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(IOC_CSV_COLUMNS)
+        for rec in iocs:
+            writer.writerow(
+                [
+                    rec.ioc_type,
+                    rec.value,
+                    rec.source,
+                    str(rec.first_seen) if rec.first_seen else "",
+                    rec.first_seen_type,
+                    str(rec.defanged_in_source).lower(),
+                ]
+            )
 
 
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
@@ -785,9 +1368,15 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     epss,
                     pct,
                     str(rec.kev_listed).lower(),
+                    str(rec.kev_due_date) if rec.kev_due_date else "",
+                    str(rec.kev_known_ransomware_use).lower(),
+                    rec.kev_vendor_project or "",
+                    rec.kev_product or "",
                     rec.bucket,
                     rec.suggested_action,
                     ";".join(rec.cwe),
+                    ";".join(rec.attack_techniques),
+                    rec.exploit_status,
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -821,16 +1410,39 @@ def _md_safe(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) -> None:
+IOC_TYPE_DISPLAY: dict[str, str] = {
+    "url": "URLs",
+    "domain": "Domains",
+    "ipv4": "IPv4 Addresses",
+    "email": "Email Addresses",
+    "sha256": "SHA-256 Hashes",
+    "sha1": "SHA-1 Hashes",
+    "md5": "MD5 Hashes",
+}
+IOC_TYPE_ORDER = ["url", "domain", "ipv4", "email", "sha256", "sha1", "md5"]
+
+
+def write_markdown(
+    enriched: list[EnrichedCve],
+    path: Path,
+    run_metadata: dict,
+    iocs: list[IocRecord] | None = None,
+) -> None:
     """Write a human-readable Markdown triage report.
 
     run_metadata keys: command (str), args (str — secrets redacted), version (str),
     sources (list[str]), start (str), end (str), date_mode (str),
     cvss_threshold (float), epss_threshold (float).
+
+    If `iocs` is non-empty, an additional "Indicators of Compromise" section is
+    rendered at the end of the report, grouped by IOC type.
     """
+    iocs = iocs or []
     lines: list[str] = []
     now = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = len(enriched)
+    total_iocs = len(iocs)
+    defanged_iocs = sum(1 for ioc in iocs if ioc.defanged_in_source)
 
     lines += [
         "# Ramen CVE Triage Report",
@@ -838,6 +1450,8 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
         f"Generated: {now}  ",
         f"Total CVEs: **{total}**  ",
     ]
+    if total_iocs:
+        lines.append(f"Total IOCs: **{total_iocs}** ({defanged_iocs} defanged in source)  ")
     if run_metadata.get("start") or run_metadata.get("end"):
         lines.append(
             f"Date filter: {run_metadata.get('start', '*')} → {run_metadata.get('end', '*')} "
@@ -868,9 +1482,27 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
         lines.append(f"| {BUCKET_DISPLAY[bucket]} | {count} | {action} |")
     lines.append("")
 
+    technique_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for tid in rec.attack_techniques:
+            technique_rollup.setdefault(tid, []).append(rec.cve_id)
+    if technique_rollup:
+        lines += [
+            "## By ATT&CK Technique",
+            "",
+            "| Technique | Name | CVEs |",
+            "| --- | --- | --- |",
+        ]
+        for tid in sorted(technique_rollup):
+            name = ATTACK_TECHNIQUE_NAMES.get(tid, "(unmapped)")
+            cves = technique_rollup[tid]
+            lines.append(f"| {tid} | {name} | {len(cves)} |")
+        lines.append("")
+
     if total == 0:
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
+    today = date.today()
     for bucket in BUCKET_ORDER:
         recs = by_bucket[bucket]
         if not recs:
@@ -891,8 +1523,54 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
             else:
                 lines.append("- **EPSS:** N/A")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
+            if rec.attack_techniques:
+                techniques_display = ", ".join(
+                    f"{tid} ({ATTACK_TECHNIQUE_NAMES[tid]})"
+                    if tid in ATTACK_TECHNIQUE_NAMES
+                    else tid
+                    for tid in rec.attack_techniques
+                )
+                lines.append(f"- **ATT&CK:** {techniques_display}")
+            if rec.exploit_status and rec.exploit_status != "none":
+                lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
+            if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
+                if rec.kev_vendor_project or rec.kev_product:
+                    affected = " ".join(
+                        p for p in (rec.kev_vendor_project, rec.kev_product) if p
+                    )
+                    lines.append(f"- **CISA KEV — Affected:** {_md_safe(affected)}")
+                if rec.kev_due_date:
+                    overdue = " (OVERDUE)" if rec.kev_due_date < today else ""
+                    lines.append(f"- **CISA KEV — Due Date:** {rec.kev_due_date}{overdue}")
+                if rec.kev_known_ransomware_use:
+                    lines.append("- **CISA KEV — Ransomware Use:** Known")
+                if rec.kev_required_action:
+                    lines.append(
+                        f"- **CISA KEV — Required Action:** {_md_safe(rec.kev_required_action)}"
+                    )
+                if rec.kev_short_description:
+                    lines.append(
+                        f"- **CISA KEV — Description:** {_md_safe(rec.kev_short_description)}"
+                    )
             lines.append(f"- **Source:** {_md_safe(rec.source)}")
+            lines.append("")
+
+    if iocs:
+        by_type: dict[str, list[IocRecord]] = {t: [] for t in IOC_TYPE_ORDER}
+        for ioc in iocs:
+            by_type.setdefault(ioc.ioc_type, []).append(ioc)
+        lines += ["## Indicators of Compromise", ""]
+        for ioc_type in IOC_TYPE_ORDER:
+            recs = by_type.get(ioc_type) or []
+            if not recs:
+                continue
+            label = IOC_TYPE_DISPLAY.get(ioc_type, ioc_type)
+            lines.append(f"### {label} ({len(recs)})")
+            lines.append("")
+            for rec in recs:
+                marker = " *(defanged in source)*" if rec.defanged_in_source else ""
+                lines.append(f"- `{_md_safe(rec.value)}`{marker}")
             lines.append("")
 
     version = run_metadata.get("version", "0.1")
@@ -939,6 +1617,11 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("."))
     parser.add_argument("--format", choices=["csv", "md", "both"], default="both")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--no-exploit-lookup",
+        action="store_true",
+        help="Skip Exploit-DB / Nuclei / GitHub PoC lookups (offline mode).",
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
@@ -1202,6 +1885,18 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _get_github_token() -> str | None:
+    """Return GITHUB_TOKEN from the environment, or None if absent.
+
+    The token is only used to lift GitHub Search rate limits when
+    enrich_with_exploit_status is enabled. We never log it and never persist it.
+    """
+    import os
+
+    token = os.getenv("GITHUB_TOKEN") or None
+    return token
+
+
 def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
     """Return a path that does not yet exist by appending -N if needed.
 
@@ -1220,8 +1915,18 @@ def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
     raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
 
 
-def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dict) -> None:
-    """Write CSV and/or Markdown output based on --format flag."""
+def _output(
+    enriched: list[EnrichedCve],
+    args: argparse.Namespace,
+    metadata: dict,
+    iocs: list[IocRecord] | None = None,
+) -> None:
+    """Write CSV and/or Markdown output based on --format flag.
+
+    When `iocs` is non-empty and --format includes csv, an additional
+    `<basename>-iocs.csv` file is written next to the main CVE CSV. The
+    Markdown report grows an Indicators of Compromise section regardless.
+    """
     # Microsecond resolution makes single-process collisions essentially
     # impossible; the -N suffix loop in _unique_output_path covers
     # cross-process collisions and any clock that lacks sub-second
@@ -1229,15 +1934,20 @@ def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dic
     ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    iocs = iocs or []
 
     if args.format in ("csv", "both"):
         csv_path = _unique_output_path(out_dir, ts, "csv")
         write_csv(enriched, csv_path)
         print(str(csv_path))
+        if iocs:
+            iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            write_iocs_csv(iocs, iocs_path)
+            print(str(iocs_path))
 
     if args.format in ("md", "both"):
         md_path = _unique_output_path(out_dir, ts, "md")
-        write_markdown(enriched, md_path, metadata)
+        write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
 
 
@@ -1247,6 +1957,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
     entries = parse_opml(args.path)
     records: list[CveRecord] = []
+    iocs: list[IocRecord] = []
     sources: list[str] = []
 
     for entry in entries:
@@ -1257,6 +1968,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         if getattr(feed, "bozo", 0):
             reason = getattr(feed, "bozo_exception", "unknown parse error")
             _log.warning("Feed %s parsed with errors: %s", safe_url, reason)
+        feed_source = entry.title or entry.url
         for item in feed.entries or []:
             pub = item.get("published_parsed") or item.get("updated_parsed")
             item_date = date(*pub[:3]) if pub else date.today()
@@ -1267,10 +1979,15 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
                     item.get("content", [{}])[0].get("value", "") if item.get("content") else "",
                 ]
             )
-            records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
+            records.extend(extract_cves(text, feed_source, item_date, "feed_pub"))
+            iocs.extend(extract_iocs(text, feed_source, item_date, "feed_pub"))
+
+    iocs = _dedupe_iocs(iocs)
 
     date_mode = args.date_mode or "feed"
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1285,7 +2002,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
-    _output(enriched, args, metadata)
+    _output(enriched, args, metadata, iocs=iocs)
     return 0
 
 
@@ -1325,7 +2042,10 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
+    iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1340,8 +2060,39 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
-    _output(enriched, args, metadata)
+    _output(enriched, args, metadata, iocs=iocs)
     return 0
+
+
+def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
+    """Collapse duplicates across multiple feed items into one record per (type, value).
+
+    Keeps the earliest first_seen, OR-merges defanged_in_source, and joins
+    distinct sources with '; ' so the resulting IOC carries provenance from
+    every feed it appeared in.
+    """
+    by_key: dict[tuple[str, str], IocRecord] = {}
+    for ioc in iocs:
+        key = (ioc.ioc_type, ioc.value.lower())
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = IocRecord(
+                ioc_type=ioc.ioc_type,
+                value=ioc.value,
+                source=ioc.source,
+                first_seen=ioc.first_seen,
+                first_seen_type=ioc.first_seen_type,
+                defanged_in_source=ioc.defanged_in_source,
+            )
+            continue
+        if ioc.first_seen < existing.first_seen:
+            existing.first_seen = ioc.first_seen
+            existing.first_seen_type = ioc.first_seen_type
+        if ioc.defanged_in_source and not existing.defanged_in_source:
+            existing.defanged_in_source = True
+        if ioc.source and ioc.source not in existing.source.split("; "):
+            existing.source = f"{existing.source}; {ioc.source}"
+    return list(by_key.values())
 
 
 def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
@@ -1375,6 +2126,8 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]
     enriched = enrich_cves(records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)

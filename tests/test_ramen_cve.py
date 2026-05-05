@@ -1316,3 +1316,1066 @@ def test_cli_from_file_missing_returns_friendly_error(tmp_path):
     assert result.returncode == 1
     assert "Traceback" not in result.stderr
     assert "does not exist" in result.stderr or "from-file" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 — CISA KEV catalog ingestion
+# ---------------------------------------------------------------------------
+
+
+def _kev_catalog_fixture() -> dict:
+    return _load_fixture("cisa_kev_catalog.json")
+
+
+def _patch_kev(catalog_payload: dict | None = None, status_code: int = 200):
+    """Patch requests.get so any KEV URL hit returns catalog_payload."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_payload = catalog_payload if catalog_payload is not None else _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = status_code
+        if status_code >= 400:
+            import requests as _req
+
+            resp.raise_for_status.side_effect = _req.HTTPError(response=resp)
+        else:
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = catalog_payload
+        return resp
+
+    return patch("ramen_cve.requests.get", side_effect=_fake_get)
+
+
+def test_fetch_kev_catalog_basic():
+    """A successful fetch returns a dict keyed on upper-case CVE ID."""
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    with _patch_kev():
+        catalog = fetch_kev_catalog(cache)
+
+    assert "CVE-2021-44228" in catalog
+    assert catalog["CVE-2021-44228"]["vendorProject"] == "Apache"
+    # Empty cveID entries are filtered out so we don't pollute the lookup
+    assert "" not in catalog
+
+
+def test_fetch_kev_catalog_uses_cache_on_second_call():
+    """Two calls in the same TTL window should produce only one HTTP request."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    payload = _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = payload
+        return resp
+
+    with patch("ramen_cve.requests.get", side_effect=_fake_get) as mock_get:
+        first = fetch_kev_catalog(cache)
+        second = fetch_kev_catalog(cache)
+
+    assert mock_get.call_count == 1
+    assert first == second
+    assert "CVE-2021-44228" in second
+
+
+def test_fetch_kev_catalog_network_error_returns_empty(caplog):
+    """A 5xx (or any exception) must yield an empty dict, not a crash."""
+    import logging
+
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    with _patch_kev(status_code=503), caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        catalog = fetch_kev_catalog(cache)
+
+    assert catalog == {}
+    assert any("CISA KEV catalog fetch failed" in rec.message for rec in caplog.records)
+
+
+def test_parse_kev_due_date_handles_malformed():
+    """An unparseable dueDate must not crash the joiner."""
+    import logging
+
+    from ramen_cve import _parse_kev_due_date
+
+    assert _parse_kev_due_date(None) is None
+    assert _parse_kev_due_date("") is None
+    assert _parse_kev_due_date("2024-06-01") == date(2024, 6, 1)
+
+    logger = logging.getLogger("ramen_cve")
+    with pytest.MonkeyPatch.context() as mp:
+        warnings: list[str] = []
+        original = logger.warning
+        mp.setattr(logger, "warning", lambda msg, *a, **kw: warnings.append(msg % a))
+        assert _parse_kev_due_date("not-a-date") is None
+        assert any("unparseable dueDate" in w for w in warnings)
+        logger.warning = original
+
+
+def test_enrich_cves_populates_kev_authoritative_fields():
+    """CVEs in the CISA KEV catalog are joined with due date, ransomware flag, etc."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+    kev = _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert len(result) == 1
+    rec = result[0]
+    assert rec.kev_listed is True
+    assert rec.kev_due_date == date(2021, 12, 24)
+    assert rec.kev_known_ransomware_use is True
+    assert rec.kev_vendor_project == "Apache"
+    assert rec.kev_product == "Log4j2"
+    assert rec.kev_required_action and "vendor" in rec.kev_required_action.lower()
+    assert rec.kev_short_description and "deserialization" in rec.kev_short_description
+
+
+def test_enrich_cves_kev_listed_when_only_catalog_says_so():
+    """Even if NVD response lacks cisaExploitAdd, a KEV catalog hit sets kev_listed=True."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    epss = _load_fixture("epss_batch.json")
+    kev = _kev_catalog_fixture()
+    # NVD response with NO cisaExploitAdd field at all
+    nvd_no_kev = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2021-44228",
+                    "metrics": {},
+                    "weaknesses": [],
+                    "published": "2021-12-10T00:00:00.000",
+                }
+            }
+        ]
+    }
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = nvd_no_kev
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert result[0].kev_listed is True
+    assert result[0].kev_due_date == date(2021, 12, 24)
+
+
+def test_enrich_cves_no_kev_match_leaves_authoritative_fields_default():
+    """A CVE not in the KEV catalog has the authoritative KEV fields at default values."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    epss = _load_fixture("epss_batch.json")
+    nvd_no_kev = _load_fixture("nvd_proxylogon_v30.json")
+    # Empty KEV catalog
+    kev: dict = {"vulnerabilities": []}
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = nvd_no_kev
+        return resp
+
+    records = [CveRecord("CVE-2021-26855", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    rec = result[0]
+    assert rec.kev_due_date is None
+    assert rec.kev_required_action is None
+    assert rec.kev_known_ransomware_use is False
+    assert rec.kev_vendor_project is None
+    assert rec.kev_product is None
+
+
+def test_write_csv_includes_kev_columns(tmp_path):
+    """CSV header now lists the new KEV columns and rows carry the values."""
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="krebs",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        kev_vendor_project="Apache",
+        kev_product="Log4j2",
+        kev_required_action="Apply patches.",
+        bucket="kev_override",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    for col in (
+        "kev_due_date",
+        "kev_known_ransomware_use",
+        "kev_vendor_project",
+        "kev_product",
+    ):
+        assert col in header, f"missing column {col} in CSV header: {header}"
+    assert header == CSV_COLUMNS
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["kev_due_date"] == "2021-12-24"
+    assert row["kev_known_ransomware_use"] == "true"
+    assert row["kev_vendor_project"] == "Apache"
+    assert row["kev_product"] == "Log4j2"
+
+
+def test_write_markdown_kev_section_renders_authoritative_fields(tmp_path):
+    """KEV markdown surfaces vendor, due date, ransomware flag, and required action."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="krebs",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        bucket="kev_override",
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        kev_vendor_project="Apache",
+        kev_product="Log4j2",
+        kev_required_action="Apply updates per vendor instructions.",
+        kev_short_description="Apache Log4j2 RCE.",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Apache Log4j2" in text
+    assert "2021-12-24" in text
+    assert "OVERDUE" in text  # past dueDate marker
+    assert "Ransomware Use" in text
+    assert "Required Action" in text
+    assert "Apply updates per vendor instructions." in text
+
+
+def test_write_markdown_no_overdue_marker_when_due_in_future(tmp_path):
+    """A KEV due date in the future must NOT show OVERDUE."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    far_future = date.today().replace(year=date.today().year + 1)
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date.today(),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        kev_listed=True,
+        bucket="kev_override",
+        kev_due_date=far_future,
+        kev_vendor_project="Vendor",
+        kev_product="Product",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert str(far_future) in text
+    assert "OVERDUE" not in text
+
+
+def test_cache_kev_catalog_round_trip():
+    """Cache.get_kev_catalog round-trips the dict written by Cache.set_kev_catalog."""
+    c = _mem_cache()
+    catalog = {"CVE-2021-44228": {"dueDate": "2021-12-24", "knownRansomwareCampaignUse": "Known"}}
+    c.set_kev_catalog(catalog)
+    assert c.get_kev_catalog() == catalog
+
+
+def test_cache_kev_catalog_stale_returns_none():
+    """A KEV catalog older than the TTL is treated as a miss."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:", ttl_hours=1)
+    past = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+    c._conn.execute(
+        "INSERT INTO kev_cache VALUES (?, ?, ?)",
+        ("catalog", '{"CVE-2024-0001": {}}', past),
+    )
+    c._conn.commit()
+    assert c.get_kev_catalog() is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 9 — Multi-IOC extraction
+# ---------------------------------------------------------------------------
+
+
+def test_defang_text_handles_common_obfuscations():
+    """Defang map covers hxxp, [.]/(.)/[dot]/(dot), [at]/(at), [:]."""
+    from ramen_cve import _defang_text
+
+    assert _defang_text("hxxp://evil[.]example[.]com") == "http://evil.example.com"
+    assert _defang_text("hxxps://bad(.)example(.)com") == "https://bad.example.com"
+    assert _defang_text("user[at]example[.]com") == "user@example.com"
+    assert _defang_text("admin(at)bad(dot)tld") == "admin@bad.tld"
+    assert _defang_text("plain text with nothing to defang") == "plain text with nothing to defang"
+
+
+def test_extract_iocs_url_basic():
+    """A plain http/https URL is captured as an 'url' IOC."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Visit https://example.com/path for info", "src", TODAY, "feed_pub")
+    assert any(i.ioc_type == "url" and i.value == "https://example.com/path" for i in iocs)
+
+
+def test_extract_iocs_url_strips_trailing_punctuation():
+    """A URL followed by a period or comma drops the punctuation in the IOC value."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "Beacon to https://malware.example.com/c2. Then exfil to https://other.example.com/x,",
+        "src", TODAY, "feed_pub",
+    )
+    urls = [i.value for i in iocs if i.ioc_type == "url"]
+    assert "https://malware.example.com/c2" in urls
+    assert "https://other.example.com/x" in urls
+
+
+def test_extract_iocs_defanged_url_refanged():
+    """A defanged hxxp[://]bad[.]example URL is captured as the refanged form."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("C2: hxxps://evil[.]example[.]com/abc", "src", TODAY, "feed_pub")
+    urls = [i for i in iocs if i.ioc_type == "url"]
+    assert any(u.value == "https://evil.example.com/abc" for u in urls)
+    assert all(u.defanged_in_source for u in urls)
+
+
+def test_extract_iocs_email_basic():
+    """A plain user@domain.tld email is captured."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Contact admin@example.com for details", "src", TODAY, "feed_pub")
+    assert any(i.ioc_type == "email" and i.value == "admin@example.com" for i in iocs)
+
+
+def test_extract_iocs_ipv4_public_only():
+    """Public IPv4 is captured; private/loopback/multicast are dropped."""
+    from ramen_cve import extract_iocs
+
+    text = "Beacon 8.8.8.8 from 192.168.1.1, 10.0.0.5, 127.0.0.1, and 1.1.1.1"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    ips = {i.value for i in iocs if i.ioc_type == "ipv4"}
+    assert "8.8.8.8" in ips
+    assert "1.1.1.1" in ips
+    assert "192.168.1.1" not in ips
+    assert "10.0.0.5" not in ips
+    assert "127.0.0.1" not in ips
+
+
+def test_extract_iocs_md5_sha1_sha256_distinct_lengths():
+    """Each hash regex matches only its own length, not shorter or longer hex."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"  # 32
+    sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"  # 40
+    sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # 64
+
+    text = f"Hashes: {md5} {sha1} {sha256}"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    by_type = {i.ioc_type: i.value for i in iocs if i.ioc_type in ("md5", "sha1", "sha256")}
+    assert by_type == {"md5": md5, "sha1": sha1, "sha256": sha256}
+
+
+def test_extract_iocs_hashes_emit_lowercase():
+    """An upper-case hash is normalized to lower-case in the emitted IOC."""
+    from ramen_cve import extract_iocs
+
+    upper_md5 = "D41D8CD98F00B204E9800998ECF8427E"
+    iocs = extract_iocs(f"hash: {upper_md5}", "src", TODAY, "feed_pub")
+    md5s = [i.value for i in iocs if i.ioc_type == "md5"]
+    assert md5s == [upper_md5.lower()]
+
+
+def test_extract_iocs_domain_only_when_defanged():
+    """A bare 'example.com' is NOT emitted unless the source contains defang markers."""
+    from ramen_cve import extract_iocs
+
+    fanged = extract_iocs("see example.com for details", "src", TODAY, "feed_pub")
+    assert all(i.ioc_type != "domain" for i in fanged)
+
+    defanged = extract_iocs(
+        "Beacon to evil[.]example[.]com — see also bad[.]tld", "src", TODAY, "feed_pub"
+    )
+    domains = {i.value for i in defanged if i.ioc_type == "domain"}
+    assert "evil.example.com" in domains
+    assert "bad.tld" in domains
+
+
+def test_extract_iocs_skips_filename_shaped_domains():
+    """Defanged 'report[.]pdf' must NOT be emitted as a domain (file extension TLD)."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "Drops payload[.]exe and decoy report[.]pdf from evil[.]example[.]com",
+        "src", TODAY, "feed_pub",
+    )
+    domains = {i.value for i in iocs if i.ioc_type == "domain"}
+    assert "evil.example.com" in domains
+    assert "payload.exe" not in domains
+    assert "report.pdf" not in domains
+
+
+def test_extract_iocs_dedupe_within_text():
+    """The same hash repeated twice produces one IOC."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    iocs = extract_iocs(f"{md5} ... again {md5}", "src", TODAY, "feed_pub")
+    md5s = [i for i in iocs if i.ioc_type == "md5"]
+    assert len(md5s) == 1
+
+
+def test_extract_iocs_defanged_marker_propagates_to_all_iocs_in_text():
+    """If the text contains any defang token, every IOC from that text is flagged defanged."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    text = f"hxxps://evil[.]example[.]com drops {md5} from 8.8.8.8"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    assert iocs and all(i.defanged_in_source for i in iocs)
+
+
+def test_extract_iocs_no_iocs_returns_empty_list():
+    """Plain text with nothing IOC-shaped returns an empty list (not None, not error)."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Nothing to see here.", "src", TODAY, "feed_pub")
+    assert iocs == []
+
+
+def test_extract_iocs_url_skips_domain_match_for_same_host():
+    """A defanged URL host should not also be emitted as a separate domain IOC."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "C2: hxxps://evil[.]example[.]com/abc and another bad[.]tld",
+        "src", TODAY, "feed_pub",
+    )
+    domains = {i.value for i in iocs if i.ioc_type == "domain"}
+    # 'evil.example.com' is the URL host; only the un-URL'd 'bad.tld' should remain
+    assert "evil.example.com" not in domains
+    assert "bad.tld" in domains
+
+
+def test_dedupe_iocs_merges_sources_and_keeps_earliest():
+    """Same (type, value) across feeds: earliest first_seen wins, sources joined with '; '."""
+    from ramen_cve import IocRecord, _dedupe_iocs
+
+    a = IocRecord("ipv4", "8.8.8.8", "feed-a", date(2024, 1, 5), "feed_pub")
+    b = IocRecord(
+        "ipv4", "8.8.8.8", "feed-b", date(2024, 1, 1), "feed_pub", defanged_in_source=True,
+    )
+    c = IocRecord("ipv4", "8.8.8.8", "feed-a", date(2024, 1, 7), "feed_pub")  # dup of a's source
+
+    out = _dedupe_iocs([a, b, c])
+    assert len(out) == 1
+    rec = out[0]
+    assert rec.first_seen == date(2024, 1, 1)
+    assert rec.defanged_in_source is True
+    assert "feed-a" in rec.source and "feed-b" in rec.source
+    # 'feed-a' should appear once even though the input had it twice
+    assert rec.source.split("; ").count("feed-a") == 1
+
+
+def test_write_iocs_csv_round_trip(tmp_path):
+    """write_iocs_csv emits the columns in IOC_CSV_COLUMNS order."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    iocs = [
+        IocRecord("url", "https://evil.example.com/x", "feed-a",
+                  date(2024, 1, 1), "feed_pub", defanged_in_source=True),
+        IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "feed-b",
+                  date(2024, 2, 1), "feed_pub"),
+    ]
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv(iocs, out)
+    rows = list(csv.reader(out.open()))
+    assert rows[0] == IOC_CSV_COLUMNS
+    assert len(rows) == 3
+    assert rows[1][0] == "url"
+    assert rows[1][-1] == "true"
+    assert rows[2][0] == "md5"
+    assert rows[2][-1] == "false"
+
+
+def test_write_markdown_renders_iocs_section(tmp_path):
+    """When iocs is non-empty, the Markdown report includes an IOC section."""
+    from ramen_cve import IocRecord, write_markdown
+
+    iocs = [
+        IocRecord("url", "https://evil.example.com/c2", "feed-a",
+                  date(2024, 1, 1), "feed_pub", defanged_in_source=True),
+        IocRecord("ipv4", "8.8.8.8", "feed-a",
+                  date(2024, 1, 2), "feed_pub"),
+        IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "feed-a",
+                  date(2024, 1, 3), "feed_pub"),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=iocs)
+    text = out.read_text()
+    assert "## Indicators of Compromise" in text
+    assert "### URLs" in text
+    assert "https://evil.example.com/c2" in text
+    assert "### IPv4 Addresses" in text
+    assert "8.8.8.8" in text
+    assert "### MD5 Hashes" in text
+    assert "d41d8cd98f00b204e9800998ecf8427e" in text
+    assert "Total IOCs: **3** (1 defanged in source)" in text
+    assert "*(defanged in source)*" in text
+
+
+def test_write_markdown_no_iocs_section_when_empty(tmp_path):
+    """When iocs is None or empty, no 'Indicators of Compromise' section is rendered."""
+    from ramen_cve import write_markdown
+
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=None)
+    text = out.read_text()
+    assert "## Indicators of Compromise" not in text
+    assert "Total IOCs" not in text
+
+
+def test_extract_iocs_defanged_at_marker_email():
+    """A '(at)'-defanged email refangs to '@' and is captured."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("contact attacker(at)evil[.]example", "src", TODAY, "feed_pub")
+    emails = [i.value for i in iocs if i.ioc_type == "email"]
+    # Note: this test will only succeed if the TLD has length ≥ 2; "example" is 7 chars
+    assert "attacker@evil.example" in emails
+
+
+# ---------------------------------------------------------------------------
+# Slice 10 — MITRE ATT&CK technique mapping
+# ---------------------------------------------------------------------------
+
+
+def test_map_cwes_to_attack_basic():
+    """Known CWEs map to their curated technique IDs."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert "T1190" in map_cwes_to_attack_techniques(["CWE-89"])
+    assert "T1059" in map_cwes_to_attack_techniques(["CWE-78"])
+    assert "T1190" in map_cwes_to_attack_techniques(["CWE-502"])
+    assert "T1059" in map_cwes_to_attack_techniques(["CWE-502"])
+
+
+def test_map_cwes_to_attack_dedupes_and_sorts():
+    """Multiple CWEs that share a technique produce one sorted output."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    out = map_cwes_to_attack_techniques(["CWE-89", "CWE-352", "CWE-306"])
+    # All three map to T1190 → expect a single T1190 entry
+    assert out == sorted(set(out))
+    assert out.count("T1190") == 1
+
+
+def test_map_cwes_to_attack_unknown_returns_empty():
+    """An unmapped CWE produces no techniques (and no error)."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert map_cwes_to_attack_techniques(["CWE-99999"]) == []
+
+
+def test_map_cwes_to_attack_case_insensitive():
+    """Lower-case CWE input is normalized before lookup."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert "T1190" in map_cwes_to_attack_techniques(["cwe-89"])
+
+
+def test_map_cwes_to_attack_empty_input():
+    """Empty CWE list returns an empty technique list."""
+    from ramen_cve import map_cwes_to_attack_techniques
+
+    assert map_cwes_to_attack_techniques([]) == []
+
+
+def test_attack_technique_names_cover_mapping():
+    """Every technique referenced in CWE_TO_ATTACK has a display name."""
+    from ramen_cve import ATTACK_TECHNIQUE_NAMES, CWE_TO_ATTACK
+
+    referenced = {tid for tids in CWE_TO_ATTACK.values() for tid in tids}
+    missing = referenced - ATTACK_TECHNIQUE_NAMES.keys()
+    assert not missing, f"missing technique names for: {sorted(missing)}"
+
+
+def test_enrich_cves_populates_attack_techniques():
+    """End-to-end: CWE-502 in the NVD response surfaces T1190 + T1059 on the EnrichedCve."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    # Log4Shell CWE-502 → T1059 + T1190 per CWE_TO_ATTACK
+    techniques = result[0].attack_techniques
+    assert "T1190" in techniques
+    assert "T1059" in techniques
+    # Output is deterministic (sorted)
+    assert techniques == sorted(techniques)
+
+
+def test_write_csv_includes_attack_techniques_column(tmp_path):
+    """CSV header includes attack_techniques and the row joins values with ';'."""
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        attack_techniques=["T1059", "T1190"],
+        bucket="patch_now",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    assert "attack_techniques" in rows[0]
+    assert rows[0] == CSV_COLUMNS
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["attack_techniques"] == "T1059;T1190"
+
+
+def test_write_markdown_renders_attack_per_cve_and_cross_tab(tmp_path):
+    """Markdown shows per-CVE ATT&CK list and a 'By ATT&CK Technique' summary table."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            cvss_severity="CRITICAL",
+            epss_score=0.97,
+            attack_techniques=["T1059", "T1190"],
+            bucket="patch_now",
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            cvss_severity="CRITICAL",
+            epss_score=0.97,
+            attack_techniques=["T1190"],
+            bucket="patch_now",
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    # Per-CVE
+    assert "**ATT&CK:** T1059" in text
+    assert "T1190 (Exploit Public-Facing Application)" in text
+    # Cross-tab
+    assert "## By ATT&CK Technique" in text
+    assert "| T1190 | Exploit Public-Facing Application | 2 |" in text
+    assert "| T1059 | Command and Scripting Interpreter | 1 |" in text
+
+
+def test_write_markdown_no_attack_section_when_empty(tmp_path):
+    """If no enriched record has attack_techniques, the cross-tab section is omitted."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        attack_techniques=[],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "## By ATT&CK Technique" not in text
+    assert "**ATT&CK:**" not in text
+
+
+# ---------------------------------------------------------------------------
+# Slice 11 — Exploit / PoC availability tracking
+# ---------------------------------------------------------------------------
+
+
+_EDB_CSV_FIXTURE = (
+    "id,file,description,date_published,author,type,platform,port,date_added,"
+    "date_updated,verified,codes,tags,aliases,screenshot_url,application_url,source_url\n"
+    "50562,exploits/multiple/remote/50562.py,Apache Log4j 2 - RCE,2021-12-14,Anonymous,"
+    "remote,multiple,,2021-12-14,2022-04-12,1,CVE-2021-44228;CVE-2021-45046,,,,,\n"
+    "49637,exploits/windows/remote/49637.py,Microsoft Exchange Server SSRF,2021-03-15,"
+    "Anonymous,remote,windows,,2021-03-15,2022-04-12,1,CVE-2021-26855,,,,,\n"
+    "10000,exploits/local/foo.py,Stub,2024-01-01,A,local,linux,,2024-01-01,2024-01-01,1,,,,,,\n"
+)
+
+_NUCLEI_TREE_FIXTURE = {
+    "tree": [
+        {"path": "http/cves/2021/CVE-2021-44228.yaml", "type": "blob"},
+        {"path": "http/cves/2021/CVE-2021-26855.yaml", "type": "blob"},
+        {"path": "README.md", "type": "blob"},
+        {"path": "http/cves/2024/CVE-2024-9999.yaml", "type": "blob"},
+        {"path": "http/cves/", "type": "tree"},  # not a yaml file
+    ]
+}
+
+
+def _patch_exploit_get(edb_text: str | None = None, nuclei_data: dict | None = None,
+                      github_total: int | None = None):
+    """Patch requests.get to differentiate the EDB / Nuclei / GitHub URLs."""
+    from unittest.mock import MagicMock, patch
+
+    edb_text = edb_text if edb_text is not None else _EDB_CSV_FIXTURE
+    nuclei_data = nuclei_data if nuclei_data is not None else _NUCLEI_TREE_FIXTURE
+
+    def _fake(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "exploit-database" in url or "exploitdb" in url:
+            resp.text = edb_text
+        elif "nuclei-templates" in url:
+            resp.json.return_value = nuclei_data
+        elif "search/repositories" in url:
+            resp.json.return_value = {"total_count": github_total or 0}
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    return patch("ramen_cve.requests.get", side_effect=_fake)
+
+
+def test_fetch_exploitdb_cve_set_parses_codes_column():
+    """Each non-empty 'codes' cell yields one or more CVE IDs."""
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get():
+        edb = fetch_exploitdb_cve_set(cache)
+
+    assert "CVE-2021-44228" in edb
+    assert "CVE-2021-45046" in edb
+    assert "CVE-2021-26855" in edb
+
+
+def test_fetch_exploitdb_cve_set_caches_index():
+    """A second call returns the cached set without an HTTP request."""
+
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get() as mock_get:
+        first = fetch_exploitdb_cve_set(cache)
+        second = fetch_exploitdb_cve_set(cache)
+    # Only one call to the EDB URL on the first invocation
+    assert first == second
+    edb_calls = [c for c in mock_get.call_args_list if "exploit" in c.args[0]]
+    assert len(edb_calls) == 1
+
+
+def test_fetch_exploitdb_cve_set_handles_error(caplog):
+    """A network error returns an empty set and logs a warning."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_exploitdb_cve_set
+
+    cache = _mem_cache()
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("boom")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        result = fetch_exploitdb_cve_set(cache)
+    assert result == set()
+    assert any("Exploit-DB index fetch failed" in r.message for r in caplog.records)
+
+
+def test_fetch_nuclei_cve_set_extracts_from_paths():
+    """Paths under 'cves/' ending in '.yaml' yield the CVE IDs in the path."""
+    from ramen_cve import fetch_nuclei_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get():
+        nuclei = fetch_nuclei_cve_set(cache)
+
+    assert "CVE-2021-44228" in nuclei
+    assert "CVE-2021-26855" in nuclei
+    assert "CVE-2024-9999" in nuclei
+
+
+def test_fetch_nuclei_cve_set_caches():
+    """A second call returns cached results without re-hitting the HTTP API."""
+
+    from ramen_cve import fetch_nuclei_cve_set
+
+    cache = _mem_cache()
+    with _patch_exploit_get() as mock_get:
+        first = fetch_nuclei_cve_set(cache)
+        second = fetch_nuclei_cve_set(cache)
+    assert first == second
+    nuclei_calls = [c for c in mock_get.call_args_list if "nuclei-templates" in c.args[0]]
+    assert len(nuclei_calls) == 1
+
+
+def test_search_github_no_token_returns_false_without_http():
+    """Without GITHUB_TOKEN, no HTTP call happens and the function returns False."""
+    from unittest.mock import patch
+
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with patch("ramen_cve.requests.get") as mock_get:
+        result = search_github_for_cve("CVE-2021-44228", cache, github_token=None)
+    assert result is False
+    mock_get.assert_not_called()
+
+
+def test_search_github_returns_true_when_total_count_positive():
+    """When the GitHub API reports total_count > 0, the function returns True."""
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=5):
+        result = search_github_for_cve("CVE-2099-9999", cache, github_token="ghp_test")
+    assert result is True
+
+
+def test_search_github_caches_per_cve():
+    """A second call for the same CVE comes from cache."""
+
+    from ramen_cve import search_github_for_cve
+
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=3) as mock_get:
+        first = search_github_for_cve("CVE-2099-1234", cache, github_token="ghp_test")
+        second = search_github_for_cve("CVE-2099-1234", cache, github_token="ghp_test")
+    assert first is True and second is True
+    gh_calls = [c for c in mock_get.call_args_list if "search/repositories" in c.args[0]]
+    assert len(gh_calls) == 1
+
+
+def test_enrich_with_exploit_status_priority_exploitdb_wins():
+    """If a CVE is in Exploit-DB it is tagged exploit_db regardless of nuclei/github."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    rec = EnrichedCve("CVE-2021-44228", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=10):
+        enrich_with_exploit_status([rec], cache, github_token="ghp_test")
+    assert rec.exploit_status == "exploit_db"
+
+
+def test_enrich_with_exploit_status_falls_back_to_nuclei_then_github():
+    """A CVE only in nuclei is tagged nuclei_template; only in GH is tagged github_poc."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    nuclei_rec = EnrichedCve("CVE-2024-9999", "x", date(2024, 1, 1), "feed_pub")
+    only_gh_rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+
+    # CVE-2024-9999 is in our nuclei fixture; CVE-2099-0001 is in neither so
+    # falls through to GitHub which we mock as having matches.
+    with _patch_exploit_get(github_total=2):
+        enrich_with_exploit_status(
+            [nuclei_rec, only_gh_rec], cache, github_token="ghp_test"
+        )
+    assert nuclei_rec.exploit_status == "nuclei_template"
+    assert only_gh_rec.exploit_status == "github_poc"
+
+
+def test_enrich_with_exploit_status_skip_github_flag():
+    """skip_github=True suppresses the GitHub fallback even when a token is set."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    only_gh_rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=10):
+        enrich_with_exploit_status(
+            [only_gh_rec], cache, github_token="ghp_test", skip_github=True
+        )
+    assert only_gh_rec.exploit_status == "none"
+
+
+def test_enrich_with_exploit_status_default_none():
+    """A CVE that nobody has exploit code for stays exploit_status='none'."""
+    from ramen_cve import EnrichedCve, enrich_with_exploit_status
+
+    rec = EnrichedCve("CVE-2099-0001", "x", date(2024, 1, 1), "feed_pub")
+    cache = _mem_cache()
+    with _patch_exploit_get(github_total=0):
+        enrich_with_exploit_status([rec], cache, github_token=None)
+    assert rec.exploit_status == "none"
+
+
+def test_cache_exploit_round_trip():
+    """Cache.set_exploit / get_exploit round-trips a payload."""
+    c = _mem_cache()
+    c.set_exploit("exploitdb", "index", {"cve_ids": ["CVE-2021-44228"]})
+    assert c.get_exploit("exploitdb", "index") == {"cve_ids": ["CVE-2021-44228"]}
+
+
+def test_cache_exploit_keyed_separately_per_source():
+    """Same key under different sources are independent rows."""
+    c = _mem_cache()
+    c.set_exploit("exploitdb", "index", {"cve_ids": ["CVE-A"]})
+    c.set_exploit("nuclei", "index", {"cve_ids": ["CVE-B"]})
+    assert c.get_exploit("exploitdb", "index") == {"cve_ids": ["CVE-A"]}
+    assert c.get_exploit("nuclei", "index") == {"cve_ids": ["CVE-B"]}
+
+
+def test_write_csv_includes_exploit_status_column(tmp_path):
+    """exploit_status appears in the CSV header and rows."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        exploit_status="exploit_db",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "exploit_status" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["exploit_status"] == "exploit_db"
+
+
+def test_write_markdown_renders_exploit_status_when_not_none(tmp_path):
+    """Markdown shows the Exploit Status line for CVEs with exploit_status != 'none'."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        exploit_status="nuclei_template",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Exploit Status:** `nuclei_template`" in text
+
+
+def test_write_markdown_omits_exploit_status_line_when_none(tmp_path):
+    """A 'none' exploit_status does not produce an Exploit Status line."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        exploit_status="none",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Exploit Status" not in text
+
+
+def test_cli_no_exploit_lookup_flag_parses():
+    """--no-exploit-lookup is accepted on every subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--no-exploit-lookup"]
+    )
+    assert args.no_exploit_lookup is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.no_exploit_lookup is False
