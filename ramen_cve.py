@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import ipaddress
 import json
 import logging
 import re
@@ -31,6 +32,57 @@ import requests
 # ---------------------------------------------------------------------------
 
 CVE_REGEX = re.compile(r"CVE-\d{4}-\d{4,7}(?!\d)", re.IGNORECASE)
+
+# Non-CVE IOC regexes. These are intentionally simple — high-precision matches on
+# defanged-aware text rather than perfect RFC compliance. extract_iocs() defangs
+# the input (hxxp → http, [.] → ., etc.) before running these.
+IPV4_REGEX = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
+)
+URL_REGEX = re.compile(r"https?://[^\s<>\"'`)\],]+", re.IGNORECASE)
+EMAIL_REGEX = re.compile(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b", re.IGNORECASE)
+MD5_REGEX = re.compile(r"\b[a-f0-9]{32}\b", re.IGNORECASE)
+SHA1_REGEX = re.compile(r"\b[a-f0-9]{40}\b", re.IGNORECASE)
+SHA256_REGEX = re.compile(r"\b[a-f0-9]{64}\b", re.IGNORECASE)
+DOMAIN_REGEX = re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b",
+    re.IGNORECASE,
+)
+
+# Defang substitutions. Applied in order; each is a literal needle/replacement
+# pair so an attacker can't inject regex metacharacters via a feed item.
+_DEFANG_MAP: list[tuple[str, str]] = [
+    ("hxxps://", "https://"),
+    ("hxxp://", "http://"),
+    ("[://]", "://"),
+    ("[.]", "."),
+    ("(.)", "."),
+    ("[dot]", "."),
+    ("(dot)", "."),
+    ("[@]", "@"),
+    ("(@)", "@"),
+    ("[at]", "@"),
+    ("(at)", "@"),
+    ("[:]", ":"),
+]
+_DEFANG_DETECT = re.compile(
+    r"hxxps?://|\[\.\]|\(\.\)|\[dot\]|\(dot\)|\[at\]|\(at\)|\[:\]",
+    re.IGNORECASE,
+)
+
+# Suffixes that DOMAIN_REGEX would happily match but which are almost never
+# real domain names in CTI feeds. Skipping these stops `report.pdf` and
+# `payload.exe` from being emitted as IOCs.
+_FILE_EXT_TLDS: frozenset[str] = frozenset(
+    {
+        "exe", "dll", "bin", "iso", "img", "tar", "gz", "bz2", "xz", "7z", "rar",
+        "zip", "txt", "md", "pdf", "doc", "docx", "rtf", "odt", "ods", "ppt",
+        "pptx", "xls", "xlsx", "py", "js", "ts", "jsx", "tsx", "html", "htm",
+        "css", "json", "yaml", "yml", "xml", "sh", "bat", "ps1", "cmd", "go",
+        "rs", "rb", "php", "java", "class", "jar", "war", "log", "csv", "tsv",
+        "ini", "cfg", "conf", "lnk", "msi", "vbs", "vbe", "wsh", "ipynb",
+    }
+)
 
 NVD_API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 EPSS_API_BASE = "https://api.first.org/data/v1/epss"
@@ -103,6 +155,27 @@ class CveRecord:
     source: str
     first_seen: date
     first_seen_type: str  # "feed_pub" | "disclosure" | "manual_input"
+
+
+# IOC types are kept open-coded as strings so the rest of the pipeline (CSV
+# columns, Markdown sections) can grow new types without a schema migration.
+# Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
+@dataclass
+class IocRecord:
+    """A non-CVE indicator extracted from feed/URL text.
+
+    `defanged_in_source` is a per-text confidence signal: True when the
+    original text contained at least one defang marker (hxxp, [.], (at), etc.).
+    Defanged feeds are typically authoritative IOC publications; un-defanged
+    matches are more likely to be incidental references.
+    """
+
+    ioc_type: str
+    value: str
+    source: str
+    first_seen: date
+    first_seen_type: str
+    defanged_in_source: bool = False
 
 
 @dataclass
@@ -320,6 +393,108 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
                 )
             )
     return records
+
+
+def _defang_text(text: str) -> str:
+    """Refang common IOC obfuscations: hxxp → http, [.] → ., (at) → @, etc.
+
+    Substitutions are literal-string, case-insensitive, and applied in order.
+    The original CTI convention is to defang so links don't auto-render; we
+    refang first so a single regex pass can match either form.
+    """
+    for needle, replacement in _DEFANG_MAP:
+        # re.escape on the needle so brackets/parens aren't treated as metacharacters.
+        text = re.sub(re.escape(needle), replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def _is_public_ip(ip_str: str) -> bool:
+    """True if ip_str parses to a globally-routable unicast IPv4/IPv6 address."""
+    try:
+        return ipaddress.ip_address(ip_str).is_global
+    except ValueError:
+        return False
+
+
+def _is_likely_filename(domain_value: str) -> bool:
+    """True if the trailing label of domain_value is a common file extension."""
+    return domain_value.rsplit(".", 1)[-1].lower() in _FILE_EXT_TLDS
+
+
+def extract_iocs(
+    text: str,
+    source: str,
+    first_seen: date,
+    first_seen_type: str,
+) -> list[IocRecord]:
+    """Extract a deduplicated list of non-CVE indicators from text.
+
+    Pipeline:
+      1. Detect whether the original text contained any defang markers.
+      2. Refang the text via _defang_text.
+      3. Run regexes for URL, email, IPv4, SHA-256/SHA-1/MD5 (in that order).
+      4. If defang markers were present, additionally run the domain regex
+         (false-positive rate is too high in fanged blog text to enable it
+         unconditionally).
+      5. Drop private/reserved IPv4 addresses and filename-shaped domains.
+      6. Deduplicate by (ioc_type, value.lower()), preserving first-seen order.
+    """
+    defanged_in_source = bool(_DEFANG_DETECT.search(text))
+    refanged = _defang_text(text)
+
+    seen: set[tuple[str, str]] = set()
+    out: list[IocRecord] = []
+
+    def _emit(ioc_type: str, value: str) -> None:
+        key = (ioc_type, value.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            IocRecord(
+                ioc_type=ioc_type,
+                value=value,
+                source=source,
+                first_seen=first_seen,
+                first_seen_type=first_seen_type,
+                defanged_in_source=defanged_in_source,
+            )
+        )
+
+    for m in URL_REGEX.finditer(refanged):
+        # Strip trailing sentence punctuation that the URL regex greedily ate.
+        _emit("url", m.group(0).rstrip(".,;:!?"))
+
+    for m in EMAIL_REGEX.finditer(refanged):
+        _emit("email", m.group(0))
+
+    for m in IPV4_REGEX.finditer(refanged):
+        candidate = m.group(0)
+        if _is_public_ip(candidate):
+            _emit("ipv4", candidate)
+
+    # Hash regexes are mutually exclusive (different fixed lengths bounded by
+    # \b) so the order is purely cosmetic. Hashes are emitted lower-case.
+    for regex, label in (
+        (SHA256_REGEX, "sha256"),
+        (SHA1_REGEX, "sha1"),
+        (MD5_REGEX, "md5"),
+    ):
+        for m in regex.finditer(refanged):
+            _emit(label, m.group(0).lower())
+
+    if defanged_in_source:
+        url_values = [r.value for r in out if r.ioc_type == "url"]
+        for m in DOMAIN_REGEX.finditer(refanged):
+            value = m.group(0)
+            if _is_likely_filename(value):
+                continue
+            # Skip a domain that is the host of an already-emitted URL.
+            if any(value.lower() in url_v.lower() for url_v in url_values):
+                continue
+            _emit("domain", value)
+
+    return out
 
 
 def _redact_key(url: str) -> str:
@@ -867,6 +1042,38 @@ CSV_COLUMNS = [
 ]
 
 
+IOC_CSV_COLUMNS = [
+    "ioc_type",
+    "value",
+    "source",
+    "first_seen",
+    "first_seen_type",
+    "defanged_in_source",
+]
+
+
+def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
+    """Write a CSV of non-CVE indicators alongside the main CVE CSV.
+
+    Columns are in IOC_CSV_COLUMNS order. defanged_in_source is rendered as
+    'true'/'false' so consumers can grep the file directly.
+    """
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(IOC_CSV_COLUMNS)
+        for rec in iocs:
+            writer.writerow(
+                [
+                    rec.ioc_type,
+                    rec.value,
+                    rec.source,
+                    str(rec.first_seen) if rec.first_seen else "",
+                    rec.first_seen_type,
+                    str(rec.defanged_in_source).lower(),
+                ]
+            )
+
+
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
     """Write the enriched CVE list to a CSV file.
 
@@ -931,16 +1138,39 @@ def _md_safe(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) -> None:
+IOC_TYPE_DISPLAY: dict[str, str] = {
+    "url": "URLs",
+    "domain": "Domains",
+    "ipv4": "IPv4 Addresses",
+    "email": "Email Addresses",
+    "sha256": "SHA-256 Hashes",
+    "sha1": "SHA-1 Hashes",
+    "md5": "MD5 Hashes",
+}
+IOC_TYPE_ORDER = ["url", "domain", "ipv4", "email", "sha256", "sha1", "md5"]
+
+
+def write_markdown(
+    enriched: list[EnrichedCve],
+    path: Path,
+    run_metadata: dict,
+    iocs: list[IocRecord] | None = None,
+) -> None:
     """Write a human-readable Markdown triage report.
 
     run_metadata keys: command (str), args (str — secrets redacted), version (str),
     sources (list[str]), start (str), end (str), date_mode (str),
     cvss_threshold (float), epss_threshold (float).
+
+    If `iocs` is non-empty, an additional "Indicators of Compromise" section is
+    rendered at the end of the report, grouped by IOC type.
     """
+    iocs = iocs or []
     lines: list[str] = []
     now = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = len(enriched)
+    total_iocs = len(iocs)
+    defanged_iocs = sum(1 for ioc in iocs if ioc.defanged_in_source)
 
     lines += [
         "# Ramen CVE Triage Report",
@@ -948,6 +1178,8 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
         f"Generated: {now}  ",
         f"Total CVEs: **{total}**  ",
     ]
+    if total_iocs:
+        lines.append(f"Total IOCs: **{total_iocs}** ({defanged_iocs} defanged in source)  ")
     if run_metadata.get("start") or run_metadata.get("end"):
         lines.append(
             f"Date filter: {run_metadata.get('start', '*')} → {run_metadata.get('end', '*')} "
@@ -1023,6 +1255,23 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
                         f"- **CISA KEV — Description:** {_md_safe(rec.kev_short_description)}"
                     )
             lines.append(f"- **Source:** {_md_safe(rec.source)}")
+            lines.append("")
+
+    if iocs:
+        by_type: dict[str, list[IocRecord]] = {t: [] for t in IOC_TYPE_ORDER}
+        for ioc in iocs:
+            by_type.setdefault(ioc.ioc_type, []).append(ioc)
+        lines += ["## Indicators of Compromise", ""]
+        for ioc_type in IOC_TYPE_ORDER:
+            recs = by_type.get(ioc_type) or []
+            if not recs:
+                continue
+            label = IOC_TYPE_DISPLAY.get(ioc_type, ioc_type)
+            lines.append(f"### {label} ({len(recs)})")
+            lines.append("")
+            for rec in recs:
+                marker = " *(defanged in source)*" if rec.defanged_in_source else ""
+                lines.append(f"- `{_md_safe(rec.value)}`{marker}")
             lines.append("")
 
     version = run_metadata.get("version", "0.1")
@@ -1350,8 +1599,18 @@ def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
     raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
 
 
-def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dict) -> None:
-    """Write CSV and/or Markdown output based on --format flag."""
+def _output(
+    enriched: list[EnrichedCve],
+    args: argparse.Namespace,
+    metadata: dict,
+    iocs: list[IocRecord] | None = None,
+) -> None:
+    """Write CSV and/or Markdown output based on --format flag.
+
+    When `iocs` is non-empty and --format includes csv, an additional
+    `<basename>-iocs.csv` file is written next to the main CVE CSV. The
+    Markdown report grows an Indicators of Compromise section regardless.
+    """
     # Microsecond resolution makes single-process collisions essentially
     # impossible; the -N suffix loop in _unique_output_path covers
     # cross-process collisions and any clock that lacks sub-second
@@ -1359,15 +1618,20 @@ def _output(enriched: list[EnrichedCve], args: argparse.Namespace, metadata: dic
     ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    iocs = iocs or []
 
     if args.format in ("csv", "both"):
         csv_path = _unique_output_path(out_dir, ts, "csv")
         write_csv(enriched, csv_path)
         print(str(csv_path))
+        if iocs:
+            iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            write_iocs_csv(iocs, iocs_path)
+            print(str(iocs_path))
 
     if args.format in ("md", "both"):
         md_path = _unique_output_path(out_dir, ts, "md")
-        write_markdown(enriched, md_path, metadata)
+        write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
 
 
@@ -1377,6 +1641,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
     entries = parse_opml(args.path)
     records: list[CveRecord] = []
+    iocs: list[IocRecord] = []
     sources: list[str] = []
 
     for entry in entries:
@@ -1387,6 +1652,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         if getattr(feed, "bozo", 0):
             reason = getattr(feed, "bozo_exception", "unknown parse error")
             _log.warning("Feed %s parsed with errors: %s", safe_url, reason)
+        feed_source = entry.title or entry.url
         for item in feed.entries or []:
             pub = item.get("published_parsed") or item.get("updated_parsed")
             item_date = date(*pub[:3]) if pub else date.today()
@@ -1397,7 +1663,10 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
                     item.get("content", [{}])[0].get("value", "") if item.get("content") else "",
                 ]
             )
-            records.extend(extract_cves(text, entry.title or entry.url, item_date, "feed_pub"))
+            records.extend(extract_cves(text, feed_source, item_date, "feed_pub"))
+            iocs.extend(extract_iocs(text, feed_source, item_date, "feed_pub"))
+
+    iocs = _dedupe_iocs(iocs)
 
     date_mode = args.date_mode or "feed"
     enriched = enrich_cves(records, cache, api_key)
@@ -1415,7 +1684,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
-    _output(enriched, args, metadata)
+    _output(enriched, args, metadata, iocs=iocs)
     return 0
 
 
@@ -1455,6 +1724,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
+    iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
     enriched = enrich_cves(records, cache, api_key)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
@@ -1470,8 +1740,39 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
-    _output(enriched, args, metadata)
+    _output(enriched, args, metadata, iocs=iocs)
     return 0
+
+
+def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
+    """Collapse duplicates across multiple feed items into one record per (type, value).
+
+    Keeps the earliest first_seen, OR-merges defanged_in_source, and joins
+    distinct sources with '; ' so the resulting IOC carries provenance from
+    every feed it appeared in.
+    """
+    by_key: dict[tuple[str, str], IocRecord] = {}
+    for ioc in iocs:
+        key = (ioc.ioc_type, ioc.value.lower())
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = IocRecord(
+                ioc_type=ioc.ioc_type,
+                value=ioc.value,
+                source=ioc.source,
+                first_seen=ioc.first_seen,
+                first_seen_type=ioc.first_seen_type,
+                defanged_in_source=ioc.defanged_in_source,
+            )
+            continue
+        if ioc.first_seen < existing.first_seen:
+            existing.first_seen = ioc.first_seen
+            existing.first_seen_type = ioc.first_seen_type
+        if ioc.defanged_in_source and not existing.defanged_in_source:
+            existing.defanged_in_source = True
+        if ioc.source and ioc.source not in existing.source.split("; "):
+            existing.source = f"{existing.source}; {ioc.source}"
+    return list(by_key.values())
 
 
 def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:

@@ -1650,3 +1650,255 @@ def test_cache_kev_catalog_stale_returns_none():
     )
     c._conn.commit()
     assert c.get_kev_catalog() is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 9 — Multi-IOC extraction
+# ---------------------------------------------------------------------------
+
+
+def test_defang_text_handles_common_obfuscations():
+    """Defang map covers hxxp, [.]/(.)/[dot]/(dot), [at]/(at), [:]."""
+    from ramen_cve import _defang_text
+
+    assert _defang_text("hxxp://evil[.]example[.]com") == "http://evil.example.com"
+    assert _defang_text("hxxps://bad(.)example(.)com") == "https://bad.example.com"
+    assert _defang_text("user[at]example[.]com") == "user@example.com"
+    assert _defang_text("admin(at)bad(dot)tld") == "admin@bad.tld"
+    assert _defang_text("plain text with nothing to defang") == "plain text with nothing to defang"
+
+
+def test_extract_iocs_url_basic():
+    """A plain http/https URL is captured as an 'url' IOC."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Visit https://example.com/path for info", "src", TODAY, "feed_pub")
+    assert any(i.ioc_type == "url" and i.value == "https://example.com/path" for i in iocs)
+
+
+def test_extract_iocs_url_strips_trailing_punctuation():
+    """A URL followed by a period or comma drops the punctuation in the IOC value."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "Beacon to https://malware.example.com/c2. Then exfil to https://other.example.com/x,",
+        "src", TODAY, "feed_pub",
+    )
+    urls = [i.value for i in iocs if i.ioc_type == "url"]
+    assert "https://malware.example.com/c2" in urls
+    assert "https://other.example.com/x" in urls
+
+
+def test_extract_iocs_defanged_url_refanged():
+    """A defanged hxxp[://]bad[.]example URL is captured as the refanged form."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("C2: hxxps://evil[.]example[.]com/abc", "src", TODAY, "feed_pub")
+    urls = [i for i in iocs if i.ioc_type == "url"]
+    assert any(u.value == "https://evil.example.com/abc" for u in urls)
+    assert all(u.defanged_in_source for u in urls)
+
+
+def test_extract_iocs_email_basic():
+    """A plain user@domain.tld email is captured."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Contact admin@example.com for details", "src", TODAY, "feed_pub")
+    assert any(i.ioc_type == "email" and i.value == "admin@example.com" for i in iocs)
+
+
+def test_extract_iocs_ipv4_public_only():
+    """Public IPv4 is captured; private/loopback/multicast are dropped."""
+    from ramen_cve import extract_iocs
+
+    text = "Beacon 8.8.8.8 from 192.168.1.1, 10.0.0.5, 127.0.0.1, and 1.1.1.1"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    ips = {i.value for i in iocs if i.ioc_type == "ipv4"}
+    assert "8.8.8.8" in ips
+    assert "1.1.1.1" in ips
+    assert "192.168.1.1" not in ips
+    assert "10.0.0.5" not in ips
+    assert "127.0.0.1" not in ips
+
+
+def test_extract_iocs_md5_sha1_sha256_distinct_lengths():
+    """Each hash regex matches only its own length, not shorter or longer hex."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"  # 32
+    sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"  # 40
+    sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # 64
+
+    text = f"Hashes: {md5} {sha1} {sha256}"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    by_type = {i.ioc_type: i.value for i in iocs if i.ioc_type in ("md5", "sha1", "sha256")}
+    assert by_type == {"md5": md5, "sha1": sha1, "sha256": sha256}
+
+
+def test_extract_iocs_hashes_emit_lowercase():
+    """An upper-case hash is normalized to lower-case in the emitted IOC."""
+    from ramen_cve import extract_iocs
+
+    upper_md5 = "D41D8CD98F00B204E9800998ECF8427E"
+    iocs = extract_iocs(f"hash: {upper_md5}", "src", TODAY, "feed_pub")
+    md5s = [i.value for i in iocs if i.ioc_type == "md5"]
+    assert md5s == [upper_md5.lower()]
+
+
+def test_extract_iocs_domain_only_when_defanged():
+    """A bare 'example.com' is NOT emitted unless the source contains defang markers."""
+    from ramen_cve import extract_iocs
+
+    fanged = extract_iocs("see example.com for details", "src", TODAY, "feed_pub")
+    assert all(i.ioc_type != "domain" for i in fanged)
+
+    defanged = extract_iocs(
+        "Beacon to evil[.]example[.]com — see also bad[.]tld", "src", TODAY, "feed_pub"
+    )
+    domains = {i.value for i in defanged if i.ioc_type == "domain"}
+    assert "evil.example.com" in domains
+    assert "bad.tld" in domains
+
+
+def test_extract_iocs_skips_filename_shaped_domains():
+    """Defanged 'report[.]pdf' must NOT be emitted as a domain (file extension TLD)."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "Drops payload[.]exe and decoy report[.]pdf from evil[.]example[.]com",
+        "src", TODAY, "feed_pub",
+    )
+    domains = {i.value for i in iocs if i.ioc_type == "domain"}
+    assert "evil.example.com" in domains
+    assert "payload.exe" not in domains
+    assert "report.pdf" not in domains
+
+
+def test_extract_iocs_dedupe_within_text():
+    """The same hash repeated twice produces one IOC."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    iocs = extract_iocs(f"{md5} ... again {md5}", "src", TODAY, "feed_pub")
+    md5s = [i for i in iocs if i.ioc_type == "md5"]
+    assert len(md5s) == 1
+
+
+def test_extract_iocs_defanged_marker_propagates_to_all_iocs_in_text():
+    """If the text contains any defang token, every IOC from that text is flagged defanged."""
+    from ramen_cve import extract_iocs
+
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    text = f"hxxps://evil[.]example[.]com drops {md5} from 8.8.8.8"
+    iocs = extract_iocs(text, "src", TODAY, "feed_pub")
+    assert iocs and all(i.defanged_in_source for i in iocs)
+
+
+def test_extract_iocs_no_iocs_returns_empty_list():
+    """Plain text with nothing IOC-shaped returns an empty list (not None, not error)."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("Nothing to see here.", "src", TODAY, "feed_pub")
+    assert iocs == []
+
+
+def test_extract_iocs_url_skips_domain_match_for_same_host():
+    """A defanged URL host should not also be emitted as a separate domain IOC."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs(
+        "C2: hxxps://evil[.]example[.]com/abc and another bad[.]tld",
+        "src", TODAY, "feed_pub",
+    )
+    domains = {i.value for i in iocs if i.ioc_type == "domain"}
+    # 'evil.example.com' is the URL host; only the un-URL'd 'bad.tld' should remain
+    assert "evil.example.com" not in domains
+    assert "bad.tld" in domains
+
+
+def test_dedupe_iocs_merges_sources_and_keeps_earliest():
+    """Same (type, value) across feeds: earliest first_seen wins, sources joined with '; '."""
+    from ramen_cve import IocRecord, _dedupe_iocs
+
+    a = IocRecord("ipv4", "8.8.8.8", "feed-a", date(2024, 1, 5), "feed_pub")
+    b = IocRecord(
+        "ipv4", "8.8.8.8", "feed-b", date(2024, 1, 1), "feed_pub", defanged_in_source=True,
+    )
+    c = IocRecord("ipv4", "8.8.8.8", "feed-a", date(2024, 1, 7), "feed_pub")  # dup of a's source
+
+    out = _dedupe_iocs([a, b, c])
+    assert len(out) == 1
+    rec = out[0]
+    assert rec.first_seen == date(2024, 1, 1)
+    assert rec.defanged_in_source is True
+    assert "feed-a" in rec.source and "feed-b" in rec.source
+    # 'feed-a' should appear once even though the input had it twice
+    assert rec.source.split("; ").count("feed-a") == 1
+
+
+def test_write_iocs_csv_round_trip(tmp_path):
+    """write_iocs_csv emits the columns in IOC_CSV_COLUMNS order."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    iocs = [
+        IocRecord("url", "https://evil.example.com/x", "feed-a",
+                  date(2024, 1, 1), "feed_pub", defanged_in_source=True),
+        IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "feed-b",
+                  date(2024, 2, 1), "feed_pub"),
+    ]
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv(iocs, out)
+    rows = list(csv.reader(out.open()))
+    assert rows[0] == IOC_CSV_COLUMNS
+    assert len(rows) == 3
+    assert rows[1][0] == "url"
+    assert rows[1][-1] == "true"
+    assert rows[2][0] == "md5"
+    assert rows[2][-1] == "false"
+
+
+def test_write_markdown_renders_iocs_section(tmp_path):
+    """When iocs is non-empty, the Markdown report includes an IOC section."""
+    from ramen_cve import IocRecord, write_markdown
+
+    iocs = [
+        IocRecord("url", "https://evil.example.com/c2", "feed-a",
+                  date(2024, 1, 1), "feed_pub", defanged_in_source=True),
+        IocRecord("ipv4", "8.8.8.8", "feed-a",
+                  date(2024, 1, 2), "feed_pub"),
+        IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "feed-a",
+                  date(2024, 1, 3), "feed_pub"),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=iocs)
+    text = out.read_text()
+    assert "## Indicators of Compromise" in text
+    assert "### URLs" in text
+    assert "https://evil.example.com/c2" in text
+    assert "### IPv4 Addresses" in text
+    assert "8.8.8.8" in text
+    assert "### MD5 Hashes" in text
+    assert "d41d8cd98f00b204e9800998ecf8427e" in text
+    assert "Total IOCs: **3** (1 defanged in source)" in text
+    assert "*(defanged in source)*" in text
+
+
+def test_write_markdown_no_iocs_section_when_empty(tmp_path):
+    """When iocs is None or empty, no 'Indicators of Compromise' section is rendered."""
+    from ramen_cve import write_markdown
+
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=None)
+    text = out.read_text()
+    assert "## Indicators of Compromise" not in text
+    assert "Total IOCs" not in text
+
+
+def test_extract_iocs_defanged_at_marker_email():
+    """A '(at)'-defanged email refangs to '@' and is captured."""
+    from ramen_cve import extract_iocs
+
+    iocs = extract_iocs("contact attacker(at)evil[.]example", "src", TODAY, "feed_pub")
+    emails = [i.value for i in iocs if i.ioc_type == "email"]
+    # Note: this test will only succeed if the TLD has length ≥ 2; "example" is 7 chars
+    assert "attacker@evil.example" in emails
