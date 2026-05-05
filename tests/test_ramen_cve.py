@@ -1316,3 +1316,337 @@ def test_cli_from_file_missing_returns_friendly_error(tmp_path):
     assert result.returncode == 1
     assert "Traceback" not in result.stderr
     assert "does not exist" in result.stderr or "from-file" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 — CISA KEV catalog ingestion
+# ---------------------------------------------------------------------------
+
+
+def _kev_catalog_fixture() -> dict:
+    return _load_fixture("cisa_kev_catalog.json")
+
+
+def _patch_kev(catalog_payload: dict | None = None, status_code: int = 200):
+    """Patch requests.get so any KEV URL hit returns catalog_payload."""
+    from unittest.mock import MagicMock, patch
+
+    catalog_payload = catalog_payload if catalog_payload is not None else _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.status_code = status_code
+        if status_code >= 400:
+            import requests as _req
+
+            resp.raise_for_status.side_effect = _req.HTTPError(response=resp)
+        else:
+            resp.raise_for_status.return_value = None
+            resp.json.return_value = catalog_payload
+        return resp
+
+    return patch("ramen_cve.requests.get", side_effect=_fake_get)
+
+
+def test_fetch_kev_catalog_basic():
+    """A successful fetch returns a dict keyed on upper-case CVE ID."""
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    with _patch_kev():
+        catalog = fetch_kev_catalog(cache)
+
+    assert "CVE-2021-44228" in catalog
+    assert catalog["CVE-2021-44228"]["vendorProject"] == "Apache"
+    # Empty cveID entries are filtered out so we don't pollute the lookup
+    assert "" not in catalog
+
+
+def test_fetch_kev_catalog_uses_cache_on_second_call():
+    """Two calls in the same TTL window should produce only one HTTP request."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    payload = _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = payload
+        return resp
+
+    with patch("ramen_cve.requests.get", side_effect=_fake_get) as mock_get:
+        first = fetch_kev_catalog(cache)
+        second = fetch_kev_catalog(cache)
+
+    assert mock_get.call_count == 1
+    assert first == second
+    assert "CVE-2021-44228" in second
+
+
+def test_fetch_kev_catalog_network_error_returns_empty(caplog):
+    """A 5xx (or any exception) must yield an empty dict, not a crash."""
+    import logging
+
+    from ramen_cve import fetch_kev_catalog
+
+    cache = _mem_cache()
+    with _patch_kev(status_code=503), caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        catalog = fetch_kev_catalog(cache)
+
+    assert catalog == {}
+    assert any("CISA KEV catalog fetch failed" in rec.message for rec in caplog.records)
+
+
+def test_parse_kev_due_date_handles_malformed():
+    """An unparseable dueDate must not crash the joiner."""
+    import logging
+
+    from ramen_cve import _parse_kev_due_date
+
+    assert _parse_kev_due_date(None) is None
+    assert _parse_kev_due_date("") is None
+    assert _parse_kev_due_date("2024-06-01") == date(2024, 6, 1)
+
+    logger = logging.getLogger("ramen_cve")
+    with pytest.MonkeyPatch.context() as mp:
+        warnings: list[str] = []
+        original = logger.warning
+        mp.setattr(logger, "warning", lambda msg, *a, **kw: warnings.append(msg % a))
+        assert _parse_kev_due_date("not-a-date") is None
+        assert any("unparseable dueDate" in w for w in warnings)
+        logger.warning = original
+
+
+def test_enrich_cves_populates_kev_authoritative_fields():
+    """CVEs in the CISA KEV catalog are joined with due date, ransomware flag, etc."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+    kev = _kev_catalog_fixture()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert len(result) == 1
+    rec = result[0]
+    assert rec.kev_listed is True
+    assert rec.kev_due_date == date(2021, 12, 24)
+    assert rec.kev_known_ransomware_use is True
+    assert rec.kev_vendor_project == "Apache"
+    assert rec.kev_product == "Log4j2"
+    assert rec.kev_required_action and "vendor" in rec.kev_required_action.lower()
+    assert rec.kev_short_description and "deserialization" in rec.kev_short_description
+
+
+def test_enrich_cves_kev_listed_when_only_catalog_says_so():
+    """Even if NVD response lacks cisaExploitAdd, a KEV catalog hit sets kev_listed=True."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    epss = _load_fixture("epss_batch.json")
+    kev = _kev_catalog_fixture()
+    # NVD response with NO cisaExploitAdd field at all
+    nvd_no_kev = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2021-44228",
+                    "metrics": {},
+                    "weaknesses": [],
+                    "published": "2021-12-10T00:00:00.000",
+                }
+            }
+        ]
+    }
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = nvd_no_kev
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    assert result[0].kev_listed is True
+    assert result[0].kev_due_date == date(2021, 12, 24)
+
+
+def test_enrich_cves_no_kev_match_leaves_authoritative_fields_default():
+    """A CVE not in the KEV catalog has the authoritative KEV fields at default values."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+    epss = _load_fixture("epss_batch.json")
+    nvd_no_kev = _load_fixture("nvd_proxylogon_v30.json")
+    # Empty KEV catalog
+    kev: dict = {"vulnerabilities": []}
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = kev
+        else:
+            resp.json.return_value = nvd_no_kev
+        return resp
+
+    records = [CveRecord("CVE-2021-26855", "feed-a", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+
+    rec = result[0]
+    assert rec.kev_due_date is None
+    assert rec.kev_required_action is None
+    assert rec.kev_known_ransomware_use is False
+    assert rec.kev_vendor_project is None
+    assert rec.kev_product is None
+
+
+def test_write_csv_includes_kev_columns(tmp_path):
+    """CSV header now lists the new KEV columns and rows carry the values."""
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="krebs",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        kev_vendor_project="Apache",
+        kev_product="Log4j2",
+        kev_required_action="Apply patches.",
+        bucket="kev_override",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    for col in (
+        "kev_due_date",
+        "kev_known_ransomware_use",
+        "kev_vendor_project",
+        "kev_product",
+    ):
+        assert col in header, f"missing column {col} in CSV header: {header}"
+    assert header == CSV_COLUMNS
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["kev_due_date"] == "2021-12-24"
+    assert row["kev_known_ransomware_use"] == "true"
+    assert row["kev_vendor_project"] == "Apache"
+    assert row["kev_product"] == "Log4j2"
+
+
+def test_write_markdown_kev_section_renders_authoritative_fields(tmp_path):
+    """KEV markdown surfaces vendor, due date, ransomware flag, and required action."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="krebs",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        bucket="kev_override",
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        kev_vendor_project="Apache",
+        kev_product="Log4j2",
+        kev_required_action="Apply updates per vendor instructions.",
+        kev_short_description="Apache Log4j2 RCE.",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Apache Log4j2" in text
+    assert "2021-12-24" in text
+    assert "OVERDUE" in text  # past dueDate marker
+    assert "Ransomware Use" in text
+    assert "Required Action" in text
+    assert "Apply updates per vendor instructions." in text
+
+
+def test_write_markdown_no_overdue_marker_when_due_in_future(tmp_path):
+    """A KEV due date in the future must NOT show OVERDUE."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    far_future = date.today().replace(year=date.today().year + 1)
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date.today(),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.5,
+        kev_listed=True,
+        bucket="kev_override",
+        kev_due_date=far_future,
+        kev_vendor_project="Vendor",
+        kev_product="Product",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert str(far_future) in text
+    assert "OVERDUE" not in text
+
+
+def test_cache_kev_catalog_round_trip():
+    """Cache.get_kev_catalog round-trips the dict written by Cache.set_kev_catalog."""
+    c = _mem_cache()
+    catalog = {"CVE-2021-44228": {"dueDate": "2021-12-24", "knownRansomwareCampaignUse": "Known"}}
+    c.set_kev_catalog(catalog)
+    assert c.get_kev_catalog() == catalog
+
+
+def test_cache_kev_catalog_stale_returns_none():
+    """A KEV catalog older than the TTL is treated as a miss."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:", ttl_hours=1)
+    past = (datetime.utcnow() - timedelta(hours=2)).isoformat()
+    c._conn.execute(
+        "INSERT INTO kev_cache VALUES (?, ?, ?)",
+        ("catalog", '{"CVE-2024-0001": {}}', past),
+    )
+    c._conn.commit()
+    assert c.get_kev_catalog() is None

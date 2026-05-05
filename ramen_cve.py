@@ -34,6 +34,9 @@ CVE_REGEX = re.compile(r"CVE-\d{4}-\d{4,7}(?!\d)", re.IGNORECASE)
 
 NVD_API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 EPSS_API_BASE = "https://api.first.org/data/v1/epss"
+CISA_KEV_URL = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+)
 
 DEFAULT_CVSS_THRESHOLD = 7.0
 DEFAULT_EPSS_THRESHOLD = 0.10
@@ -121,6 +124,14 @@ class EnrichedCve:
     nvd_published: date | None = None
     nvd_status: str = "ok"
 
+    # CISA KEV authoritative fields (only populated when the CVE is in the KEV catalog).
+    kev_due_date: date | None = None
+    kev_required_action: str | None = None
+    kev_known_ransomware_use: bool = False
+    kev_vendor_project: str | None = None
+    kev_product: str | None = None
+    kev_short_description: str | None = None
+
     # EPSS fields
     epss_score: float | None = None
     epss_percentile: float | None = None
@@ -153,6 +164,11 @@ class Cache:
             payload_json TEXT NOT NULL,
             fetched_at  TEXT NOT NULL,
             PRIMARY KEY (cve_id, score_date)
+        );
+        CREATE TABLE IF NOT EXISTS kev_cache (
+            id          TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL
         );
     """
 
@@ -212,11 +228,34 @@ class Cache:
         )
         self._conn.commit()
 
+    def get_kev_catalog(self) -> dict[str, dict] | None:
+        """Return the cached CISA KEV catalog if fresh, else None.
+
+        The catalog is stored as a single row keyed on 'catalog'; we treat the
+        whole JSON-serialized {cve_id: kev_record} dict as the cache payload.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json, fetched_at FROM kev_cache WHERE id = ?",
+            ("catalog",),
+        ).fetchone()
+        if row and self._is_fresh(row[1]):
+            return json.loads(row[0])
+        return None
+
+    def set_kev_catalog(self, catalog: dict[str, dict]) -> None:
+        """Upsert the CISA KEV catalog into the cache as a single blob."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO kev_cache VALUES (?, ?, ?)",
+            ("catalog", json.dumps(catalog), _utcnow().isoformat()),
+        )
+        self._conn.commit()
+
     def purge(self) -> None:
-        """Delete entries older than the TTL from both tables."""
+        """Delete entries older than the TTL from all tables."""
         cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.execute("DELETE FROM kev_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
 
 
@@ -586,12 +625,58 @@ def fetch_epss(
     return result
 
 
+def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
+    """Fetch the CISA Known Exploited Vulnerabilities catalog.
+
+    Returns a dict keyed by upper-case CVE ID, where each value is the raw
+    KEV record (dueDate, requiredAction, knownRansomwareCampaignUse,
+    vendorProject, product, shortDescription, etc.). The catalog is cached
+    as a single blob for the cache TTL (24h by default).
+
+    Never raises: on network/parse failure, returns an empty dict and logs a
+    warning so the rest of the pipeline can fall back to the NVD-derived
+    kev_listed flag without the authoritative metadata.
+    """
+    cached = cache.get_kev_catalog()
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(CISA_KEV_URL, headers={"User-Agent": USER_AGENT}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _log.warning("CISA KEV catalog fetch failed: %s", exc)
+        return {}
+
+    catalog: dict[str, dict] = {}
+    for entry in data.get("vulnerabilities", []):
+        cve_id = (entry.get("cveID") or "").upper()
+        if cve_id:
+            catalog[cve_id] = entry
+
+    cache.set_kev_catalog(catalog)
+    _log.info("Loaded CISA KEV catalog: %d entries.", len(catalog))
+    return catalog
+
+
+def _parse_kev_due_date(value: str | None) -> date | None:
+    """Parse a KEV dueDate string (YYYY-MM-DD) tolerating malformed input."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        _log.warning("KEV catalog returned an unparseable dueDate %r; ignoring.", value)
+        return None
+
+
 def enrich_cves(
     records: list[CveRecord],
     cache: Cache,
     api_key: str | None,
 ) -> list[EnrichedCve]:
-    """Fetch NVD and EPSS data for each unique CVE and return enriched records.
+    """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
     Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
     multiple records, only the earliest first_seen date is kept.
@@ -622,10 +707,14 @@ def enrich_cves(
     # Fetch EPSS data in one batched call
     epss_data = fetch_epss(unique_ids, cache)
 
+    # Fetch the authoritative CISA KEV catalog (one HTTP call, cached).
+    kev_catalog = fetch_kev_catalog(cache)
+
     enriched: list[EnrichedCve] = []
     for cve_id, rec in earliest.items():
         nvd = nvd_data.get(cve_id, {})
         epss = epss_data.get(cve_id, {})
+        kev = kev_catalog.get(cve_id, {})
 
         nvd_pub_str = nvd.get("nvd_published")
         nvd_published: date | None = None
@@ -639,6 +728,11 @@ def enrich_cves(
                     cve_id,
                 )
 
+        # CISA's catalog is the authoritative source for KEV membership; if it
+        # answers, prefer it over NVD's cisaExploitAdd flag. Either signal alone
+        # is enough to treat the CVE as KEV-listed.
+        kev_listed = bool(kev) or nvd.get("kev_listed", False)
+
         enriched.append(
             EnrichedCve(
                 cve_id=cve_id,
@@ -649,13 +743,21 @@ def enrich_cves(
                 cvss_severity=nvd.get("cvss_severity"),
                 cvss_vector=nvd.get("cvss_vector"),
                 cvss_version=nvd.get("cvss_version"),
-                kev_listed=nvd.get("kev_listed", False),
+                kev_listed=kev_listed,
                 cwe=nvd.get("cwe", []),
                 nvd_published=nvd_published,
                 nvd_status=nvd.get("nvd_status", "ok"),
                 epss_score=epss.get("epss"),
                 epss_percentile=epss.get("percentile"),
                 epss_date=epss.get("date"),
+                kev_due_date=_parse_kev_due_date(kev.get("dueDate")) if kev else None,
+                kev_required_action=kev.get("requiredAction") if kev else None,
+                kev_known_ransomware_use=(
+                    (kev.get("knownRansomwareCampaignUse") or "").strip().lower() == "known"
+                ),
+                kev_vendor_project=kev.get("vendorProject") if kev else None,
+                kev_product=kev.get("product") if kev else None,
+                kev_short_description=kev.get("shortDescription") if kev else None,
             )
         )
 
@@ -753,6 +855,10 @@ CSV_COLUMNS = [
     "epss_score",
     "epss_percentile",
     "kev_listed",
+    "kev_due_date",
+    "kev_known_ransomware_use",
+    "kev_vendor_project",
+    "kev_product",
     "bucket",
     "suggested_action",
     "cwe",
@@ -785,6 +891,10 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     epss,
                     pct,
                     str(rec.kev_listed).lower(),
+                    str(rec.kev_due_date) if rec.kev_due_date else "",
+                    str(rec.kev_known_ransomware_use).lower(),
+                    rec.kev_vendor_project or "",
+                    rec.kev_product or "",
                     rec.bucket,
                     rec.suggested_action,
                     ";".join(rec.cwe),
@@ -871,6 +981,7 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
     if total == 0:
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
+    today = date.today()
     for bucket in BUCKET_ORDER:
         recs = by_bucket[bucket]
         if not recs:
@@ -892,6 +1003,25 @@ def write_markdown(enriched: list[EnrichedCve], path: Path, run_metadata: dict) 
                 lines.append("- **EPSS:** N/A")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
+            if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
+                if rec.kev_vendor_project or rec.kev_product:
+                    affected = " ".join(
+                        p for p in (rec.kev_vendor_project, rec.kev_product) if p
+                    )
+                    lines.append(f"- **CISA KEV — Affected:** {_md_safe(affected)}")
+                if rec.kev_due_date:
+                    overdue = " (OVERDUE)" if rec.kev_due_date < today else ""
+                    lines.append(f"- **CISA KEV — Due Date:** {rec.kev_due_date}{overdue}")
+                if rec.kev_known_ransomware_use:
+                    lines.append("- **CISA KEV — Ransomware Use:** Known")
+                if rec.kev_required_action:
+                    lines.append(
+                        f"- **CISA KEV — Required Action:** {_md_safe(rec.kev_required_action)}"
+                    )
+                if rec.kev_short_description:
+                    lines.append(
+                        f"- **CISA KEV — Description:** {_md_safe(rec.kev_short_description)}"
+                    )
             lines.append(f"- **Source:** {_md_safe(rec.source)}")
             lines.append("")
 
