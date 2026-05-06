@@ -3766,6 +3766,276 @@ def test_cli_allow_tlp_red_flag_parses():
     assert args2.allow_tlp_red is False
 
 
+# ---------------------------------------------------------------------------
+# Slice 17 — Threat hunting hypothesis workflow
+# ---------------------------------------------------------------------------
+
+
+def _hunt_payload(**overrides) -> dict:
+    base = {
+        "id": "test-hunt",
+        "name": "Test hunt",
+        "hypothesis": "We expect to see X.",
+        "data_sources": ["proxy_logs"],
+        "attack_techniques": ["T1190"],
+        "linked_cves": ["CVE-2021-44228"],
+        "status": "open",
+        "created": "2024-01-01T00:00:00",
+        "findings": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_hunt_dataclass_round_trip():
+    """Hunt.from_dict → Hunt.to_dict round-trips cleanly."""
+    from ramen_cve import Hunt
+
+    payload = _hunt_payload()
+    hunt = Hunt.from_dict(payload)
+    assert hunt.to_dict() == payload
+
+
+def test_hunt_dataclass_from_dict_tolerates_missing_keys():
+    """Missing optional keys default to sensible empty values."""
+    from ramen_cve import Hunt
+
+    hunt = Hunt.from_dict({"id": "x", "name": "n", "hypothesis": "h"})
+    assert hunt.linked_cves == []
+    assert hunt.findings == []
+    assert hunt.status == "open"
+
+
+def test_load_hunt_round_trip(tmp_path):
+    """load_hunt + save_hunt round-trip preserves the payload."""
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    p = tmp_path / "x.json"
+    save_hunt(Hunt.from_dict(_hunt_payload()), p)
+    re = load_hunt(p)
+    assert re.id == "test-hunt"
+    assert re.linked_cves == ["CVE-2021-44228"]
+
+
+def test_load_hunt_missing_file_raises_friendly_error(tmp_path):
+    """A missing hunt path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, load_hunt
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_hunt(tmp_path / "missing.json")
+
+
+def test_load_hunt_invalid_json_raises_friendly_error(tmp_path):
+    """A malformed JSON file raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, load_hunt
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid")
+    with pytest.raises(OpmlError, match="parse"):
+        load_hunt(p)
+
+
+def test_load_all_hunts_returns_sorted_list(tmp_path):
+    """load_all_hunts returns every well-formed *.json sorted by id."""
+    from ramen_cve import Hunt, load_all_hunts, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="b-second")), tmp_path / "b.json")
+    save_hunt(Hunt.from_dict(_hunt_payload(id="a-first")), tmp_path / "a.json")
+    out = load_all_hunts(tmp_path)
+    assert [h.id for h in out] == ["a-first", "b-second"]
+
+
+def test_load_all_hunts_missing_dir_returns_empty(tmp_path):
+    """A missing directory is non-fatal; load_all_hunts returns []."""
+    from ramen_cve import load_all_hunts
+
+    assert load_all_hunts(tmp_path / "no-such-dir") == []
+
+
+def test_load_all_hunts_skips_malformed(tmp_path, caplog):
+    """A malformed file is skipped (with WARNING) so other hunts still load."""
+    import logging
+
+    from ramen_cve import Hunt, load_all_hunts, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="ok")), tmp_path / "ok.json")
+    (tmp_path / "broken.json").write_text("{not valid")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_all_hunts(tmp_path)
+    assert [h.id for h in out] == ["ok"]
+    assert any("malformed hunt" in r.message.lower() for r in caplog.records)
+
+
+def test_default_hunt_dir_loads_bundled_sample():
+    """The bundled hunts/log4shell-evidence.json is well-formed and loads."""
+    from ramen_cve import DEFAULT_HUNT_DIR, load_all_hunts
+
+    assert DEFAULT_HUNT_DIR.exists()
+    hunts = load_all_hunts(DEFAULT_HUNT_DIR)
+    assert any(h.id == "log4shell-evidence" for h in hunts)
+
+
+def test_cli_hunt_subcommand_parses():
+    """`hunt` subcommand parses with action / hunt_id / value positions."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["hunt", "list"])
+    assert args.subcommand == "hunt" and args.action == "list"
+    args2 = build_parser().parse_args(
+        ["hunt", "link", "log4shell-evidence", "CVE-2021-44228"]
+    )
+    assert args2.action == "link"
+    assert args2.hunt_id == "log4shell-evidence"
+    assert args2.value == "CVE-2021-44228"
+
+
+def test_run_hunt_list(tmp_path, capsys):
+    """`hunt list` prints one tab-delimited line per hunt."""
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", name="First")), tmp_path / "h1.json")
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h2", name="Second")), tmp_path / "h2.json")
+    rc = ramen_cve.main(["hunt", "list", "--hunt-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "h1" in out and "First" in out
+    assert "h2" in out and "Second" in out
+
+
+def test_run_hunt_show(tmp_path, capsys):
+    """`hunt show <id>` prints the hunt as JSON."""
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1")), tmp_path / "h1.json")
+    rc = ramen_cve.main(["hunt", "show", "h1", "--hunt-dir", str(tmp_path)])
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["id"] == "h1"
+
+
+def test_run_hunt_link_appends_cve(tmp_path):
+    """`hunt link <id> <cve>` appends to linked_cves and persists."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(
+        Hunt.from_dict(_hunt_payload(id="h1", linked_cves=["CVE-2021-44228"])),
+        tmp_path / "h1.json",
+    )
+    rc = ramen_cve.main([
+        "hunt", "link", "h1", "CVE-2021-26855",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert "CVE-2021-26855" in hunt.linked_cves
+    assert hunt.linked_cves.count("CVE-2021-26855") == 1
+
+
+def test_run_hunt_link_dedupes(tmp_path):
+    """Linking a CVE that's already present is a no-op success."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(
+        Hunt.from_dict(_hunt_payload(id="h1", linked_cves=["CVE-2021-44228"])),
+        tmp_path / "h1.json",
+    )
+    rc = ramen_cve.main([
+        "hunt", "link", "h1", "CVE-2021-44228",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.linked_cves.count("CVE-2021-44228") == 1
+
+
+def test_run_hunt_link_rejects_invalid_cve(tmp_path, caplog):
+    """Linking a non-CVE-shaped value exits with code 1."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1")), tmp_path / "h1.json")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "link", "h1", "NOT-A-CVE",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("not a valid CVE" in r.message for r in caplog.records)
+
+
+def test_run_hunt_log_appends_finding_with_timestamp(tmp_path):
+    """`hunt log <id> <text>` appends {timestamp, text} to findings."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", findings=[])), tmp_path / "h1.json")
+    rc = ramen_cve.main([
+        "hunt", "log", "h1", "Saw nothing in proxy logs for the window.",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert len(hunt.findings) == 1
+    assert hunt.findings[0]["text"].startswith("Saw nothing")
+    # Timestamp should be ISO-8601-ish
+    assert "T" in hunt.findings[0]["timestamp"]
+
+
+def test_run_hunt_status_updates_value(tmp_path):
+    """`hunt status <id> <new>` updates the status field."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", status="open")), tmp_path / "h1.json")
+    rc = ramen_cve.main([
+        "hunt", "status", "h1", "closed_true_positive",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.status == "closed_true_positive"
+
+
+def test_run_hunt_status_rejects_invalid_value(tmp_path, caplog):
+    """An unknown status value errors out without modifying the file."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", status="open")), tmp_path / "h1.json")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "status", "h1", "invented",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.status == "open"
+    assert any("not a valid status" in r.message for r in caplog.records)
+
+
+def test_run_hunt_rejects_path_traversal(tmp_path, caplog):
+    """A hunt_id with '/' or '..' is rejected before any file access."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "show", "../etc/passwd",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("invalid hunt id" in r.message.lower() for r in caplog.records)
+
+
 def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
     """--format all produces a *-sigma directory containing one YAML per qualifying CVE."""
     from unittest.mock import MagicMock, patch

@@ -117,6 +117,15 @@ DEFAULT_CACHE_TTL_HOURS = 24
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
 DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
+DEFAULT_HUNT_DIR = Path(__file__).resolve().parent / "hunts"
+
+HUNT_STATUSES = (
+    "open",
+    "in_progress",
+    "closed_true_positive",
+    "closed_false_positive",
+    "closed_inconclusive",
+)
 
 # TLP (Traffic Light Protocol) levels in ascending order of restrictiveness.
 # CLEAR is the public-share default; RED is "internal eyes only".
@@ -348,6 +357,54 @@ class Malware:
     name: str
     aliases: list[str] = field(default_factory=list)
     url: str | None = None
+
+
+@dataclass
+class Hunt:
+    """A single threat-hunt hypothesis with linked CVEs, data sources, and findings.
+
+    Stored on disk as one JSON file per hunt under DEFAULT_HUNT_DIR. JSON (not
+    YAML) is used so this v1 stays inside the project's three-runtime-deps
+    budget — PyYAML is not added.
+    """
+
+    id: str
+    name: str
+    hypothesis: str
+    data_sources: list[str] = field(default_factory=list)
+    attack_techniques: list[str] = field(default_factory=list)
+    linked_cves: list[str] = field(default_factory=list)
+    status: str = "open"
+    created: str = ""
+    findings: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Hunt:
+        """Build a Hunt from a dict, tolerating missing keys with sensible defaults."""
+        return cls(
+            id=str(d.get("id") or ""),
+            name=str(d.get("name") or ""),
+            hypothesis=str(d.get("hypothesis") or ""),
+            data_sources=list(d.get("data_sources") or []),
+            attack_techniques=list(d.get("attack_techniques") or []),
+            linked_cves=list(d.get("linked_cves") or []),
+            status=str(d.get("status") or "open"),
+            created=str(d.get("created") or ""),
+            findings=list(d.get("findings") or []),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "hypothesis": self.hypothesis,
+            "data_sources": list(self.data_sources),
+            "attack_techniques": list(self.attack_techniques),
+            "linked_cves": list(self.linked_cves),
+            "status": self.status,
+            "created": self.created,
+            "findings": list(self.findings),
+        }
 
 
 @dataclass
@@ -2651,6 +2708,29 @@ def build_parser() -> argparse.ArgumentParser:
     cve_p.add_argument("--from-file", type=Path, metavar="FILE", help="Text file of CVE IDs.")
     _shared_flags(cve_p)
 
+    # hunt subcommand: list / show / link / log / status against the hunts/ library
+    hunt_p = sub.add_parser("hunt", help="Manage threat-hunt hypotheses.")
+    hunt_p.add_argument(
+        "action",
+        choices=["list", "show", "link", "log", "status"],
+        help="What to do with the hunts library.",
+    )
+    hunt_p.add_argument("hunt_id", nargs="?", help="Hunt id (filename stem under hunts/).")
+    hunt_p.add_argument(
+        "value",
+        nargs="?",
+        help=(
+            "Action argument: CVE-ID for 'link', finding text for 'log', "
+            "new status for 'status'."
+        ),
+    )
+    hunt_p.add_argument(
+        "--hunt-dir",
+        type=Path,
+        default=DEFAULT_HUNT_DIR,
+        help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
+    )
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=Path, help="Path to a STIX bundle JSON file.")
@@ -2664,10 +2744,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
-    """Set log level from --quiet / --verbose flags."""
-    if args.quiet:
+    """Set log level from --quiet / --verbose flags.
+
+    The hunt subcommand doesn't share the analysis flags, so we read them
+    defensively via getattr so logging works for every subcommand.
+    """
+    if getattr(args, "quiet", False):
         level = logging.WARNING
-    elif args.verbose:
+    elif getattr(args, "verbose", False):
         level = logging.DEBUG
     else:
         level = logging.INFO
@@ -2870,6 +2954,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args)
+
+    # The hunt subcommand is a pure local-file workflow: no NVD/EPSS/cache
+    # plumbing, no API-key prompt, no shared --no-cache / --format flags.
+    # Short-circuit before any of that runs.
+    if args.subcommand == "hunt":
+        return _run_hunt(args, cache=None, api_key=None)  # type: ignore[arg-type]
+
     _validate_args(args, parser)
 
     cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
@@ -3216,6 +3307,130 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     }
     _output(enriched, args, metadata)
     return 0
+
+
+def load_hunt(path: Path) -> Hunt:
+    """Load a single hunt JSON file. Raises OpmlError on missing/malformed file."""
+    if not path.exists():
+        raise OpmlError(f"Hunt file not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise OpmlError(f"Could not parse hunt file {path}: {exc}") from exc
+    return Hunt.from_dict(data)
+
+
+def load_all_hunts(dir_path: Path) -> list[Hunt]:
+    """Return every well-formed *.json hunt under `dir_path` (sorted by id)."""
+    if not dir_path.exists():
+        return []
+    out: list[Hunt] = []
+    for p in sorted(dir_path.glob("*.json")):
+        try:
+            out.append(load_hunt(p))
+        except OpmlError as exc:
+            _log.warning("Skipping malformed hunt file %s: %s", p, exc)
+    out.sort(key=lambda h: h.id)
+    return out
+
+
+def save_hunt(hunt: Hunt, path: Path) -> None:
+    """Persist a Hunt to disk as pretty-printed JSON; creates parent dir if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(hunt.to_dict(), indent=2), encoding="utf-8")
+
+
+def _hunt_path(hunt_dir: Path, hunt_id: str) -> Path:
+    """Resolve the on-disk path for a hunt id (no slash characters allowed)."""
+    if "/" in hunt_id or "\\" in hunt_id or hunt_id.startswith("."):
+        raise OpmlError(f"Invalid hunt id: {hunt_id!r}")
+    return hunt_dir / f"{hunt_id}.json"
+
+
+def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Execute the hunt subcommand (list / show / link / log / status)."""
+    hunt_dir: Path = args.hunt_dir
+    action = args.action
+
+    if action == "list":
+        hunts = load_all_hunts(hunt_dir)
+        if not hunts:
+            _log.info("No hunts in %s.", hunt_dir)
+            return 0
+        for h in hunts:
+            print(f"{h.id}\t{h.status}\t{len(h.linked_cves)} CVEs\t{h.name}")
+        return 0
+
+    if not args.hunt_id:
+        _log.error("hunt %s: hunt_id is required", action)
+        return 1
+
+    if action == "show":
+        try:
+            hunt = load_hunt(_hunt_path(hunt_dir, args.hunt_id))
+        except OpmlError as exc:
+            _log.error(str(exc))
+            return 1
+        print(json.dumps(hunt.to_dict(), indent=2))
+        return 0
+
+    # All write actions need to load the hunt first.
+    try:
+        hunt_path = _hunt_path(hunt_dir, args.hunt_id)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+    try:
+        hunt = load_hunt(hunt_path)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+
+    if action == "link":
+        if not args.value:
+            _log.error("hunt link: a CVE-ID value is required")
+            return 1
+        cve = args.value.upper()
+        if not CVE_REGEX.fullmatch(cve):
+            _log.error("hunt link: %r is not a valid CVE ID", args.value)
+            return 1
+        if cve in hunt.linked_cves:
+            _log.info("CVE %s already linked to hunt %s.", cve, hunt.id)
+            return 0
+        hunt.linked_cves.append(cve)
+        save_hunt(hunt, hunt_path)
+        print(f"Linked {cve} to {hunt.id}")
+        return 0
+
+    if action == "log":
+        if not args.value:
+            _log.error("hunt log: a finding text is required")
+            return 1
+        hunt.findings.append({
+            "timestamp": _utcnow().isoformat(timespec="seconds"),
+            "text": args.value,
+        })
+        save_hunt(hunt, hunt_path)
+        print(f"Logged finding on {hunt.id}")
+        return 0
+
+    if action == "status":
+        if not args.value:
+            _log.error("hunt status: a new status value is required (one of %s)",
+                       ", ".join(HUNT_STATUSES))
+            return 1
+        new_status = args.value.lower()
+        if new_status not in HUNT_STATUSES:
+            _log.error("hunt status: %r is not a valid status (use %s)",
+                       args.value, ", ".join(HUNT_STATUSES))
+            return 1
+        hunt.status = new_status
+        save_hunt(hunt, hunt_path)
+        print(f"Set {hunt.id} status → {new_status}")
+        return 0
+
+    _log.error("Unknown hunt action: %r", action)
+    return 1
 
 
 def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
