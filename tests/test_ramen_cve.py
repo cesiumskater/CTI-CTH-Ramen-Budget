@@ -4036,6 +4036,340 @@ def test_run_hunt_rejects_path_traversal(tmp_path, caplog):
     assert any("invalid hunt id" in r.message.lower() for r in caplog.records)
 
 
+# ---------------------------------------------------------------------------
+# Slice 18 — Asset / Vulnerability exposure correlation
+# ---------------------------------------------------------------------------
+
+
+def test_parse_nvd_response_captures_cpes():
+    """A configurations[].nodes[].cpeMatch[].criteria entry surfaces in cpes[]."""
+    from ramen_cve import _parse_nvd_response
+
+    payload = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2099-0001",
+                    "metrics": {},
+                    "weaknesses": [],
+                    "configurations": [
+                        {
+                            "nodes": [
+                                {
+                                    "cpeMatch": [
+                                        {
+                                            "criteria":
+                                                "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+                                            "vulnerable": True,
+                                        },
+                                        {
+                                            "criteria":
+                                                "cpe:2.3:a:apache:log4j:2.15.0:*:*:*:*:*:*:*",
+                                            "vulnerable": True,
+                                        },
+                                    ],
+                                    "children": [
+                                        {
+                                            "cpeMatch": [
+                                                {
+                                                    "criteria":
+                                                        "cpe:2.3:a:apache:log4j:2.16.0:"
+                                                        "*:*:*:*:*:*:*",
+                                                    "vulnerable": True,
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    out = _parse_nvd_response(payload)
+    assert "cpes" in out
+    assert any("apache:log4j:2.14.1" in c for c in out["cpes"])
+    # Nested children CPEs are also captured
+    assert any("apache:log4j:2.16.0" in c for c in out["cpes"])
+
+
+def test_parse_nvd_response_no_configurations_yields_empty_cpes():
+    """Old CVE fixtures with no configurations block return cpes=[]."""
+    from ramen_cve import _parse_nvd_response
+
+    data = _load_fixture("nvd_no_cvss.json")
+    out = _parse_nvd_response(data)
+    assert out["cpes"] == []
+
+
+def test_cpe_matches_inventory_basic():
+    """An exact product+version match (or '*' version) returns True."""
+    from ramen_cve import _cpe_matches_inventory
+
+    # CPE: cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*
+    cpe = "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe, "log4j", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe, "apache", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe, "log4j", "9.9.9") is False
+
+    # Wildcard version on the CPE should match any inventory version
+    cpe_wild = "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe_wild, "log4j", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe_wild, "log4j", "1.0.0") is True
+
+
+def test_cpe_matches_inventory_rejects_wrong_product():
+    """A non-matching product returns False."""
+    from ramen_cve import _cpe_matches_inventory
+
+    cpe = "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe, "nginx", "1.0") is False
+
+
+def test_cpe_matches_inventory_invalid_cpe_returns_false():
+    """A malformed CPE returns False instead of raising."""
+    from ramen_cve import _cpe_matches_inventory
+
+    assert _cpe_matches_inventory("not-a-cpe", "log4j", "2.14.1") is False
+    assert _cpe_matches_inventory("", "log4j", "2.14.1") is False
+
+
+def test_load_inventory_round_trip(tmp_path):
+    """A 3-row inventory CSV is parsed into 3 dicts with host/product/version/cpe."""
+    from ramen_cve import load_inventory
+
+    csv_text = (
+        "host,product,version,cpe\n"
+        "web-1,log4j,2.14.1,\n"
+        "web-2,log4j,2.17.0,\n"
+        "db-1,postgresql,14.5,cpe:2.3:a:postgresql:postgresql:14.5:*:*:*:*:*:*:*\n"
+    )
+    p = tmp_path / "inv.csv"
+    p.write_text(csv_text)
+    rows = load_inventory(p)
+    assert len(rows) == 3
+    assert rows[0]["host"] == "web-1"
+    assert rows[2]["cpe"].startswith("cpe:2.3:a:postgresql")
+
+
+def test_load_inventory_missing_file_raises_friendly():
+    """A missing inventory file raises OpmlError."""
+    from pathlib import Path
+
+    from ramen_cve import OpmlError, load_inventory
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_inventory(Path("/tmp/does-not-exist-ramen-inv.csv"))
+
+
+def test_correlate_inventory_annotates_affected_hosts():
+    """correlate_inventory populates affected_hosts on each EnrichedCve."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+    )
+    inventory = [
+        {"host": "web-1", "product": "log4j", "version": "2.14.1", "cpe": ""},
+        {"host": "web-2", "product": "log4j", "version": "2.17.0", "cpe": ""},  # version mismatch
+        {"host": "db-1", "product": "postgres", "version": "14", "cpe": ""},   # product mismatch
+    ]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["web-1"]
+
+
+def test_correlate_inventory_explicit_cpe_column_matches():
+    """A row with an explicit cpe column matches via substring comparison."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:vendor:product:1.0:*:*:*:*:*:*:*"],
+    )
+    inventory = [
+        {"host": "h1", "product": "", "version": "",
+         "cpe": "cpe:2.3:a:vendor:product:1.0"},
+    ]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["h1"]
+
+
+def test_correlate_inventory_dedupes_same_host_across_cpes():
+    """A host that matches multiple CPEs of the same CVE is added only once."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=[
+            "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+            "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+        ],
+    )
+    inventory = [{"host": "web-1", "product": "log4j", "version": "2.14.1", "cpe": ""}]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["web-1"]
+
+
+def test_write_csv_includes_affected_hosts_column(tmp_path):
+    """CSV adds an affected_hosts column joined with ';'."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        affected_hosts=["web-1", "web-2"],
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "affected_hosts" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["affected_hosts"] == "web-1;web-2"
+
+
+def test_write_markdown_renders_affected_hosts_and_cross_tab(tmp_path):
+    """Per-CVE 'Affected in your environment' line + roll-up cross-tab table."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            epss_score=0.97,
+            bucket="patch_now",
+            affected_hosts=["web-1", "web-2", "web-3"],
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            epss_score=0.97,
+            bucket="patch_now",
+            affected_hosts=["web-1"],
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    assert "**Affected in your environment:** 3 host(s) — web-1, web-2, web-3" in text
+    assert "## Affected in Your Environment" in text
+    assert "| web-1 | 2 |" in text
+    assert "| web-2 | 1 |" in text
+
+
+def test_write_markdown_truncates_long_affected_lists(tmp_path):
+    """A CVE with >8 affected hosts shows the first 8 and an '(and N more)' tail."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        affected_hosts=[f"host-{i:03d}" for i in range(15)],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "(and 7 more)" in text
+
+
+def test_cli_inventory_flag_parses(tmp_path):
+    """--inventory accepts a path that survives parsing."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args([
+        "opml", "x.opml",
+        "--inventory", str(tmp_path / "inv.csv"),
+    ])
+    assert str(args.inventory).endswith("inv.csv")
+
+
+def test_maybe_correlate_inventory_runs_only_when_flag_set(tmp_path, caplog):
+    """If --inventory points at a real file, correlation runs and logs a summary."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, _maybe_correlate_inventory
+
+    inv_path = tmp_path / "inv.csv"
+    inv_path.write_text("host,product,version\nweb-1,log4j,2.14.1\n")
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+    )
+    args = argparse.Namespace(inventory=inv_path)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        _maybe_correlate_inventory(args, [rec])
+    assert rec.affected_hosts == ["web-1"]
+    assert any("Inventory correlation" in r.message for r in caplog.records)
+
+
+def test_maybe_correlate_inventory_missing_path_logs_error(tmp_path, caplog):
+    """A bogus --inventory path logs ERROR but does NOT abort."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, _maybe_correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+    )
+    args = argparse.Namespace(inventory=tmp_path / "nope.csv")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        _maybe_correlate_inventory(args, [rec])
+    assert rec.affected_hosts == []
+    assert any("Inventory correlation skipped" in r.message for r in caplog.records)
+
+
 def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
     """--format all produces a *-sigma directory containing one YAML per qualifying CVE."""
     from unittest.mock import MagicMock, patch

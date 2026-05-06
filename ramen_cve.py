@@ -479,6 +479,12 @@ class EnrichedCve:
     tlp: str = "CLEAR"
     admiralty: str = ""
 
+    # CPE 2.3 strings from NVD (configurations.nodes.cpeMatch.criteria).
+    cpes: list[str] = field(default_factory=list)
+
+    # Hosts from the user's --inventory CSV whose product+version match a CPE.
+    affected_hosts: list[str] = field(default_factory=list)
+
     # Bucket
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
@@ -1103,6 +1109,23 @@ def _parse_nvd_response(data: dict) -> dict:
     published_str = cve_data.get("published")
     nvd_published = published_str[:10] if published_str else None
 
+    # Walk configurations[].nodes[].cpeMatch[] for CPE 2.3 strings. NVD
+    # responses sometimes nest cpeMatch under children; iterate defensively.
+    cpes: list[str] = []
+    seen_cpes: set[str] = set()
+
+    def _collect_cpes(nodes: list) -> None:
+        for node in nodes or []:
+            for match in node.get("cpeMatch") or []:
+                criteria = match.get("criteria") or ""
+                if criteria and criteria not in seen_cpes:
+                    seen_cpes.add(criteria)
+                    cpes.append(criteria)
+            _collect_cpes(node.get("children") or [])
+
+    for cfg in cve_data.get("configurations") or []:
+        _collect_cpes(cfg.get("nodes") or [])
+
     return {
         "cve_id": cve_id,
         "cvss_score": cvss_score,
@@ -1111,6 +1134,7 @@ def _parse_nvd_response(data: dict) -> dict:
         "cvss_version": cvss_version,
         "kev_listed": kev_listed,
         "cwe": cwe,
+        "cpes": cpes,
         "nvd_published": nvd_published,
         "nvd_status": "ok",
     }
@@ -1371,6 +1395,7 @@ def enrich_cves(
                 attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
                 tlp=merged_tlp.get(cve_id, "CLEAR"),
                 admiralty=merged_adm.get(cve_id, ""),
+                cpes=list(nvd.get("cpes") or []),
             )
         )
 
@@ -1748,6 +1773,92 @@ def enrich_iocs(
     return iocs
 
 
+def load_inventory(path: Path) -> list[dict[str, str]]:
+    """Load an inventory CSV with columns host, product, version (case-insensitive).
+
+    Returns a list of dicts. An optional `cpe` column is also accepted; rows
+    that supply `cpe` are matched directly without product/version inference.
+    Raises OpmlError on missing or unreadable files.
+    """
+    if not path.exists():
+        raise OpmlError(f"Inventory file not found: {path}")
+    rows: list[dict[str, str]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for r in reader:
+                rows.append(
+                    {
+                        "host": (r.get("host") or "").strip(),
+                        "product": (r.get("product") or "").strip(),
+                        "version": (r.get("version") or "").strip(),
+                        "cpe": (r.get("cpe") or "").strip(),
+                    }
+                )
+    except OSError as exc:
+        raise OpmlError(f"Could not read inventory file {path}: {exc}") from exc
+    return rows
+
+
+def _cpe_matches_inventory(cpe: str, product: str, version: str) -> bool:
+    """Return True if a CPE 2.3 string plausibly matches a (product, version) pair.
+
+    A match requires:
+      - The product token appears in the CPE's vendor or product slot.
+      - The CPE's version slot is '*' (any version vulnerable) OR exactly equals
+        the inventory version.
+
+    Both comparisons are lowercase.
+    """
+    if not cpe.startswith("cpe:2.3:") and not cpe.startswith("cpe:/"):
+        return False
+    parts = cpe.lower().split(":")
+    if len(parts) < 6:
+        return False
+    cpe_vendor = parts[3]
+    cpe_product = parts[4]
+    cpe_version = parts[5]
+    pl = (product or "").lower()
+    if not pl:
+        return False
+    if pl not in cpe_vendor and pl not in cpe_product:
+        return False
+    return not (cpe_version != "*" and version and cpe_version != version.lower())
+
+
+def correlate_inventory(
+    enriched: list[EnrichedCve],
+    inventory: list[dict[str, str]],
+) -> list[EnrichedCve]:
+    """Annotate each EnrichedCve with hosts whose inventory row matches a CPE.
+
+    For each (cve, host) pair: if any of the CVE's CPEs matches the host's
+    product+version (or its explicit cpe column), the host is added to
+    rec.affected_hosts. Returns the same list for chaining.
+    """
+    for rec in enriched:
+        hits: list[str] = []
+        for inv in inventory:
+            host = inv["host"]
+            if not host or host in hits:
+                continue
+            matched = False
+            inv_cpe = inv.get("cpe") or ""
+            if inv_cpe:
+                # Direct CPE compare: lowercase substring match against any rec CPE.
+                inv_cpe_l = inv_cpe.lower()
+                matched = any(inv_cpe_l in c.lower() or c.lower() in inv_cpe_l for c in rec.cpes)
+            else:
+                for cpe in rec.cpes:
+                    if _cpe_matches_inventory(cpe, inv["product"], inv["version"]):
+                        matched = True
+                        break
+            if matched:
+                hits.append(host)
+        rec.affected_hosts = hits
+    return enriched
+
+
 def bucket_and_suggest(
     enriched: list[EnrichedCve],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
@@ -1853,6 +1964,7 @@ CSV_COLUMNS = [
     "linked_malware",
     "tlp",
     "admiralty",
+    "affected_hosts",
     "nvd_published",
     "enriched_at",
 ]
@@ -2341,6 +2453,7 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     ";".join(m.name for m in rec.linked_malware),
                     rec.tlp or "CLEAR",
                     rec.admiralty or "",
+                    ";".join(rec.affected_hosts),
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -2486,6 +2599,21 @@ def write_markdown(
             lines.append(f"| {tid} | {name} | {len(cves)} |")
         lines.append("")
 
+    affected_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for host in rec.affected_hosts:
+            affected_rollup.setdefault(host, []).append(rec.cve_id)
+    if affected_rollup:
+        lines += [
+            "## Affected in Your Environment",
+            "",
+            "| Host | CVEs |",
+            "| --- | --- |",
+        ]
+        for host in sorted(affected_rollup):
+            lines.append(f"| {_md_safe(host)} | {len(affected_rollup[host])} |")
+        lines.append("")
+
     actor_rollup: dict[str, list[str]] = {}
     for rec in enriched:
         for actor in rec.linked_actors:
@@ -2556,6 +2684,15 @@ def write_markdown(
                 adm_disp = f"Admiralty {rec.admiralty}" if rec.admiralty else ""
                 provenance = " · ".join(p for p in (tlp_disp, adm_disp) if p)
                 lines.append(f"- **Provenance:** {provenance}")
+            if rec.affected_hosts:
+                shown = rec.affected_hosts[:8]
+                hosts_disp = ", ".join(_md_safe(h) for h in shown)
+                extra = len(rec.affected_hosts) - len(shown)
+                more = f" *(and {extra} more)*" if extra > 0 else ""
+                lines.append(
+                    f"- **Affected in your environment:** {len(rec.affected_hosts)} "
+                    f"host(s) — {hosts_disp}{more}"
+                )
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:
@@ -2668,6 +2805,16 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         help=(
             "Permit writing TLP:RED records to disk. Default behavior is to "
             "STRIP any TLP:RED records before output and log a warning."
+        ),
+    )
+    parser.add_argument(
+        "--inventory",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to a CSV asset inventory with columns 'host,product,version' "
+            "(or 'host,cpe'). When set, the report annotates each CVE with the "
+            "list of inventory hosts whose product+version matches a CVE CPE."
         ),
     )
     parser.add_argument(
@@ -3004,6 +3151,28 @@ def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]
     return load_associations(args.associations_file)
 
 
+def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """Load --inventory (if set) and annotate each EnrichedCve with affected_hosts.
+
+    A missing or unreadable inventory file is logged as an error but does NOT
+    abort the run — the rest of the report is still useful without correlation.
+    """
+    inv_path: Path | None = getattr(args, "inventory", None)
+    if not inv_path:
+        return
+    try:
+        inventory = load_inventory(inv_path)
+    except OpmlError as exc:
+        _log.error("Inventory correlation skipped: %s", exc)
+        return
+    correlate_inventory(enriched, inventory)
+    affected = sum(1 for r in enriched if r.affected_hosts)
+    _log.info(
+        "Inventory correlation: %d/%d CVEs affect at least one host (%d inventory rows).",
+        affected, len(enriched), len(inventory),
+    )
+
+
 def _get_github_token() -> str | None:
     """Return GITHUB_TOKEN from the environment, or None if absent.
 
@@ -3145,6 +3314,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -3204,6 +3374,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -3291,6 +3462,7 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -3473,6 +3645,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     enriched = enrich_cves(cve_records, cache, api_key)
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
