@@ -1852,9 +1852,12 @@ def test_write_iocs_csv_round_trip(tmp_path):
     assert rows[0] == IOC_CSV_COLUMNS
     assert len(rows) == 3
     assert rows[1][0] == "url"
-    assert rows[1][-1] == "true"
+    # defanged_in_source is the second-to-last column now that 'enrichments' was added
+    assert rows[1][IOC_CSV_COLUMNS.index("defanged_in_source")] == "true"
     assert rows[2][0] == "md5"
-    assert rows[2][-1] == "false"
+    assert rows[2][IOC_CSV_COLUMNS.index("defanged_in_source")] == "false"
+    # enrichments column exists and is empty for unenriched records
+    assert rows[1][IOC_CSV_COLUMNS.index("enrichments")] == ""
 
 
 def test_write_markdown_renders_iocs_section(tmp_path):
@@ -3104,6 +3107,361 @@ def test_cli_format_sigma_choice_parses():
 
     args = build_parser().parse_args(["opml", "x.opml", "--format", "sigma"])
     assert args.format == "sigma"
+
+
+# ---------------------------------------------------------------------------
+# Slice 15 — Multi-source IOC enrichment
+# ---------------------------------------------------------------------------
+
+
+def _make_resp(status: int = 200, *, json_payload: dict | None = None, text: str = ""):
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.status_code = status
+    if status >= 400 and status != 404:
+        import requests as _req
+
+        resp.raise_for_status.side_effect = _req.HTTPError(response=resp)
+    else:
+        resp.raise_for_status.return_value = None
+    if json_payload is not None:
+        resp.json.return_value = json_payload
+    resp.text = text
+    return resp
+
+
+def test_virustotal_enricher_supports_only_with_key():
+    """VirusTotal is gated on api_key; no key → supports() returns False."""
+    from ramen_cve import VirusTotalEnricher
+
+    no_key = VirusTotalEnricher(api_key=None)
+    assert no_key.supports("md5") is False
+    assert no_key.supports("ipv4") is False
+
+    with_key = VirusTotalEnricher(api_key="vt-test")
+    for t in ("ipv4", "domain", "url", "md5", "sha1", "sha256"):
+        assert with_key.supports(t) is True
+    assert with_key.supports("email") is False
+
+
+def test_virustotal_enricher_returns_normalized_payload():
+    """A 200 from VT is normalized to {found, malicious, suspicious, ...}."""
+    from unittest.mock import patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    payload = {
+        "data": {
+            "id": "8.8.8.8",
+            "type": "ip_address",
+            "attributes": {
+                "last_analysis_stats": {
+                    "harmless": 80, "malicious": 3, "suspicious": 1, "undetected": 16,
+                },
+                "reputation": -5,
+            },
+        }
+    }
+    with patch("ramen_cve.requests.get", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("ipv4", "8.8.8.8", cache)
+    assert result["found"] is True
+    assert result["malicious"] == 3
+    assert result["suspicious"] == 1
+    assert result["harmless"] == 80
+    assert result["reputation"] == -5
+    # Cache hit on second call
+    with patch("ramen_cve.requests.get") as mock_get:
+        cached = e.enrich("ipv4", "8.8.8.8", cache)
+    assert cached == result
+    mock_get.assert_not_called()
+
+
+def test_virustotal_enricher_404_records_not_found():
+    """A 404 is interpreted as 'found=False' and cached so we don't keep retrying."""
+    from unittest.mock import patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    with patch("ramen_cve.requests.get", return_value=_make_resp(status=404)):
+        result = e.enrich("md5", "deadbeef" * 4, cache)
+    assert result == {"found": False}
+
+
+def test_virustotal_enricher_network_error_returns_none(caplog):
+    """A network error logs a warning and returns None (and is NOT cached)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("boom")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        result = e.enrich("ipv4", "1.2.3.4", cache)
+    assert result is None
+    assert any("virustotal enrichment failed" in r.message for r in caplog.records)
+    # Nothing should have been cached
+    assert cache.get_enrichment("virustotal", "ipv4", "1.2.3.4") is None
+
+
+def test_abuseipdb_enricher_only_supports_ipv4():
+    """AbuseIPDB only enriches IPv4 and only with a key."""
+    from ramen_cve import AbuseIPDBEnricher
+
+    e = AbuseIPDBEnricher(api_key="abuse-test")
+    assert e.supports("ipv4") is True
+    for t in ("md5", "domain", "url", "email"):
+        assert e.supports(t) is False
+
+
+def test_abuseipdb_enricher_returns_normalized_payload():
+    """AbuseIPDB response is normalized to abuse_confidence + total_reports."""
+    from unittest.mock import patch
+
+    from ramen_cve import AbuseIPDBEnricher
+
+    cache = _mem_cache()
+    e = AbuseIPDBEnricher(api_key="abuse-test")
+    payload = {
+        "data": {
+            "ipAddress": "1.2.3.4",
+            "abuseConfidenceScore": 87,
+            "totalReports": 42,
+            "countryCode": "RU",
+        }
+    }
+    with patch("ramen_cve.requests.get", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("ipv4", "1.2.3.4", cache)
+    assert result["abuse_confidence"] == 87
+    assert result["total_reports"] == 42
+    assert result["country_code"] == "RU"
+
+
+def test_otx_enricher_supported_types_and_url_encoding():
+    """OTX maps each IOC type to an indicator endpoint and URL-encodes the value."""
+    from unittest.mock import patch
+
+    from ramen_cve import OtxEnricher
+
+    cache = _mem_cache()
+    e = OtxEnricher(api_key="otx-test")
+    assert e.supports("ipv4") and e.supports("md5") and e.supports("url")
+    assert not e.supports("email")
+    payload = {"pulse_info": {"count": 7}, "reputation": 0}
+
+    with patch(
+        "ramen_cve.requests.get", return_value=_make_resp(json_payload=payload),
+    ) as mock_get:
+        result = e.enrich("url", "https://evil/?x=1", cache)
+    assert result["pulse_count"] == 7
+    # The URL value should be percent-encoded inside the request URL
+    called = mock_get.call_args.args[0]
+    assert "https%3A%2F%2Fevil%2F%3Fx%3D1" in called
+
+
+def test_malwarebazaar_enricher_no_key_required():
+    """MalwareBazaar supports hashes without a key."""
+    from ramen_cve import MalwareBazaarEnricher
+
+    e = MalwareBazaarEnricher()
+    for t in ("md5", "sha1", "sha256"):
+        assert e.supports(t) is True
+    assert e.supports("ipv4") is False
+
+
+def test_malwarebazaar_enricher_known_sample():
+    """A 'query_status: ok' response yields found=True with file_name + signature."""
+    from unittest.mock import patch
+
+    from ramen_cve import MalwareBazaarEnricher
+
+    cache = _mem_cache()
+    e = MalwareBazaarEnricher()
+    payload = {
+        "query_status": "ok",
+        "data": [
+            {
+                "sha256_hash": "ab" * 32,
+                "file_name": "evil.exe",
+                "file_type": "exe",
+                "signature": "Emotet",
+                "tags": ["banker", "trojan"],
+            }
+        ],
+    }
+    resp = _make_resp(json_payload=payload)
+    with patch("ramen_cve.requests.post", return_value=resp):
+        result = e.enrich("sha256", "ab" * 32, cache)
+    assert result["found"] is True
+    assert result["signature"] == "Emotet"
+    assert "trojan" in result["tags"]
+
+
+def test_malwarebazaar_enricher_unknown_sample():
+    """A 'hash_not_found' response yields {found: False}."""
+    from unittest.mock import patch
+
+    from ramen_cve import MalwareBazaarEnricher
+
+    cache = _mem_cache()
+    e = MalwareBazaarEnricher()
+    payload = {"query_status": "hash_not_found"}
+    with patch("ramen_cve.requests.post", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("sha256", "00" * 32, cache)
+    assert result == {"found": False}
+
+
+def test_enrich_iocs_runs_each_enricher_only_for_supported_types():
+    """An IPv4 IOC is enriched by VT + AbuseIPDB but not MalwareBazaar."""
+    from ramen_cve import (
+        AbuseIPDBEnricher,
+        IocRecord,
+        MalwareBazaarEnricher,
+        VirusTotalEnricher,
+        enrich_iocs,
+    )
+
+    cache = _mem_cache()
+    rec = IocRecord("ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub")
+
+    class CountingVT(VirusTotalEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "malicious": 0, "suspicious": 0, "harmless": 1, "reputation": 0}
+
+    class CountingAbuse(AbuseIPDBEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "abuse_confidence": 0, "total_reports": 0,
+                    "country_code": "US"}
+
+    class CountingMB(MalwareBazaarEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return None
+
+    enrichers = [CountingVT("vt"), CountingAbuse("abuse"), CountingMB()]
+    enrich_iocs([rec], cache, enrichers=enrichers)
+
+    assert CountingVT.calls == 1
+    assert CountingAbuse.calls == 1
+    assert CountingMB.calls == 0
+    assert "virustotal" in rec.enrichments
+    assert "abuseipdb" in rec.enrichments
+    assert "malwarebazaar" not in rec.enrichments
+
+
+def test_enrich_iocs_uses_cache_on_second_call():
+    """A second enrich pass over the same IOC list does NOT re-hit the network."""
+    from ramen_cve import IocRecord, VirusTotalEnricher, enrich_iocs
+
+    cache = _mem_cache()
+    rec = IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "x",
+                    date(2024, 1, 1), "feed_pub")
+
+    class CountingVT(VirusTotalEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "malicious": 1, "suspicious": 0, "harmless": 0, "reputation": -1}
+
+    enricher = CountingVT("vt-test")
+    enrich_iocs([rec], cache, enrichers=[enricher])
+    rec.enrichments = {}  # simulate fresh-load on second run
+    enrich_iocs([rec], cache, enrichers=[enricher])
+    assert CountingVT.calls == 1
+
+
+def test_cache_get_enrichment_round_trip():
+    """Cache.set_enrichment / get_enrichment round-trip."""
+    c = _mem_cache()
+    c.set_enrichment("vt", "md5", "ab" * 16, {"malicious": 1})
+    assert c.get_enrichment("vt", "md5", "ab" * 16) == {"malicious": 1}
+    # Different (enricher, type, value) tuples are independent rows
+    assert c.get_enrichment("vt", "ipv4", "1.2.3.4") is None
+    assert c.get_enrichment("abuseipdb", "md5", "ab" * 16) is None
+
+
+def test_summarize_enrichment_handles_known_sources():
+    """_summarize_enrichment renders concise per-source summaries."""
+    from ramen_cve import _summarize_enrichment
+
+    assert _summarize_enrichment("virustotal", {"found": True, "malicious": 5,
+                                                "suspicious": 2, "reputation": -3}).startswith(
+        "malicious=5"
+    )
+    assert "abuse_confidence=87" in _summarize_enrichment(
+        "abuseipdb", {"found": True, "abuse_confidence": 87, "total_reports": 12}
+    )
+    assert "pulse_count=7" in _summarize_enrichment(
+        "otx", {"found": True, "pulse_count": 7}
+    )
+    assert "Emotet" in _summarize_enrichment(
+        "malwarebazaar", {"found": True, "signature": "Emotet"}
+    )
+    # not-found payloads collapse to empty
+    assert _summarize_enrichment("virustotal", {"found": False}) == ""
+
+
+def test_iocs_csv_includes_enrichments_column(tmp_path):
+    """The new enrichments CSV column is JSON-serialized."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    rec = IocRecord(
+        "ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub",
+        enrichments={"virustotal": {"malicious": 3}},
+    )
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    enr_idx = IOC_CSV_COLUMNS.index("enrichments")
+    body = json.loads(rows[1][enr_idx])
+    assert body == {"virustotal": {"malicious": 3}}
+
+
+def test_markdown_iocs_section_renders_enrichment_summaries(tmp_path):
+    """Markdown lists each enrichment as a sub-bullet under the IOC."""
+    from ramen_cve import IocRecord, write_markdown
+
+    iocs = [
+        IocRecord(
+            "ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub",
+            enrichments={
+                "virustotal": {"found": True, "malicious": 4, "suspicious": 1,
+                               "harmless": 60, "reputation": -2},
+                "abuseipdb": {"found": True, "abuse_confidence": 75, "total_reports": 9},
+            },
+        )
+    ]
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=iocs)
+    text = out.read_text()
+    assert "  - virustotal: malicious=4" in text
+    assert "  - abuseipdb: abuse_confidence=75" in text
+
+
+def test_cli_no_enrich_iocs_flag_parses():
+    """--no-enrich-iocs is accepted on every subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--no-enrich-iocs"])
+    assert args.no_enrich_iocs is True
 
 
 def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
