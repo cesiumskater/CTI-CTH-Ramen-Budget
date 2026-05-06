@@ -1852,9 +1852,12 @@ def test_write_iocs_csv_round_trip(tmp_path):
     assert rows[0] == IOC_CSV_COLUMNS
     assert len(rows) == 3
     assert rows[1][0] == "url"
-    assert rows[1][-1] == "true"
+    # defanged_in_source is the second-to-last column now that 'enrichments' was added
+    assert rows[1][IOC_CSV_COLUMNS.index("defanged_in_source")] == "true"
     assert rows[2][0] == "md5"
-    assert rows[2][-1] == "false"
+    assert rows[2][IOC_CSV_COLUMNS.index("defanged_in_source")] == "false"
+    # enrichments column exists and is empty for unenriched records
+    assert rows[1][IOC_CSV_COLUMNS.index("enrichments")] == ""
 
 
 def test_write_markdown_renders_iocs_section(tmp_path):
@@ -2379,3 +2382,2437 @@ def test_cli_no_exploit_lookup_flag_parses():
     assert args.no_exploit_lookup is True
     args2 = build_parser().parse_args(["opml", "x.opml"])
     assert args2.no_exploit_lookup is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 12 — STIX 2.1 / TAXII interoperability
+# ---------------------------------------------------------------------------
+
+
+def test_stix_uuid_is_deterministic_and_uuid4_shaped():
+    """_stix_uuid returns the same string for the same seed and matches UUIDv4 form."""
+    import re as _re
+
+    from ramen_cve import _stix_uuid
+
+    a = _stix_uuid("CVE-2021-44228")
+    b = _stix_uuid("CVE-2021-44228")
+    assert a == b
+    assert _re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}", a
+    )
+    assert _stix_uuid("CVE-2099-9999") != a
+
+
+def test_ioc_to_stix_pattern_covers_all_types():
+    """Every IOC type produces a valid STIX equality pattern; unknown types return None."""
+    from ramen_cve import IocRecord, _ioc_to_stix_pattern
+
+    cases = [
+        ("ipv4", "8.8.8.8", "[ipv4-addr:value = '8.8.8.8']"),
+        ("url", "https://evil.example/c2", "[url:value = 'https://evil.example/c2']"),
+        ("domain", "evil.example.com", "[domain-name:value = 'evil.example.com']"),
+        ("email", "x@y.com", "[email-addr:value = 'x@y.com']"),
+        (
+            "md5",
+            "d41d8cd98f00b204e9800998ecf8427e",
+            "[file:hashes.MD5 = 'd41d8cd98f00b204e9800998ecf8427e']",
+        ),
+        (
+            "sha1",
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "[file:hashes.'SHA-1' = 'da39a3ee5e6b4b0d3255bfef95601890afd80709']",
+        ),
+        (
+            "sha256",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "[file:hashes.'SHA-256' = "
+            "'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855']",
+        ),
+    ]
+    for ioc_type, value, expected in cases:
+        rec = IocRecord(ioc_type, value, "src", date(2024, 1, 1), "feed_pub")
+        assert _ioc_to_stix_pattern(rec) == expected
+
+    unknown = IocRecord("invented", "x", "src", date(2024, 1, 1), "feed_pub")
+    assert _ioc_to_stix_pattern(unknown) is None
+
+
+def test_ioc_to_stix_pattern_escapes_quotes():
+    """An IOC value containing a single quote is escaped so the STIX pattern stays valid."""
+    from ramen_cve import IocRecord, _ioc_to_stix_pattern
+
+    rec = IocRecord("url", "https://evil/'a", "src", date(2024, 1, 1), "feed_pub")
+    pattern = _ioc_to_stix_pattern(rec)
+    assert pattern is not None and "\\'" in pattern
+
+
+def test_write_stix_emits_bundle_with_vuln_note_indicator(tmp_path):
+    """write_stix produces a JSON bundle with the expected SDO mix."""
+    from ramen_cve import EnrichedCve, IocRecord, write_stix
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_short_description="Apache Log4j2 RCE.",
+        cwe=["CWE-502"],
+        attack_techniques=["T1059", "T1190"],
+        exploit_status="exploit_db",
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+    )
+    iocs = [
+        IocRecord("ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub"),
+        IocRecord(
+            "md5", "d41d8cd98f00b204e9800998ecf8427e", "x", date(2024, 1, 2), "feed_pub",
+        ),
+    ]
+    out = tmp_path / "report.stix.json"
+    write_stix([rec], out, iocs=iocs)
+    bundle = json.loads(out.read_text())
+    assert bundle["type"] == "bundle"
+    types = [o["type"] for o in bundle["objects"]]
+    assert "identity" in types
+    assert types.count("vulnerability") == 1
+    assert types.count("note") == 1
+    assert types.count("indicator") == 2
+
+    vuln = next(o for o in bundle["objects"] if o["type"] == "vulnerability")
+    assert vuln["name"] == "CVE-2021-44228"
+    assert any(
+        ref.get("source_name") == "cve" and ref.get("external_id") == "CVE-2021-44228"
+        for ref in vuln["external_references"]
+    )
+    assert any(ref.get("source_name") == "cwe" for ref in vuln["external_references"])
+
+    note = next(o for o in bundle["objects"] if o["type"] == "note")
+    assert "Bucket: kev_override" in note["content"]
+    assert "Apache Log4j2 RCE." in vuln["description"]
+    assert "ATT&CK: T1059, T1190" in note["content"]
+    assert "Exploit Status: exploit_db" in note["content"]
+    assert vuln["id"] in note["object_refs"]
+
+
+def test_write_stix_uses_stable_ids_across_runs(tmp_path):
+    """Two writes for the same CVE should produce the same Vulnerability SDO id."""
+    from ramen_cve import EnrichedCve, write_stix
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-1234",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+    )
+    p1 = tmp_path / "a.stix.json"
+    p2 = tmp_path / "b.stix.json"
+    write_stix([rec], p1)
+    write_stix([rec], p2)
+    a = json.loads(p1.read_text())
+    b = json.loads(p2.read_text())
+    a_vuln = next(o for o in a["objects"] if o["type"] == "vulnerability")
+    b_vuln = next(o for o in b["objects"] if o["type"] == "vulnerability")
+    assert a_vuln["id"] == b_vuln["id"]
+
+
+def test_extract_iocs_from_pattern_round_trips():
+    """The patterns we emit can be parsed back into the same (type, value) pairs."""
+    from ramen_cve import IocRecord, _extract_iocs_from_pattern, _ioc_to_stix_pattern
+
+    pairs = [
+        ("ipv4", "8.8.8.8"),
+        ("url", "https://evil.example/c2"),
+        ("domain", "evil.example.com"),
+        ("email", "x@y.com"),
+        ("md5", "d41d8cd98f00b204e9800998ecf8427e"),
+        ("sha1", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        ("sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ]
+    for ioc_type, value in pairs:
+        rec = IocRecord(ioc_type, value, "src", date(2024, 1, 1), "feed_pub")
+        pattern = _ioc_to_stix_pattern(rec)
+        assert pattern is not None
+        parsed = _extract_iocs_from_pattern(pattern)
+        assert parsed == [(ioc_type, value)], f"round-trip mismatch for {ioc_type}={value}"
+
+
+def test_parse_stix_bundle_extracts_vulns_and_indicators(tmp_path):
+    """parse_stix_bundle reads CVE IDs from Vulnerability SDOs and IOCs from patterns."""
+    from ramen_cve import parse_stix_bundle
+
+    bundle = {
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2021-44228",
+                "external_references": [{"source_name": "cve", "external_id": "CVE-2021-44228"}],
+            },
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000002",
+                "name": "Some narrative name",
+                "external_references": [{"source_name": "cve", "external_id": "CVE-2021-26855"}],
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000003",
+                "pattern": "[ipv4-addr:value = '203.0.113.5']",
+                "pattern_type": "stix",
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000004",
+                "pattern": "[file:hashes.'SHA-256' = "
+                "'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855']",
+                "pattern_type": "stix",
+            },
+            {"type": "identity", "id": "identity--00000000-0000-4000-8000-000000000005"},
+        ],
+    }
+    bundle_path = tmp_path / "in.stix.json"
+    bundle_path.write_text(json.dumps(bundle))
+
+    cves, iocs = parse_stix_bundle(bundle_path)
+    cve_ids = {r.cve_id for r in cves}
+    assert cve_ids == {"CVE-2021-44228", "CVE-2021-26855"}
+    by_type = {(i.ioc_type, i.value) for i in iocs}
+    assert ("ipv4", "203.0.113.5") in by_type
+    assert (
+        "sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ) in by_type
+
+
+def test_parse_stix_bundle_missing_file_raises_friendly_error(tmp_path):
+    """A missing bundle path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, parse_stix_bundle
+
+    with pytest.raises(OpmlError, match="not found"):
+        parse_stix_bundle(tmp_path / "nope.json")
+
+
+def test_parse_stix_bundle_invalid_json_raises_friendly_error(tmp_path):
+    """A malformed bundle file raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, parse_stix_bundle
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid json")
+    with pytest.raises(OpmlError, match="parse"):
+        parse_stix_bundle(p)
+
+
+def test_pull_taxii_basic_fetch_returns_records():
+    """pull_taxii hits the collection-objects endpoint and parses the response."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import pull_taxii
+
+    payload = {
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2024-1234",
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000002",
+                "pattern": "[ipv4-addr:value = '198.51.100.7']",
+                "pattern_type": "stix",
+            },
+        ]
+    }
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+
+    with patch("ramen_cve.requests.get", return_value=resp) as mock_get:
+        cves, iocs = pull_taxii(
+            "https://taxii.example/api1",
+            "00000000-0000-4000-8000-000000000099",
+            username="alice",
+            password="hunter2",
+        )
+
+    assert {r.cve_id for r in cves} == {"CVE-2024-1234"}
+    assert {(i.ioc_type, i.value) for i in iocs} == {("ipv4", "198.51.100.7")}
+    call = mock_get.call_args
+    assert call.args[0].endswith(
+        "/collections/00000000-0000-4000-8000-000000000099/objects/"
+    )
+    assert call.kwargs.get("auth") == ("alice", "hunter2")
+
+
+def test_pull_taxii_network_error_returns_empty(caplog):
+    """A network error returns ([], []) and logs a warning instead of raising."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import pull_taxii
+
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("nope")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        cves, iocs = pull_taxii(
+            "https://taxii.example/api1", "00000000-0000-4000-0000-000000000099",
+        )
+    assert cves == [] and iocs == []
+    assert any("TAXII pull failed" in r.message for r in caplog.records)
+
+
+def test_cli_format_choices_include_stix_and_all():
+    """--format accepts 'stix' and 'all' in addition to csv/md/both."""
+    from ramen_cve import build_parser
+
+    for fmt in ("csv", "md", "both", "stix", "all"):
+        args = build_parser().parse_args(["opml", "x.opml", "--format", fmt])
+        assert args.format == fmt
+
+
+def test_cli_stix_subcommand_parses_path_and_taxii_flags():
+    """The stix subcommand accepts an optional path and --taxii-* flags."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["stix", "bundle.json"])
+    assert args.subcommand == "stix"
+    assert str(args.path) == "bundle.json"
+
+    args2 = build_parser().parse_args([
+        "stix",
+        "--taxii-url", "https://taxii.example/api1",
+        "--taxii-collection", "00000000-0000-4000-0000-000000000001",
+    ])
+    assert args2.subcommand == "stix"
+    assert args2.taxii_url == "https://taxii.example/api1"
+    assert args2.taxii_collection == "00000000-0000-4000-0000-000000000001"
+
+
+def test_run_stix_rejects_missing_source(tmp_path, caplog):
+    """stix subcommand without path or --taxii-* args exits with code 1 and logs an error."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "stix", "--no-cache", "--out-dir", str(tmp_path), "--format", "csv",
+        ])
+    assert rc == 1
+    assert any("provide a bundle path" in r.message for r in caplog.records)
+
+
+def test_run_stix_rejects_combined_path_and_taxii(tmp_path, caplog):
+    """Providing both a path and TAXII flags must error before any HTTP work."""
+    import logging
+
+    import ramen_cve
+
+    bundle = tmp_path / "x.json"
+    bundle.write_text("{}")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--taxii-url", "https://taxii.example/api1",
+            "--taxii-collection", "00000000-0000-4000-0000-000000000001",
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "csv",
+        ])
+    assert rc == 1
+    assert any("mutually exclusive" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 13 — Threat actor / campaign / malware modeling
+# ---------------------------------------------------------------------------
+
+
+def _write_assoc_file(tmp_path: Path, payload: dict) -> Path:
+    p = tmp_path / "assoc.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_load_associations_basic(tmp_path):
+    """A well-formed associations file is loaded into ThreatActor / Malware / Campaign objects."""
+    from ramen_cve import Campaign, Malware, ThreatActor, load_associations
+
+    payload = {
+        "CVE-2021-44228": {
+            "actors": [{"name": "APT41", "aliases": ["Wicked Panda"], "url": "https://x"}],
+            "malware": [{"name": "Cobalt Strike"}],
+            "campaigns": [{"name": "Holiday RCE"}],
+        }
+    }
+    p = _write_assoc_file(tmp_path, payload)
+    out = load_associations(p)
+    assert "CVE-2021-44228" in out
+    actors = out["CVE-2021-44228"]["actors"]
+    assert len(actors) == 1 and isinstance(actors[0], ThreatActor)
+    assert actors[0].name == "APT41" and actors[0].aliases == ["Wicked Panda"]
+    assert isinstance(out["CVE-2021-44228"]["malware"][0], Malware)
+    assert isinstance(out["CVE-2021-44228"]["campaigns"][0], Campaign)
+
+
+def test_load_associations_normalizes_cve_case(tmp_path):
+    """Lower-case CVE keys are normalized to upper-case in the loaded dict."""
+    from ramen_cve import load_associations
+
+    p = _write_assoc_file(tmp_path, {"cve-2021-44228": {"actors": [{"name": "x"}]}})
+    out = load_associations(p)
+    assert "CVE-2021-44228" in out
+
+
+def test_load_associations_skips_invalid_cve_keys(tmp_path):
+    """Non-CVE keys (e.g. _README) are silently skipped."""
+    from ramen_cve import load_associations
+
+    p = _write_assoc_file(tmp_path, {
+        "_README": "comment",
+        "CVE-2021-44228": {"actors": []},
+    })
+    out = load_associations(p)
+    assert "_README" not in out
+    assert "CVE-2021-44228" in out
+
+
+def test_load_associations_missing_file_returns_empty(tmp_path, caplog):
+    """A missing file yields an empty dict and a WARNING (no exception)."""
+    import logging
+
+    from ramen_cve import load_associations
+
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_associations(tmp_path / "does-not-exist.json")
+    assert out == {}
+    assert any("not found" in r.message for r in caplog.records)
+
+
+def test_load_associations_invalid_json_returns_empty(tmp_path, caplog):
+    """A malformed file yields {} + WARNING, never crashes the run."""
+    import logging
+
+    from ramen_cve import load_associations
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid json")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_associations(p)
+    assert out == {}
+    assert any("Could not parse associations" in r.message for r in caplog.records)
+
+
+def test_default_associations_file_loads():
+    """The bundled associations.json is well-formed and seeds at least one CVE."""
+    from ramen_cve import DEFAULT_ASSOCIATIONS_PATH, load_associations
+
+    assert DEFAULT_ASSOCIATIONS_PATH.exists()
+    out = load_associations(DEFAULT_ASSOCIATIONS_PATH)
+    assert "CVE-2021-44228" in out
+    assert any(a.name == "APT41" for a in out["CVE-2021-44228"]["actors"])
+
+
+def test_enrich_cves_attaches_associations():
+    """enrich_cves(associations=...) populates linked_actors / linked_malware / linked_campaigns."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, ThreatActor, enrich_cves
+
+    associations = {
+        "CVE-2021-44228": {
+            "actors": [ThreatActor(name="APT41")],
+            "campaigns": [],
+            "malware": [],
+        }
+    }
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations=associations)
+
+    assert len(result) == 1
+    assert [a.name for a in result[0].linked_actors] == ["APT41"]
+
+
+def test_enrich_cves_no_match_leaves_linked_fields_empty():
+    """A CVE not present in the associations dict has empty linked_* lists."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations={})
+    assert result[0].linked_actors == []
+
+
+def test_write_csv_includes_linked_columns(tmp_path):
+    """CSV header includes linked_actors / linked_campaigns / linked_malware."""
+    from ramen_cve import EnrichedCve, ThreatActor, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_actors=[ThreatActor("APT41"), ThreatActor("HAFNIUM")],
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "linked_actors" in header
+    assert "linked_campaigns" in header
+    assert "linked_malware" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["linked_actors"] == "APT41;HAFNIUM"
+
+
+def test_write_markdown_renders_actors_and_cross_tab(tmp_path):
+    """Markdown shows per-CVE Linked Actors and a Linked Adversaries cross-tab."""
+    from ramen_cve import EnrichedCve, ThreatActor, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            epss_score=0.97,
+            bucket="kev_override",
+            linked_actors=[
+                ThreatActor("APT41", url="https://attack.mitre.org/groups/G0096/"),
+                ThreatActor("HAFNIUM"),
+            ],
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            epss_score=0.97,
+            bucket="patch_now",
+            linked_actors=[ThreatActor("HAFNIUM")],
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    # Per-CVE
+    assert "**Linked Actors:**" in text
+    assert "[APT41](https://attack.mitre.org/groups/G0096/)" in text
+    # Cross-tab
+    assert "## Linked Adversaries" in text
+    assert "| HAFNIUM | 2 |" in text
+    assert "| APT41 | 1 |" in text
+
+
+def test_write_markdown_no_actor_section_when_empty(tmp_path):
+    """If no enriched record has linked_actors, the cross-tab is omitted."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        linked_actors=[],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "## Linked Adversaries" not in text
+
+
+def test_cli_associations_file_flag_parses(tmp_path):
+    """--associations-file takes a path that survives parsing."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args([
+        "cve", "CVE-2021-44228",
+        "--associations-file", str(tmp_path / "x.json"),
+    ])
+    assert str(args.associations_file).endswith("x.json")
+
+
+# ---------------------------------------------------------------------------
+# Slice 14 — Sigma rule generation
+# ---------------------------------------------------------------------------
+
+
+def _kev_rec(**overrides) -> "EnrichedCve":  # type: ignore[name-defined]
+    """Return a kev_override EnrichedCve suitable for Sigma generation."""
+    from ramen_cve import EnrichedCve
+
+    base = dict(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        cwe=["CWE-502"],
+        attack_techniques=["T1059", "T1190"],
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+        exploit_status="exploit_db",
+    )
+    base.update(overrides)
+    return EnrichedCve(**base)
+
+
+def test_sigma_level_for_kev_is_critical():
+    """A KEV-listed CVE always maps to Sigma level 'critical'."""
+    from ramen_cve import _sigma_level_for
+
+    assert _sigma_level_for(_kev_rec(cvss_score=4.0)) == "critical"
+
+
+def test_sigma_level_for_high_cvss():
+    """CVSS 9.0+ → critical, 7.0-8.9 → high, below 7 in patch_now → medium."""
+    from ramen_cve import _sigma_level_for
+
+    rec = _kev_rec(kev_listed=False, kev_due_date=None, bucket="patch_now", cvss_score=9.5)
+    assert _sigma_level_for(rec) == "critical"
+    rec.cvss_score = 7.5
+    assert _sigma_level_for(rec) == "high"
+    rec.cvss_score = 5.0
+    assert _sigma_level_for(rec) == "medium"
+
+
+def test_build_sigma_stub_contains_required_fields():
+    """The emitted YAML carries title/id/status/level + ATT&CK + CVE tags."""
+    from ramen_cve import _build_sigma_stub
+
+    yaml = _build_sigma_stub(_kev_rec())
+    assert "title:" in yaml
+    assert "id: " in yaml
+    assert "status: experimental" in yaml
+    assert "level: critical" in yaml
+    assert "cve.cve-2021-44228" in yaml
+    assert "attack.t1059" in yaml
+    assert "attack.t1190" in yaml
+    assert "cisa.kev" in yaml
+    assert "ransomware.known" in yaml
+    # The block we want a detection engineer to fill in is clearly marked TODO
+    assert "TODO" in yaml
+
+
+def test_build_sigma_stub_has_stable_id_across_runs():
+    """The same CVE always produces the same Sigma rule id (UUID-shaped)."""
+    import re as _re
+
+    from ramen_cve import _build_sigma_stub
+
+    yaml1 = _build_sigma_stub(_kev_rec())
+    yaml2 = _build_sigma_stub(_kev_rec())
+    id1 = _re.search(r"^id:\s*(\S+)", yaml1, _re.MULTILINE)
+    id2 = _re.search(r"^id:\s*(\S+)", yaml2, _re.MULTILINE)
+    assert id1 is not None and id2 is not None
+    assert id1.group(1) == id2.group(1)
+    assert _re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}",
+        id1.group(1),
+    )
+
+
+def test_write_sigma_stubs_filters_by_bucket(tmp_path):
+    """Only kev_override / patch_now CVEs become Sigma stubs."""
+    from ramen_cve import EnrichedCve, write_sigma_stubs
+
+    kev = _kev_rec()
+    patch_now = EnrichedCve(
+        cve_id="CVE-2021-26855",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.8,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="patch_now",
+    )
+    watch_closely = EnrichedCve(
+        cve_id="CVE-2024-1234",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=4.0,
+        epss_score=0.5,
+        bucket="watch_closely",
+    )
+    out_dir = tmp_path / "sigma"
+    files = write_sigma_stubs([kev, patch_now, watch_closely], out_dir)
+    names = sorted(p.name for p in files)
+    assert names == ["CVE-2021-26855.yml", "CVE-2021-44228.yml"]
+    assert not (out_dir / "CVE-2024-1234.yml").exists()
+
+
+def test_write_sigma_stubs_creates_dir(tmp_path):
+    """The output directory is created if it doesn't yet exist."""
+    from ramen_cve import write_sigma_stubs
+
+    out_dir = tmp_path / "nested" / "sigma"
+    files = write_sigma_stubs([_kev_rec()], out_dir)
+    assert out_dir.is_dir()
+    assert len(files) == 1
+
+
+def test_cli_format_sigma_choice_parses():
+    """--format sigma is accepted."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--format", "sigma"])
+    assert args.format == "sigma"
+
+
+# ---------------------------------------------------------------------------
+# Slice 15 — Multi-source IOC enrichment
+# ---------------------------------------------------------------------------
+
+
+def _make_resp(status: int = 200, *, json_payload: dict | None = None, text: str = ""):
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.status_code = status
+    if status >= 400 and status != 404:
+        import requests as _req
+
+        resp.raise_for_status.side_effect = _req.HTTPError(response=resp)
+    else:
+        resp.raise_for_status.return_value = None
+    if json_payload is not None:
+        resp.json.return_value = json_payload
+    resp.text = text
+    return resp
+
+
+def test_virustotal_enricher_supports_only_with_key():
+    """VirusTotal is gated on api_key; no key → supports() returns False."""
+    from ramen_cve import VirusTotalEnricher
+
+    no_key = VirusTotalEnricher(api_key=None)
+    assert no_key.supports("md5") is False
+    assert no_key.supports("ipv4") is False
+
+    with_key = VirusTotalEnricher(api_key="vt-test")
+    for t in ("ipv4", "domain", "url", "md5", "sha1", "sha256"):
+        assert with_key.supports(t) is True
+    assert with_key.supports("email") is False
+
+
+def test_virustotal_enricher_returns_normalized_payload():
+    """A 200 from VT is normalized to {found, malicious, suspicious, ...}."""
+    from unittest.mock import patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    payload = {
+        "data": {
+            "id": "8.8.8.8",
+            "type": "ip_address",
+            "attributes": {
+                "last_analysis_stats": {
+                    "harmless": 80, "malicious": 3, "suspicious": 1, "undetected": 16,
+                },
+                "reputation": -5,
+            },
+        }
+    }
+    with patch("ramen_cve.requests.get", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("ipv4", "8.8.8.8", cache)
+    assert result["found"] is True
+    assert result["malicious"] == 3
+    assert result["suspicious"] == 1
+    assert result["harmless"] == 80
+    assert result["reputation"] == -5
+    # Cache hit on second call
+    with patch("ramen_cve.requests.get") as mock_get:
+        cached = e.enrich("ipv4", "8.8.8.8", cache)
+    assert cached == result
+    mock_get.assert_not_called()
+
+
+def test_virustotal_enricher_404_records_not_found():
+    """A 404 is interpreted as 'found=False' and cached so we don't keep retrying."""
+    from unittest.mock import patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    with patch("ramen_cve.requests.get", return_value=_make_resp(status=404)):
+        result = e.enrich("md5", "deadbeef" * 4, cache)
+    assert result == {"found": False}
+
+
+def test_virustotal_enricher_network_error_returns_none(caplog):
+    """A network error logs a warning and returns None (and is NOT cached)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import VirusTotalEnricher
+
+    cache = _mem_cache()
+    e = VirusTotalEnricher(api_key="vt-test")
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("boom")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        result = e.enrich("ipv4", "1.2.3.4", cache)
+    assert result is None
+    assert any("virustotal enrichment failed" in r.message for r in caplog.records)
+    # Nothing should have been cached
+    assert cache.get_enrichment("virustotal", "ipv4", "1.2.3.4") is None
+
+
+def test_abuseipdb_enricher_only_supports_ipv4():
+    """AbuseIPDB only enriches IPv4 and only with a key."""
+    from ramen_cve import AbuseIPDBEnricher
+
+    e = AbuseIPDBEnricher(api_key="abuse-test")
+    assert e.supports("ipv4") is True
+    for t in ("md5", "domain", "url", "email"):
+        assert e.supports(t) is False
+
+
+def test_abuseipdb_enricher_returns_normalized_payload():
+    """AbuseIPDB response is normalized to abuse_confidence + total_reports."""
+    from unittest.mock import patch
+
+    from ramen_cve import AbuseIPDBEnricher
+
+    cache = _mem_cache()
+    e = AbuseIPDBEnricher(api_key="abuse-test")
+    payload = {
+        "data": {
+            "ipAddress": "1.2.3.4",
+            "abuseConfidenceScore": 87,
+            "totalReports": 42,
+            "countryCode": "RU",
+        }
+    }
+    with patch("ramen_cve.requests.get", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("ipv4", "1.2.3.4", cache)
+    assert result["abuse_confidence"] == 87
+    assert result["total_reports"] == 42
+    assert result["country_code"] == "RU"
+
+
+def test_otx_enricher_supported_types_and_url_encoding():
+    """OTX maps each IOC type to an indicator endpoint and URL-encodes the value."""
+    from unittest.mock import patch
+
+    from ramen_cve import OtxEnricher
+
+    cache = _mem_cache()
+    e = OtxEnricher(api_key="otx-test")
+    assert e.supports("ipv4") and e.supports("md5") and e.supports("url")
+    assert not e.supports("email")
+    payload = {"pulse_info": {"count": 7}, "reputation": 0}
+
+    with patch(
+        "ramen_cve.requests.get", return_value=_make_resp(json_payload=payload),
+    ) as mock_get:
+        result = e.enrich("url", "https://evil/?x=1", cache)
+    assert result["pulse_count"] == 7
+    # The URL value should be percent-encoded inside the request URL
+    called = mock_get.call_args.args[0]
+    assert "https%3A%2F%2Fevil%2F%3Fx%3D1" in called
+
+
+def test_malwarebazaar_enricher_no_key_required():
+    """MalwareBazaar supports hashes without a key."""
+    from ramen_cve import MalwareBazaarEnricher
+
+    e = MalwareBazaarEnricher()
+    for t in ("md5", "sha1", "sha256"):
+        assert e.supports(t) is True
+    assert e.supports("ipv4") is False
+
+
+def test_malwarebazaar_enricher_known_sample():
+    """A 'query_status: ok' response yields found=True with file_name + signature."""
+    from unittest.mock import patch
+
+    from ramen_cve import MalwareBazaarEnricher
+
+    cache = _mem_cache()
+    e = MalwareBazaarEnricher()
+    payload = {
+        "query_status": "ok",
+        "data": [
+            {
+                "sha256_hash": "ab" * 32,
+                "file_name": "evil.exe",
+                "file_type": "exe",
+                "signature": "Emotet",
+                "tags": ["banker", "trojan"],
+            }
+        ],
+    }
+    resp = _make_resp(json_payload=payload)
+    with patch("ramen_cve.requests.post", return_value=resp):
+        result = e.enrich("sha256", "ab" * 32, cache)
+    assert result["found"] is True
+    assert result["signature"] == "Emotet"
+    assert "trojan" in result["tags"]
+
+
+def test_malwarebazaar_enricher_unknown_sample():
+    """A 'hash_not_found' response yields {found: False}."""
+    from unittest.mock import patch
+
+    from ramen_cve import MalwareBazaarEnricher
+
+    cache = _mem_cache()
+    e = MalwareBazaarEnricher()
+    payload = {"query_status": "hash_not_found"}
+    with patch("ramen_cve.requests.post", return_value=_make_resp(json_payload=payload)):
+        result = e.enrich("sha256", "00" * 32, cache)
+    assert result == {"found": False}
+
+
+def test_enrich_iocs_runs_each_enricher_only_for_supported_types():
+    """An IPv4 IOC is enriched by VT + AbuseIPDB but not MalwareBazaar."""
+    from ramen_cve import (
+        AbuseIPDBEnricher,
+        IocRecord,
+        MalwareBazaarEnricher,
+        VirusTotalEnricher,
+        enrich_iocs,
+    )
+
+    cache = _mem_cache()
+    rec = IocRecord("ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub")
+
+    class CountingVT(VirusTotalEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "malicious": 0, "suspicious": 0, "harmless": 1, "reputation": 0}
+
+    class CountingAbuse(AbuseIPDBEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "abuse_confidence": 0, "total_reports": 0,
+                    "country_code": "US"}
+
+    class CountingMB(MalwareBazaarEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return None
+
+    enrichers = [CountingVT("vt"), CountingAbuse("abuse"), CountingMB()]
+    enrich_iocs([rec], cache, enrichers=enrichers)
+
+    assert CountingVT.calls == 1
+    assert CountingAbuse.calls == 1
+    assert CountingMB.calls == 0
+    assert "virustotal" in rec.enrichments
+    assert "abuseipdb" in rec.enrichments
+    assert "malwarebazaar" not in rec.enrichments
+
+
+def test_enrich_iocs_uses_cache_on_second_call():
+    """A second enrich pass over the same IOC list does NOT re-hit the network."""
+    from ramen_cve import IocRecord, VirusTotalEnricher, enrich_iocs
+
+    cache = _mem_cache()
+    rec = IocRecord("md5", "d41d8cd98f00b204e9800998ecf8427e", "x",
+                    date(2024, 1, 1), "feed_pub")
+
+    class CountingVT(VirusTotalEnricher):
+        calls: int = 0
+
+        def _fetch(self, ioc_type, value):
+            type(self).calls += 1
+            return {"found": True, "malicious": 1, "suspicious": 0, "harmless": 0, "reputation": -1}
+
+    enricher = CountingVT("vt-test")
+    enrich_iocs([rec], cache, enrichers=[enricher])
+    rec.enrichments = {}  # simulate fresh-load on second run
+    enrich_iocs([rec], cache, enrichers=[enricher])
+    assert CountingVT.calls == 1
+
+
+def test_cache_get_enrichment_round_trip():
+    """Cache.set_enrichment / get_enrichment round-trip."""
+    c = _mem_cache()
+    c.set_enrichment("vt", "md5", "ab" * 16, {"malicious": 1})
+    assert c.get_enrichment("vt", "md5", "ab" * 16) == {"malicious": 1}
+    # Different (enricher, type, value) tuples are independent rows
+    assert c.get_enrichment("vt", "ipv4", "1.2.3.4") is None
+    assert c.get_enrichment("abuseipdb", "md5", "ab" * 16) is None
+
+
+def test_summarize_enrichment_handles_known_sources():
+    """_summarize_enrichment renders concise per-source summaries."""
+    from ramen_cve import _summarize_enrichment
+
+    assert _summarize_enrichment("virustotal", {"found": True, "malicious": 5,
+                                                "suspicious": 2, "reputation": -3}).startswith(
+        "malicious=5"
+    )
+    assert "abuse_confidence=87" in _summarize_enrichment(
+        "abuseipdb", {"found": True, "abuse_confidence": 87, "total_reports": 12}
+    )
+    assert "pulse_count=7" in _summarize_enrichment(
+        "otx", {"found": True, "pulse_count": 7}
+    )
+    assert "Emotet" in _summarize_enrichment(
+        "malwarebazaar", {"found": True, "signature": "Emotet"}
+    )
+    # not-found payloads collapse to empty
+    assert _summarize_enrichment("virustotal", {"found": False}) == ""
+
+
+def test_iocs_csv_includes_enrichments_column(tmp_path):
+    """The new enrichments CSV column is JSON-serialized."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    rec = IocRecord(
+        "ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub",
+        enrichments={"virustotal": {"malicious": 3}},
+    )
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    enr_idx = IOC_CSV_COLUMNS.index("enrichments")
+    body = json.loads(rows[1][enr_idx])
+    assert body == {"virustotal": {"malicious": 3}}
+
+
+def test_markdown_iocs_section_renders_enrichment_summaries(tmp_path):
+    """Markdown lists each enrichment as a sub-bullet under the IOC."""
+    from ramen_cve import IocRecord, write_markdown
+
+    iocs = [
+        IocRecord(
+            "ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub",
+            enrichments={
+                "virustotal": {"found": True, "malicious": 4, "suspicious": 1,
+                               "harmless": 60, "reputation": -2},
+                "abuseipdb": {"found": True, "abuse_confidence": 75, "total_reports": 9},
+            },
+        )
+    ]
+    out = tmp_path / "report.md"
+    write_markdown([], out, METADATA, iocs=iocs)
+    text = out.read_text()
+    assert "  - virustotal: malicious=4" in text
+    assert "  - abuseipdb: abuse_confidence=75" in text
+
+
+def test_cli_no_enrich_iocs_flag_parses():
+    """--no-enrich-iocs is accepted on every subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--no-enrich-iocs"])
+    assert args.no_enrich_iocs is True
+
+
+# ---------------------------------------------------------------------------
+# Slice 16 — TLP + Admiralty source confidence
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tlp_default_clear():
+    """Empty / None / unknown TLP collapses to CLEAR; legacy WHITE → CLEAR."""
+    from ramen_cve import _normalize_tlp
+
+    for v in (None, "", "rubbish", "white"):
+        assert _normalize_tlp(v) == "CLEAR"
+    assert _normalize_tlp("amber") == "AMBER"
+    assert _normalize_tlp("RED") == "RED"
+
+
+def test_worst_tlp_returns_more_restrictive():
+    """RED > AMBER+STRICT > AMBER > GREEN > CLEAR."""
+    from ramen_cve import _worst_tlp
+
+    assert _worst_tlp("CLEAR", "GREEN") == "GREEN"
+    assert _worst_tlp("AMBER", "GREEN") == "AMBER"
+    assert _worst_tlp("AMBER+STRICT", "AMBER") == "AMBER+STRICT"
+    assert _worst_tlp("RED", "AMBER+STRICT") == "RED"
+    assert _worst_tlp("CLEAR", None) == "CLEAR"
+
+
+def test_admiralty_score_handles_invalid_grade():
+    """Invalid grades sort to the worst possible bucket."""
+    from ramen_cve import _admiralty_score
+
+    assert _admiralty_score("A1") == (0, 1)
+    assert _admiralty_score("F6") == (5, 6)
+    assert _admiralty_score("z9") == (99, 99)
+    assert _admiralty_score("") == (99, 99)
+    assert _admiralty_score(None) == (99, 99)
+    assert _admiralty_score("A") == (99, 99)  # too short
+
+
+def test_best_admiralty_returns_higher_confidence_grade():
+    """Lower-tuple (more reliable) grade wins; 'X' loses to 'B2'."""
+    from ramen_cve import _best_admiralty
+
+    assert _best_admiralty("A1", "B2") == "A1"
+    assert _best_admiralty("B2", "A1") == "A1"
+    assert _best_admiralty("", "B2") == "B2"
+    assert _best_admiralty("B2", "") == "B2"
+
+
+def test_parse_opml_reads_data_tlp_and_admiralty(tmp_path):
+    """parse_opml stamps each FeedEntry with the data-* attributes from the outline."""
+    from ramen_cve import parse_opml
+
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(textwrap.dedent("""
+        <?xml version="1.0"?>
+        <opml version="2.0"><body>
+        <outline text="Trusted" data-tlp="GREEN" data-admiralty="A2">
+            <outline type="rss" text="Feed-A" xmlUrl="https://a.example/feed"/>
+        </outline>
+        <outline type="rss" text="Feed-B" xmlUrl="https://b.example/feed"
+                 data-tlp="amber" data-admiralty="C3"/>
+        </body></opml>
+    """).strip())
+
+    entries = parse_opml(opml)
+    by_url = {e.url: e for e in entries}
+    a = by_url["https://a.example/feed"]
+    b = by_url["https://b.example/feed"]
+    # Inheritance: Feed-A has no data-* of its own, takes parent's GREEN/A2
+    assert a.tlp == "GREEN"
+    assert a.admiralty == "A2"
+    # Override: Feed-B sets its own AMBER/C3
+    assert b.tlp == "AMBER"
+    assert b.admiralty == "C3"
+
+
+def test_parse_opml_default_tlp_clear(tmp_path):
+    """Outlines without data-tlp default to CLEAR and admiralty defaults to ''."""
+    from ramen_cve import parse_opml
+
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body>'
+        '<outline type="rss" text="X" xmlUrl="https://x.example/feed"/>'
+        "</body></opml>"
+    )
+    e = parse_opml(opml)[0]
+    assert e.tlp == "CLEAR"
+    assert e.admiralty == ""
+
+
+def test_extract_cves_stamps_tlp_and_admiralty():
+    """extract_cves(tlp=..., admiralty=...) carries the tags onto each CveRecord."""
+    from ramen_cve import extract_cves
+
+    out = extract_cves(
+        "see CVE-2021-44228", "src", TODAY, "feed_pub",
+        tlp="amber", admiralty="B2",
+    )
+    assert out[0].tlp == "AMBER"
+    assert out[0].admiralty == "B2"
+
+
+def test_extract_iocs_stamps_tlp_and_admiralty():
+    """extract_iocs(tlp=..., admiralty=...) carries the tags onto each IocRecord."""
+    from ramen_cve import extract_iocs
+
+    out = extract_iocs(
+        "Beacon to 8.8.8.8", "src", TODAY, "feed_pub",
+        tlp="green", admiralty="A1",
+    )
+    ips = [i for i in out if i.ioc_type == "ipv4"]
+    assert ips[0].tlp == "GREEN"
+    assert ips[0].admiralty == "A1"
+
+
+def test_enrich_cves_propagates_worst_tlp_across_duplicates():
+    """Two CveRecords for the same CVE merge to the more-restrictive TLP."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [
+        CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub",
+                  tlp="GREEN", admiralty="C3"),
+        CveRecord("CVE-2021-44228", "feed-b", date(2024, 1, 5), "feed_pub",
+                  tlp="AMBER", admiralty="A1"),
+    ]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+    assert len(result) == 1
+    # Worst TLP wins
+    assert result[0].tlp == "AMBER"
+    # Best Admiralty wins
+    assert result[0].admiralty == "A1"
+
+
+def test_dedupe_iocs_propagates_worst_tlp_and_best_admiralty():
+    """The same IOC across two feeds keeps worst-TLP and best-Admiralty."""
+    from ramen_cve import IocRecord, _dedupe_iocs
+
+    iocs = [
+        IocRecord("ipv4", "8.8.8.8", "f-a", date(2024, 1, 1), "feed_pub",
+                  tlp="CLEAR", admiralty="C3"),
+        IocRecord("ipv4", "8.8.8.8", "f-b", date(2024, 1, 2), "feed_pub",
+                  tlp="AMBER", admiralty="A1"),
+    ]
+    out = _dedupe_iocs(iocs)
+    assert len(out) == 1
+    assert out[0].tlp == "AMBER"
+    assert out[0].admiralty == "A1"
+
+
+def test_write_csv_includes_tlp_and_admiralty_columns(tmp_path):
+    """CSV header and rows carry tlp + admiralty."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="AMBER", admiralty="B2",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "tlp" in header and "admiralty" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["tlp"] == "AMBER"
+    assert row["admiralty"] == "B2"
+
+
+def test_write_iocs_csv_includes_tlp_and_admiralty(tmp_path):
+    """IOC CSV carries tlp + admiralty per record."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    rec = IocRecord(
+        "ipv4", "8.8.8.8", "src", date(2024, 1, 1), "feed_pub",
+        tlp="GREEN", admiralty="B2",
+    )
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    assert "tlp" in rows[0] and "admiralty" in rows[0]
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["tlp"] == "GREEN"
+    assert row["admiralty"] == "B2"
+    assert IOC_CSV_COLUMNS[-2:] == ["tlp", "admiralty"]
+
+
+def test_write_markdown_renders_provenance_when_set(tmp_path):
+    """Provenance line appears when tlp != CLEAR or admiralty is set."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="AMBER", admiralty="B2",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Provenance:** TLP:AMBER · Admiralty B2" in text
+
+
+def test_write_markdown_omits_provenance_for_clear_unrated(tmp_path):
+    """No Provenance line when tlp=CLEAR and admiralty=''."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="CLEAR", admiralty="",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Provenance:**" not in text
+
+
+def test_output_strips_tlp_red_by_default(tmp_path, caplog):
+    """TLP:RED records are excluded from output unless --allow-tlp-red was passed."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, IocRecord, _output
+
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, allow_tlp_red=False,
+    )
+    red_cve = EnrichedCve(
+        cve_id="CVE-2099-RED", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="RED",
+    )
+    green_cve = EnrichedCve(
+        cve_id="CVE-2099-GREEN", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="GREEN",
+    )
+    red_ioc = IocRecord("ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub", tlp="RED")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        _output([red_cve, green_cve], args, {"version": "0.1"}, iocs=[red_ioc])
+
+    csv_files = list(tmp_path.glob("ramen-cve-*.csv"))
+    assert len(csv_files) == 1
+    body = csv_files[0].read_text()
+    assert "CVE-2099-GREEN" in body
+    assert "CVE-2099-RED" not in body
+    assert any("TLP:RED" in r.message for r in caplog.records)
+
+
+def test_output_includes_tlp_red_when_flag_passed(tmp_path):
+    """--allow-tlp-red preserves TLP:RED records in the output."""
+    import argparse
+
+    from ramen_cve import EnrichedCve, _output
+
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, allow_tlp_red=True,
+    )
+    rec = EnrichedCve(
+        cve_id="CVE-2099-RED", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="RED",
+    )
+    _output([rec], args, {"version": "0.1"})
+    csv_files = list(tmp_path.glob("ramen-cve-*.csv"))
+    assert len(csv_files) == 1
+    body = csv_files[0].read_text()
+    assert "CVE-2099-RED" in body
+
+
+def test_cli_allow_tlp_red_flag_parses():
+    """--allow-tlp-red is accepted at the parser level."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--allow-tlp-red"])
+    assert args.allow_tlp_red is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.allow_tlp_red is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 17 — Threat hunting hypothesis workflow
+# ---------------------------------------------------------------------------
+
+
+def _hunt_payload(**overrides) -> dict:
+    base = {
+        "id": "test-hunt",
+        "name": "Test hunt",
+        "hypothesis": "We expect to see X.",
+        "data_sources": ["proxy_logs"],
+        "attack_techniques": ["T1190"],
+        "linked_cves": ["CVE-2021-44228"],
+        "status": "open",
+        "created": "2024-01-01T00:00:00",
+        "findings": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_hunt_dataclass_round_trip():
+    """Hunt.from_dict → Hunt.to_dict round-trips cleanly."""
+    from ramen_cve import Hunt
+
+    payload = _hunt_payload()
+    hunt = Hunt.from_dict(payload)
+    assert hunt.to_dict() == payload
+
+
+def test_hunt_dataclass_from_dict_tolerates_missing_keys():
+    """Missing optional keys default to sensible empty values."""
+    from ramen_cve import Hunt
+
+    hunt = Hunt.from_dict({"id": "x", "name": "n", "hypothesis": "h"})
+    assert hunt.linked_cves == []
+    assert hunt.findings == []
+    assert hunt.status == "open"
+
+
+def test_load_hunt_round_trip(tmp_path):
+    """load_hunt + save_hunt round-trip preserves the payload."""
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    p = tmp_path / "x.json"
+    save_hunt(Hunt.from_dict(_hunt_payload()), p)
+    re = load_hunt(p)
+    assert re.id == "test-hunt"
+    assert re.linked_cves == ["CVE-2021-44228"]
+
+
+def test_load_hunt_missing_file_raises_friendly_error(tmp_path):
+    """A missing hunt path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, load_hunt
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_hunt(tmp_path / "missing.json")
+
+
+def test_load_hunt_invalid_json_raises_friendly_error(tmp_path):
+    """A malformed JSON file raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, load_hunt
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid")
+    with pytest.raises(OpmlError, match="parse"):
+        load_hunt(p)
+
+
+def test_load_all_hunts_returns_sorted_list(tmp_path):
+    """load_all_hunts returns every well-formed *.json sorted by id."""
+    from ramen_cve import Hunt, load_all_hunts, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="b-second")), tmp_path / "b.json")
+    save_hunt(Hunt.from_dict(_hunt_payload(id="a-first")), tmp_path / "a.json")
+    out = load_all_hunts(tmp_path)
+    assert [h.id for h in out] == ["a-first", "b-second"]
+
+
+def test_load_all_hunts_missing_dir_returns_empty(tmp_path):
+    """A missing directory is non-fatal; load_all_hunts returns []."""
+    from ramen_cve import load_all_hunts
+
+    assert load_all_hunts(tmp_path / "no-such-dir") == []
+
+
+def test_load_all_hunts_skips_malformed(tmp_path, caplog):
+    """A malformed file is skipped (with WARNING) so other hunts still load."""
+    import logging
+
+    from ramen_cve import Hunt, load_all_hunts, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="ok")), tmp_path / "ok.json")
+    (tmp_path / "broken.json").write_text("{not valid")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_all_hunts(tmp_path)
+    assert [h.id for h in out] == ["ok"]
+    assert any("malformed hunt" in r.message.lower() for r in caplog.records)
+
+
+def test_default_hunt_dir_loads_bundled_sample():
+    """The bundled hunts/log4shell-evidence.json is well-formed and loads."""
+    from ramen_cve import DEFAULT_HUNT_DIR, load_all_hunts
+
+    assert DEFAULT_HUNT_DIR.exists()
+    hunts = load_all_hunts(DEFAULT_HUNT_DIR)
+    assert any(h.id == "log4shell-evidence" for h in hunts)
+
+
+def test_cli_hunt_subcommand_parses():
+    """`hunt` subcommand parses with action / hunt_id / value positions."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["hunt", "list"])
+    assert args.subcommand == "hunt" and args.action == "list"
+    args2 = build_parser().parse_args(
+        ["hunt", "link", "log4shell-evidence", "CVE-2021-44228"]
+    )
+    assert args2.action == "link"
+    assert args2.hunt_id == "log4shell-evidence"
+    assert args2.value == "CVE-2021-44228"
+
+
+def test_run_hunt_list(tmp_path, capsys):
+    """`hunt list` prints one tab-delimited line per hunt."""
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", name="First")), tmp_path / "h1.json")
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h2", name="Second")), tmp_path / "h2.json")
+    rc = ramen_cve.main(["hunt", "list", "--hunt-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "h1" in out and "First" in out
+    assert "h2" in out and "Second" in out
+
+
+def test_run_hunt_show(tmp_path, capsys):
+    """`hunt show <id>` prints the hunt as JSON."""
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1")), tmp_path / "h1.json")
+    rc = ramen_cve.main(["hunt", "show", "h1", "--hunt-dir", str(tmp_path)])
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["id"] == "h1"
+
+
+def test_run_hunt_link_appends_cve(tmp_path):
+    """`hunt link <id> <cve>` appends to linked_cves and persists."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(
+        Hunt.from_dict(_hunt_payload(id="h1", linked_cves=["CVE-2021-44228"])),
+        tmp_path / "h1.json",
+    )
+    rc = ramen_cve.main([
+        "hunt", "link", "h1", "CVE-2021-26855",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert "CVE-2021-26855" in hunt.linked_cves
+    assert hunt.linked_cves.count("CVE-2021-26855") == 1
+
+
+def test_run_hunt_link_dedupes(tmp_path):
+    """Linking a CVE that's already present is a no-op success."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(
+        Hunt.from_dict(_hunt_payload(id="h1", linked_cves=["CVE-2021-44228"])),
+        tmp_path / "h1.json",
+    )
+    rc = ramen_cve.main([
+        "hunt", "link", "h1", "CVE-2021-44228",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.linked_cves.count("CVE-2021-44228") == 1
+
+
+def test_run_hunt_link_rejects_invalid_cve(tmp_path, caplog):
+    """Linking a non-CVE-shaped value exits with code 1."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1")), tmp_path / "h1.json")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "link", "h1", "NOT-A-CVE",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("not a valid CVE" in r.message for r in caplog.records)
+
+
+def test_run_hunt_log_appends_finding_with_timestamp(tmp_path):
+    """`hunt log <id> <text>` appends {timestamp, text} to findings."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", findings=[])), tmp_path / "h1.json")
+    rc = ramen_cve.main([
+        "hunt", "log", "h1", "Saw nothing in proxy logs for the window.",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert len(hunt.findings) == 1
+    assert hunt.findings[0]["text"].startswith("Saw nothing")
+    # Timestamp should be ISO-8601-ish
+    assert "T" in hunt.findings[0]["timestamp"]
+
+
+def test_run_hunt_status_updates_value(tmp_path):
+    """`hunt status <id> <new>` updates the status field."""
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", status="open")), tmp_path / "h1.json")
+    rc = ramen_cve.main([
+        "hunt", "status", "h1", "closed_true_positive",
+        "--hunt-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.status == "closed_true_positive"
+
+
+def test_run_hunt_status_rejects_invalid_value(tmp_path, caplog):
+    """An unknown status value errors out without modifying the file."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Hunt, load_hunt, save_hunt
+
+    save_hunt(Hunt.from_dict(_hunt_payload(id="h1", status="open")), tmp_path / "h1.json")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "status", "h1", "invented",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    hunt = load_hunt(tmp_path / "h1.json")
+    assert hunt.status == "open"
+    assert any("not a valid status" in r.message for r in caplog.records)
+
+
+def test_run_hunt_rejects_path_traversal(tmp_path, caplog):
+    """A hunt_id with '/' or '..' is rejected before any file access."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "hunt", "show", "../etc/passwd",
+            "--hunt-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("invalid hunt id" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 18 — Asset / Vulnerability exposure correlation
+# ---------------------------------------------------------------------------
+
+
+def test_parse_nvd_response_captures_cpes():
+    """A configurations[].nodes[].cpeMatch[].criteria entry surfaces in cpes[]."""
+    from ramen_cve import _parse_nvd_response
+
+    payload = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2099-0001",
+                    "metrics": {},
+                    "weaknesses": [],
+                    "configurations": [
+                        {
+                            "nodes": [
+                                {
+                                    "cpeMatch": [
+                                        {
+                                            "criteria":
+                                                "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+                                            "vulnerable": True,
+                                        },
+                                        {
+                                            "criteria":
+                                                "cpe:2.3:a:apache:log4j:2.15.0:*:*:*:*:*:*:*",
+                                            "vulnerable": True,
+                                        },
+                                    ],
+                                    "children": [
+                                        {
+                                            "cpeMatch": [
+                                                {
+                                                    "criteria":
+                                                        "cpe:2.3:a:apache:log4j:2.16.0:"
+                                                        "*:*:*:*:*:*:*",
+                                                    "vulnerable": True,
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+    out = _parse_nvd_response(payload)
+    assert "cpes" in out
+    assert any("apache:log4j:2.14.1" in c for c in out["cpes"])
+    # Nested children CPEs are also captured
+    assert any("apache:log4j:2.16.0" in c for c in out["cpes"])
+
+
+def test_parse_nvd_response_no_configurations_yields_empty_cpes():
+    """Old CVE fixtures with no configurations block return cpes=[]."""
+    from ramen_cve import _parse_nvd_response
+
+    data = _load_fixture("nvd_no_cvss.json")
+    out = _parse_nvd_response(data)
+    assert out["cpes"] == []
+
+
+def test_cpe_matches_inventory_basic():
+    """An exact product+version match (or '*' version) returns True."""
+    from ramen_cve import _cpe_matches_inventory
+
+    # CPE: cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*
+    cpe = "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe, "log4j", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe, "apache", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe, "log4j", "9.9.9") is False
+
+    # Wildcard version on the CPE should match any inventory version
+    cpe_wild = "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe_wild, "log4j", "2.14.1") is True
+    assert _cpe_matches_inventory(cpe_wild, "log4j", "1.0.0") is True
+
+
+def test_cpe_matches_inventory_rejects_wrong_product():
+    """A non-matching product returns False."""
+    from ramen_cve import _cpe_matches_inventory
+
+    cpe = "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+    assert _cpe_matches_inventory(cpe, "nginx", "1.0") is False
+
+
+def test_cpe_matches_inventory_invalid_cpe_returns_false():
+    """A malformed CPE returns False instead of raising."""
+    from ramen_cve import _cpe_matches_inventory
+
+    assert _cpe_matches_inventory("not-a-cpe", "log4j", "2.14.1") is False
+    assert _cpe_matches_inventory("", "log4j", "2.14.1") is False
+
+
+def test_load_inventory_round_trip(tmp_path):
+    """A 3-row inventory CSV is parsed into 3 dicts with host/product/version/cpe."""
+    from ramen_cve import load_inventory
+
+    csv_text = (
+        "host,product,version,cpe\n"
+        "web-1,log4j,2.14.1,\n"
+        "web-2,log4j,2.17.0,\n"
+        "db-1,postgresql,14.5,cpe:2.3:a:postgresql:postgresql:14.5:*:*:*:*:*:*:*\n"
+    )
+    p = tmp_path / "inv.csv"
+    p.write_text(csv_text)
+    rows = load_inventory(p)
+    assert len(rows) == 3
+    assert rows[0]["host"] == "web-1"
+    assert rows[2]["cpe"].startswith("cpe:2.3:a:postgresql")
+
+
+def test_load_inventory_missing_file_raises_friendly():
+    """A missing inventory file raises OpmlError."""
+    from pathlib import Path
+
+    from ramen_cve import OpmlError, load_inventory
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_inventory(Path("/tmp/does-not-exist-ramen-inv.csv"))
+
+
+def test_correlate_inventory_annotates_affected_hosts():
+    """correlate_inventory populates affected_hosts on each EnrichedCve."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+    )
+    inventory = [
+        {"host": "web-1", "product": "log4j", "version": "2.14.1", "cpe": ""},
+        {"host": "web-2", "product": "log4j", "version": "2.17.0", "cpe": ""},  # version mismatch
+        {"host": "db-1", "product": "postgres", "version": "14", "cpe": ""},   # product mismatch
+    ]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["web-1"]
+
+
+def test_correlate_inventory_explicit_cpe_column_matches():
+    """A row with an explicit cpe column matches via substring comparison."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:vendor:product:1.0:*:*:*:*:*:*:*"],
+    )
+    inventory = [
+        {"host": "h1", "product": "", "version": "",
+         "cpe": "cpe:2.3:a:vendor:product:1.0"},
+    ]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["h1"]
+
+
+def test_correlate_inventory_dedupes_same_host_across_cpes():
+    """A host that matches multiple CPEs of the same CVE is added only once."""
+    from ramen_cve import EnrichedCve, correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=[
+            "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+            "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+        ],
+    )
+    inventory = [{"host": "web-1", "product": "log4j", "version": "2.14.1", "cpe": ""}]
+    correlate_inventory([rec], inventory)
+    assert rec.affected_hosts == ["web-1"]
+
+
+def test_write_csv_includes_affected_hosts_column(tmp_path):
+    """CSV adds an affected_hosts column joined with ';'."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        affected_hosts=["web-1", "web-2"],
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "affected_hosts" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["affected_hosts"] == "web-1;web-2"
+
+
+def test_write_markdown_renders_affected_hosts_and_cross_tab(tmp_path):
+    """Per-CVE 'Affected in your environment' line + roll-up cross-tab table."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            epss_score=0.97,
+            bucket="patch_now",
+            affected_hosts=["web-1", "web-2", "web-3"],
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            epss_score=0.97,
+            bucket="patch_now",
+            affected_hosts=["web-1"],
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    assert "**Affected in your environment:** 3 host(s) — web-1, web-2, web-3" in text
+    assert "## Affected in Your Environment" in text
+    assert "| web-1 | 2 |" in text
+    assert "| web-2 | 1 |" in text
+
+
+def test_write_markdown_truncates_long_affected_lists(tmp_path):
+    """A CVE with >8 affected hosts shows the first 8 and an '(and N more)' tail."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        affected_hosts=[f"host-{i:03d}" for i in range(15)],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "(and 7 more)" in text
+
+
+def test_cli_inventory_flag_parses(tmp_path):
+    """--inventory accepts a path that survives parsing."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args([
+        "opml", "x.opml",
+        "--inventory", str(tmp_path / "inv.csv"),
+    ])
+    assert str(args.inventory).endswith("inv.csv")
+
+
+def test_maybe_correlate_inventory_runs_only_when_flag_set(tmp_path, caplog):
+    """If --inventory points at a real file, correlation runs and logs a summary."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, _maybe_correlate_inventory
+
+    inv_path = tmp_path / "inv.csv"
+    inv_path.write_text("host,product,version\nweb-1,log4j,2.14.1\n")
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+        cpes=["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+    )
+    args = argparse.Namespace(inventory=inv_path)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        _maybe_correlate_inventory(args, [rec])
+    assert rec.affected_hosts == ["web-1"]
+    assert any("Inventory correlation" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 19 — Dissemination dispatchers (Slack + generic webhook)
+# ---------------------------------------------------------------------------
+
+
+def _disp_rec(**overrides) -> "EnrichedCve":  # type: ignore[name-defined]
+    """Convenience: build an EnrichedCve in the kev_override bucket for dispatch tests."""
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    base = dict(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        attack_techniques=["T1059", "T1190"],
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+        exploit_status="exploit_db",
+        linked_actors=[ThreatActor("APT41")],
+        affected_hosts=["web-1", "web-2"],
+    )
+    base.update(overrides)
+    return EnrichedCve(**base)
+
+
+def test_slack_dispatcher_disabled_without_webhook():
+    """No SLACK_WEBHOOK_URL → enabled() is False, dispatch() is never called."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url=None)
+    assert d.enabled() is False
+
+
+def test_slack_dispatcher_payload_contains_cve_and_metadata():
+    """The Slack payload includes the CVE id, bucket, CVSS, KEV due date, ATT&CK list."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    payload = d._build_payload(_disp_rec())
+    assert payload["blocks"][0]["text"]["text"].startswith(":rotating_light: CVE-2021-44228")
+    body_text = payload["blocks"][1]["text"]["text"]
+    assert "Patch immediately." in body_text
+    assert "CVSS:* 10.0 (CRITICAL)" in body_text
+    assert "EPSS:* 0.9700" in body_text
+    assert "CISA KEV:* listed (due 2021-12-24)" in body_text
+    assert "known ransomware use" in body_text
+    assert "ATT&CK:* T1059, T1190" in body_text
+    assert "Exploit Status:*" in body_text and "exploit_db" in body_text
+    assert "Linked Actors:* APT41" in body_text
+    assert "Affected hosts:* 2" in body_text
+    # Footer link to NVD
+    ctx = payload["blocks"][2]["elements"][0]["text"]
+    assert "CVE-2021-44228" in ctx and "nvd.nist.gov" in ctx
+
+
+def test_slack_dispatcher_post_success():
+    """A 200 response from Slack returns True."""
+    from unittest.mock import patch
+
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    with patch("ramen_cve.requests.post", return_value=_make_resp()):
+        assert d.dispatch(_disp_rec()) is True
+
+
+def test_slack_dispatcher_failure_returns_false(caplog):
+    """A network error from Slack logs WARNING and returns False (no raise)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("nope")
+    with patch("ramen_cve.requests.post", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        assert d.dispatch(_disp_rec()) is False
+    assert any("Slack dispatch failed" in r.message for r in caplog.records)
+
+
+def test_generic_webhook_dispatcher_payload_shape():
+    """The generic webhook payload contains the expected EnrichedCve fields."""
+    from ramen_cve import GenericWebhookDispatcher
+
+    d = GenericWebhookDispatcher(webhook_url="https://x.example/hook")
+    payload = d._build_payload(_disp_rec())
+    assert payload["cve_id"] == "CVE-2021-44228"
+    assert payload["bucket"] == "kev_override"
+    assert payload["cvss_score"] == 10.0
+    assert payload["epss_score"] == 0.97
+    assert payload["kev_listed"] is True
+    assert payload["kev_due_date"] == "2021-12-24"
+    assert payload["attack_techniques"] == ["T1059", "T1190"]
+    assert payload["linked_actors"] == ["APT41"]
+    assert payload["affected_hosts"] == ["web-1", "web-2"]
+
+
+def test_generic_webhook_dispatcher_disabled_without_url():
+    from ramen_cve import GenericWebhookDispatcher
+
+    assert GenericWebhookDispatcher(webhook_url=None).enabled() is False
+    assert GenericWebhookDispatcher(webhook_url="").enabled() is False
+    assert GenericWebhookDispatcher(webhook_url="https://x.example").enabled() is True
+
+
+def test_dispatch_records_skips_low_priority_buckets():
+    """A 'watch_closely' record is NOT dispatched even if a dispatcher is enabled."""
+    from ramen_cve import dispatch_records
+
+    class CountingDisp:
+        name = "counting"
+        calls: int = 0
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec) -> bool:
+            type(self).calls += 1
+            return True
+
+    low = _disp_rec(bucket="watch_closely")
+    high = _disp_rec(bucket="patch_now")
+    sent = dispatch_records([low, high], dispatchers=[CountingDisp()])
+    assert sent == 1  # only 'high' triggered dispatch
+    assert CountingDisp.calls == 1
+
+
+def test_dispatch_records_no_enabled_dispatchers_logs_info(caplog):
+    """If every dispatcher reports enabled=False, log INFO and return 0."""
+    import logging
+
+    from ramen_cve import dispatch_records
+
+    class Disabled:
+        name = "off"
+
+        def enabled(self) -> bool:
+            return False
+
+        def dispatch(self, rec) -> bool:
+            raise AssertionError("should not be called")
+
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        n = dispatch_records([_disp_rec()], dispatchers=[Disabled()])
+    assert n == 0
+    assert any("no dispatchers configured" in r.message for r in caplog.records)
+
+
+def test_dispatch_records_counts_only_successes():
+    """Failed dispatch (returns False) is NOT counted toward the success total."""
+    from ramen_cve import dispatch_records
+
+    class Mixed:
+        name = "mixed"
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec) -> bool:
+            return rec.cve_id != "CVE-2099-FAIL"
+
+    rec_ok = _disp_rec(cve_id="CVE-2099-OK")
+    rec_fail = _disp_rec(cve_id="CVE-2099-FAIL")
+    n = dispatch_records([rec_ok, rec_fail], dispatchers=[Mixed()])
+    assert n == 1
+
+
+def test_cli_dispatch_flag_parses():
+    """--dispatch is accepted on every analysis subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--dispatch"])
+    assert args.dispatch is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.dispatch is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 20 — Diamond Model + Cyber Kill Chain mapping
+# ---------------------------------------------------------------------------
+
+
+def test_map_cwes_to_kill_chain_default_exploitation():
+    """An empty or unmapped CWE list defaults to 'exploitation'."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain([]) == "exploitation"
+    assert map_cwes_to_kill_chain(["CWE-99999"]) == "exploitation"
+
+
+def test_map_cwes_to_kill_chain_overrides():
+    """CWEs in CWE_TO_KILL_CHAIN return their override phase."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["CWE-200"]) == "reconnaissance"
+    assert map_cwes_to_kill_chain(["CWE-269"]) == "installation"
+    assert map_cwes_to_kill_chain(["CWE-601"]) == "delivery"
+    assert map_cwes_to_kill_chain(["CWE-552"]) == "actions_on_objectives"
+
+
+def test_map_cwes_to_kill_chain_first_match_wins():
+    """First CWE override wins so output is deterministic."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["CWE-200", "CWE-269"]) == "reconnaissance"
+
+
+def test_map_cwes_to_kill_chain_case_insensitive():
+    """Lower-case CWE input is normalized."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["cwe-269"]) == "installation"
+
+
+def test_enrich_cves_populates_diamond_and_kill_chain():
+    """End-to-end: a Log4Shell CVE gets Kill Chain + Diamond populated from CWE/actors."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, ThreatActor, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    associations = {
+        "CVE-2021-44228": {
+            "actors": [ThreatActor(name="APT41")],
+            "campaigns": [],
+            "malware": [],
+        }
+    }
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations=associations)
+
+    rec = result[0]
+    # CWE-502 isn't an override, so default 'exploitation' wins.
+    assert rec.kill_chain_phase == "exploitation"
+    # Diamond adversary takes the first linked actor.
+    assert rec.diamond_adversary == "APT41"
+    # Capability is enriched with the primary CWE+technique.
+    assert rec.diamond_capability.startswith("exploit (")
+    assert "CWE-502" in rec.diamond_capability
+    # Infrastructure / victim default to empty (filled by other features).
+    assert rec.diamond_infrastructure == ""
+    assert rec.diamond_victim == ""
+
+
+def test_write_csv_includes_kill_chain_and_diamond_columns(tmp_path):
+    """CSV header contains kill_chain_phase and the four diamond_* fields."""
+    from ramen_cve import CSV_COLUMNS
+
+    for col in (
+        "kill_chain_phase", "diamond_capability", "diamond_adversary",
+        "diamond_infrastructure", "diamond_victim",
+    ):
+        assert col in CSV_COLUMNS, f"missing CSV column {col}"
+
+
+def test_write_markdown_diamond_line_for_high_priority(tmp_path):
+    """The Diamond Model line is rendered for kev_override / patch_now."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec_kev = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        diamond_adversary="APT41",
+        diamond_capability="exploit (CWE-502, T1190)",
+        diamond_infrastructure="",
+        diamond_victim="3 inventory host(s)",
+        kill_chain_phase="exploitation",
+        affected_hosts=["a", "b", "c"],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec_kev], out, METADATA)
+    text = out.read_text()
+    assert "**Diamond Model:**" in text
+    assert "Adversary=APT41" in text
+    assert "Capability=exploit (CWE-502, T1190)" in text
+    assert "Kill Chain=exploitation" in text
+
+
+def test_write_markdown_diamond_line_skipped_for_low_priority(tmp_path):
+    """No Diamond line for buckets below patch_now."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-9999", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=4.0, epss_score=0.05, bucket="deprioritize",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Diamond Model" not in text
+
+
+def test_write_markdown_diamond_uses_unknown_when_unset(tmp_path):
+    """Missing adversary / infrastructure render as italic placeholders."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "*unknown actor*" in text
+    assert "*unknown infrastructure*" in text
+
+
+def test_maybe_dispatch_off_by_default(caplog):
+    """_maybe_dispatch is a no-op unless --dispatch is set."""
+    import argparse
+    import logging
+
+    from ramen_cve import _maybe_dispatch
+
+    args = argparse.Namespace(dispatch=False)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        _maybe_dispatch(args, [_disp_rec()])
+    # No INFO log entry from dispatch_records since we never called it
+    assert all("Dispatch complete" not in r.message for r in caplog.records)
+
+
+def test_maybe_correlate_inventory_missing_path_logs_error(tmp_path, caplog):
+    """A bogus --inventory path logs ERROR but does NOT abort."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, _maybe_correlate_inventory
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="patch_now",
+    )
+    args = argparse.Namespace(inventory=tmp_path / "nope.csv")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        _maybe_correlate_inventory(args, [rec])
+    assert rec.affected_hosts == []
+    assert any("Inventory correlation skipped" in r.message for r in caplog.records)
+
+
+def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
+    """--format all produces a *-sigma directory containing one YAML per qualifying CVE."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    bundle = tmp_path / "in.json"
+    bundle.write_text(json.dumps({
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2021-44228",
+            }
+        ],
+    }))
+
+    nvd = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = nvd
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "all",
+            "--no-exploit-lookup",
+        ])
+
+    assert rc == 0
+    sigma_dirs = list(tmp_path.glob("ramen-cve-*-sigma"))
+    assert len(sigma_dirs) == 1
+    yaml_files = list(sigma_dirs[0].glob("*.yml"))
+    assert len(yaml_files) == 1
+    yaml = yaml_files[0].read_text()
+    assert "CVE-2021-44228" in yaml
+    assert "level: critical" in yaml
+
+
+def test_output_writes_stix_when_format_is_all(tmp_path):
+    """--format all writes csv + md + stix, with stix containing the Vulnerability SDO."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    bundle = tmp_path / "in.json"
+    bundle.write_text(json.dumps({
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2024-0001",
+            }
+        ],
+    }))
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        resp.json.return_value = {"vulnerabilities": []}
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "all",
+            "--no-exploit-lookup",
+        ])
+
+    assert rc == 0
+    stix_files = list(tmp_path.glob("ramen-cve-*.stix.json"))
+    assert len(stix_files) == 1
+    bundle_out = json.loads(stix_files[0].read_text())
+    assert any(
+        o.get("type") == "vulnerability" and o.get("name") == "CVE-2024-0001"
+        for o in bundle_out["objects"]
+    )

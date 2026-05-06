@@ -1,0 +1,116 @@
+{
+  "_README": "CVE → threat-actor / campaign / malware associations seeded from MITRE Groups and public reporting. Add or correct entries here; ramen_cve loads this file at runtime. Each value object may carry name + aliases + url. The G-IDs / S-IDs / C-IDs are MITRE ATT&CK references (https://attack.mitre.org/).",
+  "CVE-2021-44228": {
+    "actors": [
+      {"name": "APT41", "aliases": ["Wicked Panda", "Barium"], "url": "https://attack.mitre.org/groups/G0096/"},
+      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/"},
+      {"name": "Aquatic Panda", "aliases": [], "url": "https://attack.mitre.org/groups/G0143/"}
+    ],
+    "malware": [
+      {"name": "Cobalt Strike", "url": "https://attack.mitre.org/software/S0154/"}
+    ],
+    "campaigns": []
+  },
+  "CVE-2021-26855": {
+    "actors": [
+      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/"},
+      {"name": "APT27", "aliases": ["Emissary Panda", "Iron Tiger"], "url": "https://attack.mitre.org/groups/G0027/"}
+    ],
+    "malware": [
+      {"name": "China Chopper", "url": "https://attack.mitre.org/software/S0020/"}
+    ],
+    "campaigns": []
+  },
+  "CVE-2021-34527": {
+    "actors": [
+      {"name": "Vice Society", "aliases": [], "url": null},
+      {"name": "Magniber", "aliases": [], "url": null}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2020-1472": {
+    "actors": [
+      {"name": "TA505", "aliases": [], "url": "https://attack.mitre.org/groups/G0092/"},
+      {"name": "Cuba", "aliases": [], "url": null}
+    ],
+    "malware": [
+      {"name": "Ryuk", "url": "https://attack.mitre.org/software/S0446/"},
+      {"name": "Conti", "url": "https://attack.mitre.org/software/S0575/"}
+    ],
+    "campaigns": []
+  },
+  "CVE-2017-11882": {
+    "actors": [
+      {"name": "SideWinder", "aliases": [], "url": "https://attack.mitre.org/groups/G0121/"},
+      {"name": "Patchwork", "aliases": [], "url": "https://attack.mitre.org/groups/G0040/"},
+      {"name": "Confucius", "aliases": [], "url": "https://attack.mitre.org/groups/G0142/"},
+      {"name": "Cobalt Group", "aliases": [], "url": "https://attack.mitre.org/groups/G0080/"}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2017-0144": {
+    "actors": [
+      {"name": "Lazarus Group", "aliases": ["HIDDEN COBRA"], "url": "https://attack.mitre.org/groups/G0032/"},
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+    ],
+    "malware": [
+      {"name": "WannaCry", "url": "https://attack.mitre.org/software/S0366/"},
+      {"name": "NotPetya", "url": null}
+    ],
+    "campaigns": [
+      {"name": "WannaCry (May 2017)", "url": null},
+      {"name": "NotPetya (June 2017)", "url": null}
+    ]
+  },
+  "CVE-2018-13379": {
+    "actors": [
+      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/"},
+      {"name": "Conti", "aliases": [], "url": null}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2019-11510": {
+    "actors": [
+      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/"},
+      {"name": "REvil", "aliases": ["Sodinokibi"], "url": null}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2014-4114": {
+    "actors": [
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2022-30190": {
+    "actors": [
+      {"name": "TA413", "aliases": [], "url": null},
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+    ],
+    "malware": [],
+    "campaigns": [
+      {"name": "Follina (May 2022)", "url": null}
+    ]
+  },
+  "CVE-2023-23397": {
+    "actors": [
+      {"name": "APT28", "aliases": ["Fancy Bear", "Sofacy"], "url": "https://attack.mitre.org/groups/G0007/"}
+    ],
+    "malware": [],
+    "campaigns": []
+  },
+  "CVE-2023-2868": {
+    "actors": [
+      {"name": "UNC4841", "aliases": [], "url": null}
+    ],
+    "malware": [],
+    "campaigns": [
+      {"name": "Barracuda ESG Campaign (May 2023)", "url": null}
+    ]
+  }
+}

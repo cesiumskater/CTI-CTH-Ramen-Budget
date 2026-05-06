@@ -1,0 +1,22 @@
+{
+  "id": "log4shell-evidence",
+  "name": "Log4Shell exploitation evidence",
+  "hypothesis": "External-facing Java services in our environment were probed or successfully exploited via CVE-2021-44228 between 2021-12 and 2022-03. We expect to see anomalous outbound LDAP / RMI / DNS traffic from those services to attacker-controlled infrastructure during the window, plus suspicious Java process spawns post-exploitation.",
+  "data_sources": [
+    "wf_logs",
+    "java_app_logs",
+    "edr_process_create",
+    "proxy_egress",
+    "dns_resolver"
+  ],
+  "attack_techniques": ["T1190", "T1059"],
+  "linked_cves": ["CVE-2021-44228"],
+  "status": "open",
+  "created": "2024-01-01T00:00:00",
+  "findings": [
+    {
+      "timestamp": "2024-01-15T10:30:00",
+      "text": "Hunt template — replace this entry with real findings as the investigation progresses. Convention: include the data source, the time window, and the outcome (TP / FP / inconclusive) so downstream readers can audit the work."
+    }
+  ]
+}

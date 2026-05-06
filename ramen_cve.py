@@ -116,6 +116,24 @@ DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
+DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
+DEFAULT_HUNT_DIR = Path(__file__).resolve().parent / "hunts"
+
+HUNT_STATUSES = (
+    "open",
+    "in_progress",
+    "closed_true_positive",
+    "closed_false_positive",
+    "closed_inconclusive",
+)
+
+# TLP (Traffic Light Protocol) levels in ascending order of restrictiveness.
+# CLEAR is the public-share default; RED is "internal eyes only".
+TLP_LEVELS = ("CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED")
+
+# NATO Admiralty Code grades (e.g. "B2"). First letter A-F is source reliability;
+# digit 1-6 is information credibility. Lower letter+digit = more reliable.
+
 # Curated CWE → MITRE ATT&CK technique-ID mapping. Each CWE may map to one or
 # more techniques. This is intrinsically lossy: a CWE describes a *type* of
 # weakness and a technique describes an adversary action — the mapping captures
@@ -197,6 +215,49 @@ def map_cwes_to_attack_techniques(cwes: list[str]) -> list[str]:
         techniques.update(CWE_TO_ATTACK.get(cwe.upper(), []))
     return sorted(techniques)
 
+
+# Lockheed Martin Cyber Kill Chain phases. The default phase for a CVE is
+# 'exploitation' — that's what every vulnerability description reduces to.
+# Specific CWEs that reliably indicate a different phase override.
+KILL_CHAIN_PHASES = (
+    "reconnaissance",
+    "weaponization",
+    "delivery",
+    "exploitation",
+    "installation",
+    "command_and_control",
+    "actions_on_objectives",
+)
+
+# CWE → likely Kill Chain phase override. Anything not listed defaults to
+# 'exploitation' since that's how the vast majority of CVEs map.
+CWE_TO_KILL_CHAIN: dict[str, str] = {
+    "CWE-200": "reconnaissance",        # Information Disclosure
+    "CWE-22": "reconnaissance",         # Path Traversal (often pre-exploit recon)
+    "CWE-269": "installation",          # Improper Privilege Management → PrivEsc
+    "CWE-426": "installation",          # Untrusted Search Path → DLL Hijack
+    "CWE-732": "installation",          # Incorrect Permission Assignment
+    "CWE-552": "actions_on_objectives", # Files accessible to unauthorized parties
+    "CWE-319": "actions_on_objectives", # Cleartext Transmission of sensitive data
+    "CWE-601": "delivery",              # Open Redirect → phishing delivery aid
+    "CWE-1021": "delivery",             # UI Restriction Bypass / Clickjacking
+    "CWE-400": "actions_on_objectives", # DoS impact
+}
+
+
+def map_cwes_to_kill_chain(cwes: list[str]) -> str:
+    """Return the most specific Kill Chain phase for the given CWE list.
+
+    If any CWE has an override entry, return its phase (first match wins; the
+    CWE_TO_KILL_CHAIN dict is small and deterministic). Otherwise default to
+    'exploitation'.
+    """
+    for cwe in cwes:
+        phase = CWE_TO_KILL_CHAIN.get(cwe.upper())
+        if phase:
+            return phase
+    return "exploitation"
+
 _log = logging.getLogger(__name__)
 
 
@@ -210,6 +271,45 @@ def _utcnow() -> datetime:
     the cache TTL math compares two naive UTC datetimes).
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+def _normalize_tlp(value: str | None) -> str:
+    """Coerce a raw TLP attribute value into our canonical UPPER form, defaulting to CLEAR."""
+    if not value:
+        return "CLEAR"
+    v = value.strip().upper()
+    # Accept legacy "WHITE" → CLEAR mapping (TLP v1.0 used "WHITE").
+    if v == "WHITE":
+        return "CLEAR"
+    return v if v in TLP_LEVELS else "CLEAR"
+
+
+def _worst_tlp(a: str | None, b: str | None) -> str:
+    """Return the more-restrictive TLP between two values.
+
+    Order: RED > AMBER+STRICT > AMBER > GREEN > CLEAR.
+    """
+    na, nb = _normalize_tlp(a), _normalize_tlp(b)
+    return TLP_LEVELS[max(TLP_LEVELS.index(na), TLP_LEVELS.index(nb))]
+
+
+def _admiralty_score(grade: str | None) -> tuple[int, int]:
+    """Return a sortable tuple where (0,0) = best (A1) and (99,99) = no rating."""
+    if not grade or len(grade) != 2:
+        return (99, 99)
+    letter, digit = grade[0].upper(), grade[1]
+    if letter not in "ABCDEF" or not digit.isdigit():
+        return (99, 99)
+    return (ord(letter) - ord("A"), int(digit))
+
+
+def _best_admiralty(a: str | None, b: str | None) -> str:
+    """Return the higher-confidence (lower-tuple) Admiralty grade between two values."""
+    sa = _admiralty_score(a)
+    sb = _admiralty_score(b)
+    if sa <= sb:
+        return (a or "").upper()
+    return (b or "").upper()
+
 
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
@@ -240,26 +340,116 @@ class OpmlError(Exception):
 
 @dataclass
 class FeedEntry:
-    """A single RSS/Atom feed from an OPML file."""
+    """A single RSS/Atom feed from an OPML file.
+
+    Optional `tlp` and `admiralty` are read from data-tlp / data-admiralty
+    attributes on the OPML <outline> element (with inheritance from parent
+    outlines). They propagate through to every CveRecord and IocRecord
+    extracted from this feed.
+    """
 
     title: str
     url: str
     category: str = ""
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 @dataclass
 class CveRecord:
-    """A CVE ID as extracted from a source, before enrichment."""
+    """A CVE ID as extracted from a source, before enrichment.
+
+    `tlp` and `admiralty` carry the source's sharing/reliability tags so the
+    enriched record can surface the most-restrictive TLP and best Admiralty
+    grade across all sources that mentioned the same CVE.
+    """
 
     cve_id: str
     source: str
     first_seen: date
     first_seen_type: str  # "feed_pub" | "disclosure" | "manual_input"
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 # IOC types are kept open-coded as strings so the rest of the pipeline (CSV
 # columns, Markdown sections) can grow new types without a schema migration.
 # Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
+@dataclass
+class ThreatActor:
+    """A named adversary group; subset of the MITRE ATT&CK Groups schema."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
+class Campaign:
+    """A discrete intrusion campaign attributed to one or more actors."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
+class Malware:
+    """A named malware family or tool used in attacks."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
+class Hunt:
+    """A single threat-hunt hypothesis with linked CVEs, data sources, and findings.
+
+    Stored on disk as one JSON file per hunt under DEFAULT_HUNT_DIR. JSON (not
+    YAML) is used so this v1 stays inside the project's three-runtime-deps
+    budget — PyYAML is not added.
+    """
+
+    id: str
+    name: str
+    hypothesis: str
+    data_sources: list[str] = field(default_factory=list)
+    attack_techniques: list[str] = field(default_factory=list)
+    linked_cves: list[str] = field(default_factory=list)
+    status: str = "open"
+    created: str = ""
+    findings: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Hunt:
+        """Build a Hunt from a dict, tolerating missing keys with sensible defaults."""
+        return cls(
+            id=str(d.get("id") or ""),
+            name=str(d.get("name") or ""),
+            hypothesis=str(d.get("hypothesis") or ""),
+            data_sources=list(d.get("data_sources") or []),
+            attack_techniques=list(d.get("attack_techniques") or []),
+            linked_cves=list(d.get("linked_cves") or []),
+            status=str(d.get("status") or "open"),
+            created=str(d.get("created") or ""),
+            findings=list(d.get("findings") or []),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "hypothesis": self.hypothesis,
+            "data_sources": list(self.data_sources),
+            "attack_techniques": list(self.attack_techniques),
+            "linked_cves": list(self.linked_cves),
+            "status": self.status,
+            "created": self.created,
+            "findings": list(self.findings),
+        }
+
+
 @dataclass
 class IocRecord:
     """A non-CVE indicator extracted from feed/URL text.
@@ -268,6 +458,10 @@ class IocRecord:
     original text contained at least one defang marker (hxxp, [.], (at), etc.).
     Defanged feeds are typically authoritative IOC publications; un-defanged
     matches are more likely to be incidental references.
+
+    `enrichments` is a per-IOC dict keyed on enricher name (e.g. 'virustotal',
+    'abuseipdb') whose values are normalized payload dicts populated by
+    enrich_iocs().
     """
 
     ioc_type: str
@@ -276,6 +470,9 @@ class IocRecord:
     first_seen: date
     first_seen_type: str
     defanged_in_source: bool = False
+    enrichments: dict[str, dict] = field(default_factory=dict)
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 @dataclass
@@ -316,6 +513,33 @@ class EnrichedCve:
     # Public exploit / PoC availability signal: one of EXPLOIT_STATUS_VALUES.
     exploit_status: str = "none"
 
+    # Adversary attribution joined from associations.json (or a user override).
+    linked_actors: list[ThreatActor] = field(default_factory=list)
+    linked_campaigns: list[Campaign] = field(default_factory=list)
+    linked_malware: list[Malware] = field(default_factory=list)
+
+    # Provenance tags propagated from the source feed(s).
+    tlp: str = "CLEAR"
+    admiralty: str = ""
+
+    # CPE 2.3 strings from NVD (configurations.nodes.cpeMatch.criteria).
+    cpes: list[str] = field(default_factory=list)
+
+    # Hosts from the user's --inventory CSV whose product+version match a CPE.
+    affected_hosts: list[str] = field(default_factory=list)
+
+    # Lockheed Martin Cyber Kill Chain phase (derived from CWE; default
+    # 'exploitation' since every vulnerability description reduces to that).
+    kill_chain_phase: str = "exploitation"
+
+    # Diamond Model — the vulnerability itself is always a 'capability'.
+    # adversary / infrastructure / victim are filled when other features supply
+    # them (associations.json, future infrastructure feeds, --inventory).
+    diamond_capability: str = "capability"
+    diamond_adversary: str = ""
+    diamond_infrastructure: str = ""
+    diamond_victim: str = ""
+
     # Bucket
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
@@ -355,6 +579,14 @@ class Cache:
             payload_json TEXT NOT NULL,
             fetched_at  TEXT NOT NULL,
             PRIMARY KEY (source, key)
+        );
+        CREATE TABLE IF NOT EXISTS enrichment_cache (
+            enricher    TEXT NOT NULL,
+            ioc_type    TEXT NOT NULL,
+            value       TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL,
+            PRIMARY KEY (enricher, ioc_type, value)
         );
     """
 
@@ -458,6 +690,25 @@ class Cache:
         )
         self._conn.commit()
 
+    def get_enrichment(self, enricher: str, ioc_type: str, value: str) -> dict | None:
+        """Return a cached enrichment payload if fresh, else None."""
+        row = self._conn.execute(
+            "SELECT payload_json, fetched_at FROM enrichment_cache "
+            "WHERE enricher = ? AND ioc_type = ? AND value = ?",
+            (enricher, ioc_type, value),
+        ).fetchone()
+        if row and self._is_fresh(row[1]):
+            return json.loads(row[0])
+        return None
+
+    def set_enrichment(self, enricher: str, ioc_type: str, value: str, payload: dict) -> None:
+        """Upsert an enrichment payload keyed on (enricher, ioc_type, value)."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO enrichment_cache VALUES (?, ?, ?, ?, ?)",
+            (enricher, ioc_type, value, json.dumps(payload), _utcnow().isoformat()),
+        )
+        self._conn.commit()
+
     def purge(self) -> None:
         """Delete entries older than the TTL from all tables."""
         cutoff = (_utcnow() - self._ttl).isoformat()
@@ -465,6 +716,7 @@ class Cache:
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM kev_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM exploit_cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.execute("DELETE FROM enrichment_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
 
 
@@ -479,6 +731,11 @@ def parse_opml(path: Path) -> list[FeedEntry]:
     Walks <outline> elements recursively. Only outlines with an xmlUrl attribute
     are returned as FeedEntry objects; folder/category outlines are traversed but
     not emitted. The category is the immediate parent outline's text attribute.
+
+    Two extension attributes are honored: data-tlp ("CLEAR"/"GREEN"/"AMBER"/
+    "AMBER+STRICT"/"RED") and data-admiralty (NATO grade, e.g. "B2"). Both are
+    inherited from parent outlines so a folder can tag every feed beneath it.
+
     Raises OpmlError for missing files or malformed XML.
     """
     if not path.exists():
@@ -495,27 +752,58 @@ def parse_opml(path: Path) -> list[FeedEntry]:
 
     entries: list[FeedEntry] = []
 
-    def _walk(node: ET.Element, category: str) -> None:
+    def _walk(node: ET.Element, category: str, tlp: str, admiralty: str) -> None:
         for outline in node.findall("outline"):
             url = outline.get("xmlUrl")
+            outline_tlp = _normalize_tlp(outline.get("data-tlp")) or tlp
+            outline_adm = (outline.get("data-admiralty") or admiralty or "").upper()
+            # If the attribute is missing on this outline, fall through to the
+            # parent's value (inheritance).
+            effective_tlp = (
+                _normalize_tlp(outline.get("data-tlp")) if outline.get("data-tlp") else tlp
+            )
             if url:
                 title = outline.get("title") or outline.get("text") or url
-                entries.append(FeedEntry(title=title, url=url, category=category))
+                entries.append(
+                    FeedEntry(
+                        title=title,
+                        url=url,
+                        category=category,
+                        tlp=effective_tlp,
+                        admiralty=outline_adm,
+                    )
+                )
             # Recurse into sub-outlines whether this outline has a URL or not
             child_category = outline.get("text") or category
-            _walk(outline, child_category if not url else category)
+            _walk(
+                outline,
+                child_category if not url else category,
+                outline_tlp,
+                outline_adm,
+            )
 
-    _walk(body, "")
+    _walk(body, "", "CLEAR", "")
     return entries
 
 
-def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str) -> list[CveRecord]:
+def extract_cves(
+    text: str,
+    source: str,
+    first_seen: date,
+    first_seen_type: str,
+    *,
+    tlp: str = "CLEAR",
+    admiralty: str = "",
+) -> list[CveRecord]:
     """Extract and deduplicate CVE IDs from arbitrary text.
 
     Normalizes all IDs to upper-case and preserves order of first occurrence.
+    Optional `tlp` and `admiralty` are stamped onto every emitted CveRecord.
     """
     seen: set[str] = set()
     records: list[CveRecord] = []
+    tlp_norm = _normalize_tlp(tlp)
+    admiralty_norm = (admiralty or "").upper()
     for match in CVE_REGEX.finditer(text):
         cve_id = match.group(0).upper()
         if cve_id not in seen:
@@ -526,6 +814,8 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
                     source=source,
                     first_seen=first_seen,
                     first_seen_type=first_seen_type,
+                    tlp=tlp_norm,
+                    admiralty=admiralty_norm,
                 )
             )
     return records
@@ -562,6 +852,9 @@ def extract_iocs(
     source: str,
     first_seen: date,
     first_seen_type: str,
+    *,
+    tlp: str = "CLEAR",
+    admiralty: str = "",
 ) -> list[IocRecord]:
     """Extract a deduplicated list of non-CVE indicators from text.
 
@@ -577,6 +870,8 @@ def extract_iocs(
     """
     defanged_in_source = bool(_DEFANG_DETECT.search(text))
     refanged = _defang_text(text)
+    tlp_norm = _normalize_tlp(tlp)
+    admiralty_norm = (admiralty or "").upper()
 
     seen: set[tuple[str, str]] = set()
     out: list[IocRecord] = []
@@ -594,6 +889,8 @@ def extract_iocs(
                 first_seen=first_seen,
                 first_seen_type=first_seen_type,
                 defanged_in_source=defanged_in_source,
+                tlp=tlp_norm,
+                admiralty=admiralty_norm,
             )
         )
 
@@ -867,6 +1164,23 @@ def _parse_nvd_response(data: dict) -> dict:
     published_str = cve_data.get("published")
     nvd_published = published_str[:10] if published_str else None
 
+    # Walk configurations[].nodes[].cpeMatch[] for CPE 2.3 strings. NVD
+    # responses sometimes nest cpeMatch under children; iterate defensively.
+    cpes: list[str] = []
+    seen_cpes: set[str] = set()
+
+    def _collect_cpes(nodes: list) -> None:
+        for node in nodes or []:
+            for match in node.get("cpeMatch") or []:
+                criteria = match.get("criteria") or ""
+                if criteria and criteria not in seen_cpes:
+                    seen_cpes.add(criteria)
+                    cpes.append(criteria)
+            _collect_cpes(node.get("children") or [])
+
+    for cfg in cve_data.get("configurations") or []:
+        _collect_cpes(cfg.get("nodes") or [])
+
     return {
         "cve_id": cve_id,
         "cvss_score": cvss_score,
@@ -875,6 +1189,7 @@ def _parse_nvd_response(data: dict) -> dict:
         "cvss_version": cvss_version,
         "kev_listed": kev_listed,
         "cwe": cwe,
+        "cpes": cpes,
         "nvd_published": nvd_published,
         "nvd_status": "ok",
     }
@@ -971,6 +1286,59 @@ def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
     return catalog
 
 
+def _build_actor(d: dict) -> ThreatActor:
+    return ThreatActor(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                       url=d.get("url"))
+
+
+def _build_campaign(d: dict) -> Campaign:
+    return Campaign(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                    url=d.get("url"))
+
+
+def _build_malware(d: dict) -> Malware:
+    return Malware(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                   url=d.get("url"))
+
+
+def load_associations(
+    path: Path | None = None,
+) -> dict[str, dict[str, list]]:
+    """Load CVE → adversary associations from a JSON file.
+
+    Returns a dict keyed on upper-case CVE ID. Each value has the shape:
+        {"actors": [ThreatActor], "campaigns": [Campaign], "malware": [Malware]}
+
+    If `path` is None we fall back to the bundled DEFAULT_ASSOCIATIONS_PATH;
+    if that file is missing or malformed we return an empty dict and log a
+    warning so the rest of the pipeline keeps working with empty linked_*
+    fields.
+    """
+    target = path or DEFAULT_ASSOCIATIONS_PATH
+    if not target.exists():
+        _log.warning("Associations file not found: %s; skipping adversary join.", target)
+        return {}
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("Could not parse associations file %s: %s", target, exc)
+        return {}
+
+    out: dict[str, dict[str, list]] = {}
+    for cve_id, payload in raw.items():
+        if not isinstance(payload, dict) or not CVE_REGEX.fullmatch(cve_id.upper()):
+            continue
+        actors_in = payload.get("actors") or []
+        campaigns_in = payload.get("campaigns") or []
+        malware_in = payload.get("malware") or []
+        out[cve_id.upper()] = {
+            "actors": [_build_actor(a) for a in actors_in if isinstance(a, dict)],
+            "campaigns": [_build_campaign(c) for c in campaigns_in if isinstance(c, dict)],
+            "malware": [_build_malware(m) for m in malware_in if isinstance(m, dict)],
+        }
+    return out
+
+
 def _parse_kev_due_date(value: str | None) -> date | None:
     """Parse a KEV dueDate string (YYYY-MM-DD) tolerating malformed input."""
     if not value:
@@ -986,17 +1354,27 @@ def enrich_cves(
     records: list[CveRecord],
     cache: Cache,
     api_key: str | None,
+    associations: dict[str, dict[str, list]] | None = None,
 ) -> list[EnrichedCve]:
     """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
     Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
     multiple records, only the earliest first_seen date is kept.
+
+    If `associations` is provided, each enriched record is also annotated with
+    the linked actors, campaigns, and malware for that CVE.
     """
-    # Deduplicate: keep earliest first_seen per CVE
+    # Deduplicate: keep earliest first_seen per CVE, but merge TLP / Admiralty
+    # across every input record so the most-restrictive sharing tag and the
+    # highest-confidence source rating both reach the EnrichedCve.
     earliest: dict[str, CveRecord] = {}
+    merged_tlp: dict[str, str] = {}
+    merged_adm: dict[str, str] = {}
     for rec in records:
         if rec.cve_id not in earliest or rec.first_seen < earliest[rec.cve_id].first_seen:
             earliest[rec.cve_id] = rec
+        merged_tlp[rec.cve_id] = _worst_tlp(merged_tlp.get(rec.cve_id), rec.tlp)
+        merged_adm[rec.cve_id] = _best_admiralty(merged_adm.get(rec.cve_id), rec.admiralty)
 
     unique_ids = list(earliest.keys())
 
@@ -1070,8 +1448,34 @@ def enrich_cves(
                 kev_product=kev.get("product") if kev else None,
                 kev_short_description=kev.get("shortDescription") if kev else None,
                 attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
+                tlp=merged_tlp.get(cve_id, "CLEAR"),
+                admiralty=merged_adm.get(cve_id, ""),
+                cpes=list(nvd.get("cpes") or []),
+                kill_chain_phase=map_cwes_to_kill_chain(nvd.get("cwe", [])),
             )
         )
+
+    if associations:
+        for rec in enriched:
+            assoc = associations.get(rec.cve_id)
+            if assoc:
+                rec.linked_actors = list(assoc.get("actors") or [])
+                rec.linked_campaigns = list(assoc.get("campaigns") or [])
+                rec.linked_malware = list(assoc.get("malware") or [])
+
+    # Diamond Model adversary defaults to the first linked actor; capability
+    # adds the primary CWE/technique label so the Diamond line in Markdown is
+    # actually informative rather than just the literal word "capability".
+    for rec in enriched:
+        if rec.linked_actors and not rec.diamond_adversary:
+            rec.diamond_adversary = rec.linked_actors[0].name
+        cap_bits: list[str] = []
+        if rec.cwe:
+            cap_bits.append(rec.cwe[0])
+        if rec.attack_techniques:
+            cap_bits.append(rec.attack_techniques[0])
+        if cap_bits:
+            rec.diamond_capability = "exploit (" + ", ".join(cap_bits) + ")"
 
     return enriched
 
@@ -1207,6 +1611,510 @@ def enrich_with_exploit_status(
     return enriched
 
 
+VIRUSTOTAL_API_BASE = "https://www.virustotal.com/api/v3"
+ABUSEIPDB_API_BASE = "https://api.abuseipdb.com/api/v2"
+OTX_API_BASE = "https://otx.alienvault.com/api/v1"
+MALWAREBAZAAR_API = "https://mb-api.abuse.ch/api/v1/"
+
+
+class _EnricherBase:
+    """Abstract base for IOC enrichers.
+
+    Subclasses set `name`, declare which IOC types they support via
+    `supports()`, and implement `_fetch()` to do the actual HTTP call. The
+    base class wraps `_fetch` with cache lookup + write so subclasses don't
+    repeat that boilerplate.
+    """
+
+    name: str = ""
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key
+
+    def supports(self, ioc_type: str) -> bool:
+        return False
+
+    def enrich(self, ioc_type: str, value: str, cache: Cache) -> dict | None:
+        cached = cache.get_enrichment(self.name, ioc_type, value)
+        if cached is not None:
+            return cached
+        try:
+            payload = self._fetch(ioc_type, value)
+        except Exception as exc:
+            _log.warning("%s enrichment failed for %s=%s: %s", self.name, ioc_type, value, exc)
+            return None
+        if payload is None:
+            return None
+        cache.set_enrichment(self.name, ioc_type, value, payload)
+        return payload
+
+    def _fetch(self, ioc_type: str, value: str) -> dict | None:
+        raise NotImplementedError
+
+
+class VirusTotalEnricher(_EnricherBase):
+    """VirusTotal v3 — IPs, domains, URLs, file hashes (gated on VT_API_KEY)."""
+
+    name = "virustotal"
+    SUPPORTED = frozenset({"ipv4", "domain", "url", "md5", "sha1", "sha256"})
+
+    def supports(self, ioc_type: str) -> bool:
+        return bool(self.api_key) and ioc_type in self.SUPPORTED
+
+    def _fetch(self, ioc_type: str, value: str) -> dict | None:
+        import base64
+
+        if ioc_type == "ipv4":
+            url = f"{VIRUSTOTAL_API_BASE}/ip_addresses/{value}"
+        elif ioc_type == "domain":
+            url = f"{VIRUSTOTAL_API_BASE}/domains/{value}"
+        elif ioc_type == "url":
+            # VT requires URL → base64url(no padding) for the path id.
+            url_id = base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
+            url = f"{VIRUSTOTAL_API_BASE}/urls/{url_id}"
+        else:  # md5 / sha1 / sha256
+            url = f"{VIRUSTOTAL_API_BASE}/files/{value}"
+
+        resp = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT, "x-apikey": self.api_key or ""},
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return {"found": False}
+        resp.raise_for_status()
+        data = resp.json().get("data") or {}
+        attrs = data.get("attributes") or {}
+        stats = attrs.get("last_analysis_stats") or {}
+        return {
+            "found": True,
+            "malicious": int(stats.get("malicious") or 0),
+            "suspicious": int(stats.get("suspicious") or 0),
+            "harmless": int(stats.get("harmless") or 0),
+            "reputation": attrs.get("reputation"),
+            "url": f"https://www.virustotal.com/gui/search/{value}",
+        }
+
+
+class AbuseIPDBEnricher(_EnricherBase):
+    """AbuseIPDB — IP reputation only (gated on ABUSEIPDB_API_KEY)."""
+
+    name = "abuseipdb"
+    SUPPORTED = frozenset({"ipv4"})
+
+    def supports(self, ioc_type: str) -> bool:
+        return bool(self.api_key) and ioc_type in self.SUPPORTED
+
+    def _fetch(self, ioc_type: str, value: str) -> dict | None:
+        resp = requests.get(
+            f"{ABUSEIPDB_API_BASE}/check",
+            headers={
+                "User-Agent": USER_AGENT,
+                "Key": self.api_key or "",
+                "Accept": "application/json",
+            },
+            params={"ipAddress": value, "maxAgeInDays": "90"},
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return {"found": False}
+        resp.raise_for_status()
+        data = (resp.json() or {}).get("data") or {}
+        return {
+            "found": True,
+            "abuse_confidence": int(data.get("abuseConfidenceScore") or 0),
+            "total_reports": int(data.get("totalReports") or 0),
+            "country_code": data.get("countryCode"),
+            "url": f"https://www.abuseipdb.com/check/{value}",
+        }
+
+
+class OtxEnricher(_EnricherBase):
+    """AlienVault OTX — IPs, domains, URLs, file hashes (gated on OTX_API_KEY)."""
+
+    name = "otx"
+    SUPPORTED = frozenset({"ipv4", "domain", "url", "md5", "sha1", "sha256"})
+
+    _OTX_TYPE_MAP = {
+        "ipv4": "IPv4",
+        "domain": "domain",
+        "url": "url",
+        "md5": "file",
+        "sha1": "file",
+        "sha256": "file",
+    }
+
+    def supports(self, ioc_type: str) -> bool:
+        return bool(self.api_key) and ioc_type in self.SUPPORTED
+
+    def _fetch(self, ioc_type: str, value: str) -> dict | None:
+        otx_type = self._OTX_TYPE_MAP[ioc_type]
+        # OTX requires URL-encoding the value; urllib.parse.quote handles it.
+        encoded = urllib.parse.quote(value, safe="")
+        url = f"{OTX_API_BASE}/indicators/{otx_type}/{encoded}/general"
+        resp = requests.get(
+            url,
+            headers={"User-Agent": USER_AGENT, "X-OTX-API-KEY": self.api_key or ""},
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            return {"found": False}
+        resp.raise_for_status()
+        data = resp.json() or {}
+        pulses = (data.get("pulse_info") or {}).get("count")
+        return {
+            "found": True,
+            "pulse_count": int(pulses or 0),
+            "reputation": data.get("reputation"),
+            "url": f"https://otx.alienvault.com/indicator/{otx_type}/{encoded}",
+        }
+
+
+class MalwareBazaarEnricher(_EnricherBase):
+    """MalwareBazaar (abuse.ch) — file hashes only, no API key required."""
+
+    name = "malwarebazaar"
+    SUPPORTED = frozenset({"md5", "sha1", "sha256"})
+
+    def __init__(self, api_key: str | None = None) -> None:
+        # MalwareBazaar is open; we still pass api_key to satisfy the base class
+        # signature, but supports() doesn't gate on it.
+        super().__init__(api_key=api_key)
+
+    def supports(self, ioc_type: str) -> bool:
+        return ioc_type in self.SUPPORTED
+
+    def _fetch(self, ioc_type: str, value: str) -> dict | None:
+        resp = requests.post(
+            MALWAREBAZAAR_API,
+            data={"query": "get_info", "hash": value},
+            headers={"User-Agent": USER_AGENT},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json() or {}
+        if (body.get("query_status") or "").lower() != "ok":
+            return {"found": False}
+        rows = body.get("data") or []
+        if not rows:
+            return {"found": False}
+        first = rows[0]
+        return {
+            "found": True,
+            "file_name": first.get("file_name"),
+            "file_type": first.get("file_type"),
+            "signature": first.get("signature"),
+            "tags": list(first.get("tags") or []),
+            "url": f"https://bazaar.abuse.ch/sample/{first.get('sha256_hash', '')}",
+        }
+
+
+def _build_default_enrichers() -> list[_EnricherBase]:
+    """Return the default ordered list of enrichers, gated by environment keys."""
+    import os
+
+    return [
+        VirusTotalEnricher(os.getenv("VT_API_KEY") or None),
+        AbuseIPDBEnricher(os.getenv("ABUSEIPDB_API_KEY") or None),
+        OtxEnricher(os.getenv("OTX_API_KEY") or None),
+        MalwareBazaarEnricher(),
+    ]
+
+
+def enrich_iocs(
+    iocs: list[IocRecord],
+    cache: Cache,
+    enrichers: list[_EnricherBase] | None = None,
+) -> list[IocRecord]:
+    """Run each enricher against each IOC it supports; mutate iocs in place.
+
+    Per-(enricher, ioc_type, value) results are cached for the cache TTL so
+    re-runs don't re-hit the upstream APIs. Returns the same list for chaining.
+    """
+    if enrichers is None:
+        enrichers = _build_default_enrichers()
+    for ioc in iocs:
+        for enricher in enrichers:
+            if not enricher.supports(ioc.ioc_type):
+                continue
+            payload = enricher.enrich(ioc.ioc_type, ioc.value, cache)
+            if payload is not None:
+                ioc.enrichments[enricher.name] = payload
+    return iocs
+
+
+def load_inventory(path: Path) -> list[dict[str, str]]:
+    """Load an inventory CSV with columns host, product, version (case-insensitive).
+
+    Returns a list of dicts. An optional `cpe` column is also accepted; rows
+    that supply `cpe` are matched directly without product/version inference.
+    Raises OpmlError on missing or unreadable files.
+    """
+    if not path.exists():
+        raise OpmlError(f"Inventory file not found: {path}")
+    rows: list[dict[str, str]] = []
+    try:
+        with path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            for r in reader:
+                rows.append(
+                    {
+                        "host": (r.get("host") or "").strip(),
+                        "product": (r.get("product") or "").strip(),
+                        "version": (r.get("version") or "").strip(),
+                        "cpe": (r.get("cpe") or "").strip(),
+                    }
+                )
+    except OSError as exc:
+        raise OpmlError(f"Could not read inventory file {path}: {exc}") from exc
+    return rows
+
+
+def _cpe_matches_inventory(cpe: str, product: str, version: str) -> bool:
+    """Return True if a CPE 2.3 string plausibly matches a (product, version) pair.
+
+    A match requires:
+      - The product token appears in the CPE's vendor or product slot.
+      - The CPE's version slot is '*' (any version vulnerable) OR exactly equals
+        the inventory version.
+
+    Both comparisons are lowercase.
+    """
+    if not cpe.startswith("cpe:2.3:") and not cpe.startswith("cpe:/"):
+        return False
+    parts = cpe.lower().split(":")
+    if len(parts) < 6:
+        return False
+    cpe_vendor = parts[3]
+    cpe_product = parts[4]
+    cpe_version = parts[5]
+    pl = (product or "").lower()
+    if not pl:
+        return False
+    if pl not in cpe_vendor and pl not in cpe_product:
+        return False
+    return not (cpe_version != "*" and version and cpe_version != version.lower())
+
+
+def correlate_inventory(
+    enriched: list[EnrichedCve],
+    inventory: list[dict[str, str]],
+) -> list[EnrichedCve]:
+    """Annotate each EnrichedCve with hosts whose inventory row matches a CPE.
+
+    For each (cve, host) pair: if any of the CVE's CPEs matches the host's
+    product+version (or its explicit cpe column), the host is added to
+    rec.affected_hosts. Returns the same list for chaining.
+    """
+    for rec in enriched:
+        hits: list[str] = []
+        for inv in inventory:
+            host = inv["host"]
+            if not host or host in hits:
+                continue
+            matched = False
+            inv_cpe = inv.get("cpe") or ""
+            if inv_cpe:
+                # Direct CPE compare: lowercase substring match against any rec CPE.
+                inv_cpe_l = inv_cpe.lower()
+                matched = any(inv_cpe_l in c.lower() or c.lower() in inv_cpe_l for c in rec.cpes)
+            else:
+                for cpe in rec.cpes:
+                    if _cpe_matches_inventory(cpe, inv["product"], inv["version"]):
+                        matched = True
+                        break
+            if matched:
+                hits.append(host)
+        rec.affected_hosts = hits
+    return enriched
+
+
+class _DispatcherBase:
+    """Abstract base for outbound dispatchers (Slack, generic webhook, ...).
+
+    Subclasses set `name`, gate themselves via `enabled()`, and implement
+    `dispatch(rec)` to push one EnrichedCve to the configured target. dispatch()
+    must NEVER raise — return False on failure.
+    """
+
+    name: str = ""
+
+    def enabled(self) -> bool:
+        return False
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        raise NotImplementedError
+
+
+class SlackWebhookDispatcher(_DispatcherBase):
+    """Post a Block-Kit summary to a Slack incoming webhook (SLACK_WEBHOOK_URL)."""
+
+    name = "slack"
+
+    def __init__(self, webhook_url: str | None) -> None:
+        self.webhook_url = webhook_url
+
+    def enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def _build_payload(self, rec: EnrichedCve) -> dict:
+        emoji = {
+            "kev_override": ":rotating_light:",
+            "patch_now": ":rotating_light:",
+            "plan_and_patch": ":construction:",
+            "watch_closely": ":eyes:",
+        }.get(rec.bucket, ":pushpin:")
+        title = f"{emoji} {rec.cve_id} — {rec.bucket.replace('_', ' ').title()}"
+        cvss = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+        epss = f"{rec.epss_score:.4f}" if rec.epss_score is not None else "N/A"
+        body_lines = [
+            f"*Action:* {rec.suggested_action}",
+            f"*CVSS:* {cvss} ({rec.cvss_severity or 'N/A'}) · *EPSS:* {epss}",
+        ]
+        if rec.kev_listed:
+            kev_line = "*CISA KEV:* listed"
+            if rec.kev_due_date:
+                kev_line += f" (due {rec.kev_due_date})"
+            if rec.kev_known_ransomware_use:
+                kev_line += " — known ransomware use"
+            body_lines.append(kev_line)
+        if rec.attack_techniques:
+            body_lines.append(f"*ATT&CK:* {', '.join(rec.attack_techniques)}")
+        if rec.exploit_status and rec.exploit_status != "none":
+            body_lines.append(f"*Exploit Status:* `{rec.exploit_status}`")
+        if rec.linked_actors:
+            body_lines.append(
+                "*Linked Actors:* " + ", ".join(a.name for a in rec.linked_actors)
+            )
+        if rec.affected_hosts:
+            body_lines.append(
+                f"*Affected hosts:* {len(rec.affected_hosts)} in inventory"
+            )
+        return {
+            "blocks": [
+                {"type": "header", "text": {"type": "plain_text", "text": title}},
+                {"type": "section", "text": {"type": "mrkdwn",
+                                             "text": "\n".join(body_lines)}},
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"<https://nvd.nist.gov/vuln/detail/{rec.cve_id}|NVD>",
+                        }
+                    ],
+                },
+            ]
+        }
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        try:
+            resp = requests.post(
+                self.webhook_url or "",
+                json=self._build_payload(rec),
+                headers={"User-Agent": USER_AGENT},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as exc:
+            _log.warning("Slack dispatch failed for %s: %s", rec.cve_id, exc)
+            return False
+
+
+class GenericWebhookDispatcher(_DispatcherBase):
+    """POST a JSON-serialized EnrichedCve summary to RAMEN_DISPATCH_WEBHOOK."""
+
+    name = "webhook"
+
+    def __init__(self, webhook_url: str | None) -> None:
+        self.webhook_url = webhook_url
+
+    def enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def _build_payload(self, rec: EnrichedCve) -> dict:
+        return {
+            "cve_id": rec.cve_id,
+            "bucket": rec.bucket,
+            "suggested_action": rec.suggested_action,
+            "cvss_score": rec.cvss_score,
+            "cvss_severity": rec.cvss_severity,
+            "epss_score": rec.epss_score,
+            "kev_listed": rec.kev_listed,
+            "kev_due_date": str(rec.kev_due_date) if rec.kev_due_date else None,
+            "kev_known_ransomware_use": rec.kev_known_ransomware_use,
+            "cwe": list(rec.cwe),
+            "attack_techniques": list(rec.attack_techniques),
+            "exploit_status": rec.exploit_status,
+            "linked_actors": [a.name for a in rec.linked_actors],
+            "linked_malware": [m.name for m in rec.linked_malware],
+            "linked_campaigns": [c.name for c in rec.linked_campaigns],
+            "affected_hosts": list(rec.affected_hosts),
+            "tlp": rec.tlp,
+            "admiralty": rec.admiralty,
+        }
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        try:
+            resp = requests.post(
+                self.webhook_url or "",
+                json=self._build_payload(rec),
+                headers={"User-Agent": USER_AGENT},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as exc:
+            _log.warning("Webhook dispatch failed for %s: %s", rec.cve_id, exc)
+            return False
+
+
+def _build_default_dispatchers() -> list[_DispatcherBase]:
+    """Build the default ordered list of dispatchers, gated by environment vars."""
+    import os
+
+    return [
+        SlackWebhookDispatcher(os.getenv("SLACK_WEBHOOK_URL") or None),
+        GenericWebhookDispatcher(os.getenv("RAMEN_DISPATCH_WEBHOOK") or None),
+    ]
+
+
+# Default bucket transitions worth dispatching on. KEV is highest priority,
+# patch_now is next; everything else is too low-signal for a chat ping.
+DISPATCH_DEFAULT_BUCKETS: tuple[str, ...] = ("kev_override", "patch_now")
+
+
+def dispatch_records(
+    enriched: list[EnrichedCve],
+    *,
+    dispatch_on: tuple[str, ...] = DISPATCH_DEFAULT_BUCKETS,
+    dispatchers: list[_DispatcherBase] | None = None,
+) -> int:
+    """Push records whose bucket is in `dispatch_on` to every enabled dispatcher.
+
+    Returns the count of successful (record, dispatcher) posts. Failures are
+    logged but do not abort the run.
+    """
+    if dispatchers is None:
+        dispatchers = _build_default_dispatchers()
+    enabled = [d for d in dispatchers if d.enabled()]
+    if not enabled:
+        _log.info(
+            "Dispatch enabled but no dispatchers configured "
+            "(set SLACK_WEBHOOK_URL or RAMEN_DISPATCH_WEBHOOK)."
+        )
+        return 0
+    successes = 0
+    for rec in enriched:
+        if rec.bucket not in dispatch_on:
+            continue
+        for d in enabled:
+            if d.dispatch(rec):
+                successes += 1
+    return successes
+
+
 def bucket_and_suggest(
     enriched: list[EnrichedCve],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
@@ -1307,6 +2215,17 @@ CSV_COLUMNS = [
     "cwe",
     "attack_techniques",
     "exploit_status",
+    "linked_actors",
+    "linked_campaigns",
+    "linked_malware",
+    "tlp",
+    "admiralty",
+    "affected_hosts",
+    "kill_chain_phase",
+    "diamond_capability",
+    "diamond_adversary",
+    "diamond_infrastructure",
+    "diamond_victim",
     "nvd_published",
     "enriched_at",
 ]
@@ -1319,6 +2238,9 @@ IOC_CSV_COLUMNS = [
     "first_seen",
     "first_seen_type",
     "defanged_in_source",
+    "enrichments",
+    "tlp",
+    "admiralty",
 ]
 
 
@@ -1326,7 +2248,8 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
     """Write a CSV of non-CVE indicators alongside the main CVE CSV.
 
     Columns are in IOC_CSV_COLUMNS order. defanged_in_source is rendered as
-    'true'/'false' so consumers can grep the file directly.
+    'true'/'false' so consumers can grep the file directly. The enrichments
+    column is a JSON-serialized dict so the schema stays one-row-per-IOC.
     """
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
@@ -1340,8 +2263,417 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     str(rec.first_seen) if rec.first_seen else "",
                     rec.first_seen_type,
                     str(rec.defanged_in_source).lower(),
+                    json.dumps(rec.enrichments) if rec.enrichments else "",
+                    rec.tlp or "CLEAR",
+                    rec.admiralty or "",
                 ]
             )
+
+
+def _stix_uuid(seed: str) -> str:
+    """Return a deterministic UUID-shaped string from a seed.
+
+    STIX SDO IDs require UUID v4 form; using a SHA-256 of the seed lets two
+    runs of the tool produce stable IDs for the same CVE/IOC, which is useful
+    for downstream platforms doing diff/dedupe across imports.
+    """
+    import hashlib
+
+    h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    # Force version (4) and variant (8/9/a/b) nibbles as UUIDv4 requires.
+    return f"{h[0:8]}-{h[8:12]}-4{h[13:16]}-8{h[17:20]}-{h[20:32]}"
+
+
+def _ioc_to_stix_pattern(ioc: IocRecord) -> str | None:
+    """Convert an IocRecord into a minimal STIX 2.1 equality pattern.
+
+    Returns None for IOC types we don't have a pattern mapping for so the caller
+    can skip them silently rather than emit a malformed Indicator SDO.
+    """
+    v = ioc.value.replace("\\", "\\\\").replace("'", "\\'")
+    if ioc.ioc_type == "ipv4":
+        return f"[ipv4-addr:value = '{v}']"
+    if ioc.ioc_type == "url":
+        return f"[url:value = '{v}']"
+    if ioc.ioc_type == "domain":
+        return f"[domain-name:value = '{v}']"
+    if ioc.ioc_type == "email":
+        return f"[email-addr:value = '{v}']"
+    if ioc.ioc_type == "md5":
+        return f"[file:hashes.MD5 = '{v}']"
+    if ioc.ioc_type == "sha1":
+        return f"[file:hashes.'SHA-1' = '{v}']"
+    if ioc.ioc_type == "sha256":
+        return f"[file:hashes.'SHA-256' = '{v}']"
+    return None
+
+
+def write_stix(
+    enriched: list[EnrichedCve],
+    path: Path,
+    iocs: list[IocRecord] | None = None,
+    run_metadata: dict | None = None,
+) -> None:
+    """Write a STIX 2.1 bundle: one Vulnerability + Note per CVE, one Indicator per IOC.
+
+    The bundle also contains a single Identity SDO (`name='ramen-cve'`) that
+    every other object references via `created_by_ref` so downstream platforms
+    can attribute the data.
+    """
+    iocs = iocs or []
+    now = _utcnow().isoformat(timespec="seconds") + "Z"
+
+    identity_id = f"identity--{_stix_uuid('ramen-cve-producer')}"
+    objects: list[dict] = [
+        {
+            "type": "identity",
+            "spec_version": "2.1",
+            "id": identity_id,
+            "created": now,
+            "modified": now,
+            "name": "ramen-cve",
+            "identity_class": "system",
+            "description": "Triage report producer (https://github.com/cesiumskater).",
+        }
+    ]
+
+    for rec in enriched:
+        vuln_id = f"vulnerability--{_stix_uuid(rec.cve_id)}"
+        external_refs = [
+            {
+                "source_name": "cve",
+                "external_id": rec.cve_id,
+                "url": f"https://nvd.nist.gov/vuln/detail/{rec.cve_id}",
+            }
+        ]
+        for cwe in rec.cwe:
+            external_refs.append({"source_name": "cwe", "external_id": cwe})
+        vuln: dict = {
+            "type": "vulnerability",
+            "spec_version": "2.1",
+            "id": vuln_id,
+            "created": now,
+            "modified": now,
+            "created_by_ref": identity_id,
+            "name": rec.cve_id,
+            "external_references": external_refs,
+        }
+        if rec.kev_short_description:
+            vuln["description"] = rec.kev_short_description
+        objects.append(vuln)
+
+        note_lines: list[str] = [
+            f"Bucket: {rec.bucket}",
+            f"Action: {rec.suggested_action}",
+        ]
+        if rec.cvss_score is not None:
+            note_lines.append(
+                f"CVSS: {rec.cvss_score:.1f} ({rec.cvss_severity or 'N/A'})"
+            )
+        if rec.epss_score is not None:
+            note_lines.append(f"EPSS: {rec.epss_score:.4f}")
+        if rec.kev_listed:
+            kev_line = "KEV: Listed"
+            if rec.kev_due_date:
+                kev_line += f" (due {rec.kev_due_date})"
+            if rec.kev_known_ransomware_use:
+                kev_line += " — known ransomware use"
+            note_lines.append(kev_line)
+        if rec.attack_techniques:
+            note_lines.append("ATT&CK: " + ", ".join(rec.attack_techniques))
+        if rec.exploit_status and rec.exploit_status != "none":
+            note_lines.append(f"Exploit Status: {rec.exploit_status}")
+
+        objects.append(
+            {
+                "type": "note",
+                "spec_version": "2.1",
+                "id": f"note--{_stix_uuid(rec.cve_id + ':note')}",
+                "created": now,
+                "modified": now,
+                "created_by_ref": identity_id,
+                "abstract": f"ramen-cve triage for {rec.cve_id}",
+                "content": "\n".join(note_lines),
+                "object_refs": [vuln_id],
+            }
+        )
+
+    for ioc in iocs:
+        pattern = _ioc_to_stix_pattern(ioc)
+        if pattern is None:
+            continue
+        objects.append(
+            {
+                "type": "indicator",
+                "spec_version": "2.1",
+                "id": f"indicator--{_stix_uuid(ioc.ioc_type + ':' + ioc.value)}",
+                "created": now,
+                "modified": now,
+                "created_by_ref": identity_id,
+                "pattern": pattern,
+                "pattern_type": "stix",
+                "valid_from": now,
+                "indicator_types": ["malicious-activity"],
+            }
+        )
+
+    bundle = {
+        "type": "bundle",
+        "id": f"bundle--{_stix_uuid(now + ':' + str(len(objects)))}",
+        "objects": objects,
+    }
+    path.write_text(json.dumps(bundle, indent=2), encoding="utf-8")
+
+
+# Equality-pattern parser for our own emit format. We don't try to parse the
+# full STIX pattern grammar; we look for `[<obj-type>:<prop> = '<value>']`.
+_STIX_PATTERN_RE = re.compile(
+    r"\[\s*(?P<obj>ipv4-addr|url|domain-name|email-addr|file)"
+    r"(?P<prop>:value|:hashes\.'?(?:MD5|SHA-1|SHA-256)'?)"
+    r"\s*=\s*'(?P<value>(?:[^'\\]|\\.)*)'\s*\]",
+    re.IGNORECASE,
+)
+
+
+def _extract_iocs_from_pattern(pattern: str) -> list[tuple[str, str]]:
+    """Extract (ioc_type, value) tuples from a STIX 2.1 equality pattern."""
+    out: list[tuple[str, str]] = []
+    for m in _STIX_PATTERN_RE.finditer(pattern):
+        obj = m.group("obj").lower()
+        prop = m.group("prop").lower()
+        raw = m.group("value")
+        # Reverse the STIX string-literal escape (\' and \\)
+        value = raw.replace("\\'", "'").replace("\\\\", "\\")
+        if obj == "ipv4-addr":
+            out.append(("ipv4", value))
+        elif obj == "url":
+            out.append(("url", value))
+        elif obj == "domain-name":
+            out.append(("domain", value))
+        elif obj == "email-addr":
+            out.append(("email", value))
+        elif obj == "file":
+            if "md5" in prop:
+                out.append(("md5", value))
+            elif "sha-1" in prop:
+                out.append(("sha1", value))
+            elif "sha-256" in prop:
+                out.append(("sha256", value))
+    return out
+
+
+def _extract_cve_id_from_vuln(obj: dict) -> str | None:
+    """Pull a CVE ID out of a STIX Vulnerability SDO (name field or external_references)."""
+    name = (obj.get("name") or "").upper()
+    if CVE_REGEX.fullmatch(name):
+        return name
+    for ref in obj.get("external_references") or []:
+        if (ref.get("source_name") or "").lower() == "cve":
+            ext_id = (ref.get("external_id") or "").upper()
+            if CVE_REGEX.fullmatch(ext_id):
+                return ext_id
+    return None
+
+
+def parse_stix_bundle(path: Path) -> tuple[list[CveRecord], list[IocRecord]]:
+    """Parse a STIX 2.1 bundle JSON file into CveRecord + IocRecord lists.
+
+    Vulnerability SDOs become CveRecords (via _extract_cve_id_from_vuln).
+    Indicator SDOs become IocRecords by matching a small set of equality
+    patterns. Other SDO types are ignored.
+
+    Raises OpmlError on missing file or unreadable JSON so the runner can
+    surface a friendly message instead of a traceback.
+    """
+    if not path.exists():
+        raise OpmlError(f"STIX bundle not found: {path}")
+    try:
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise OpmlError(f"Could not parse STIX bundle {path}: {exc}") from exc
+
+    return _stix_objects_to_records(bundle.get("objects") or [], source=str(path))
+
+
+def _stix_objects_to_records(
+    objects: list[dict],
+    source: str,
+) -> tuple[list[CveRecord], list[IocRecord]]:
+    """Shared object-list parser used by both parse_stix_bundle and pull_taxii."""
+    today = date.today()
+    cves: list[CveRecord] = []
+    iocs: list[IocRecord] = []
+    seen_cves: set[str] = set()
+    seen_iocs: set[tuple[str, str]] = set()
+
+    for obj in objects:
+        otype = obj.get("type")
+        if otype == "vulnerability":
+            cve_id = _extract_cve_id_from_vuln(obj)
+            if cve_id and cve_id not in seen_cves:
+                seen_cves.add(cve_id)
+                cves.append(CveRecord(cve_id, source, today, "manual_input"))
+        elif otype == "indicator":
+            for ioc_type, value in _extract_iocs_from_pattern(obj.get("pattern") or ""):
+                key = (ioc_type, value.lower())
+                if key in seen_iocs:
+                    continue
+                seen_iocs.add(key)
+                iocs.append(IocRecord(ioc_type, value, source, today, "manual_input"))
+
+    return cves, iocs
+
+
+def pull_taxii(
+    api_root: str,
+    collection_id: str,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> tuple[list[CveRecord], list[IocRecord]]:
+    """Pull objects from a TAXII 2.1 collection and parse them as a STIX bundle.
+
+    No pagination handling in v1: returns the first page only. On any error
+    returns ([], []) so the rest of the pipeline can continue.
+    """
+    url = api_root.rstrip("/") + f"/collections/{collection_id}/objects/"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/taxii+json;version=2.1",
+    }
+    auth = (username, password) if username and password else None
+    try:
+        resp = requests.get(url, headers=headers, auth=auth, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        _log.warning("TAXII pull failed for %s/%s: %s", api_root, collection_id, exc)
+        return [], []
+
+    return _stix_objects_to_records(
+        data.get("objects") or [],
+        source=f"taxii:{api_root.rstrip('/')}/{collection_id}",
+    )
+
+
+SIGMA_ELIGIBLE_BUCKETS = ("kev_override", "patch_now")
+
+
+def _sigma_level_for(rec: EnrichedCve) -> str:
+    """Map a triage bucket + CVSS to a Sigma rule level.
+
+    KEV-listed → critical. CVSS 9.0+ → critical. CVSS 7.0+ → high.
+    Anything lower that still squeaked into 'patch_now' → medium.
+    """
+    if rec.bucket == "kev_override" or (rec.cvss_score is not None and rec.cvss_score >= 9.0):
+        return "critical"
+    if rec.cvss_score is not None and rec.cvss_score >= 7.0:
+        return "high"
+    return "medium"
+
+
+def _sigma_yaml_escape(value: str) -> str:
+    """Escape a string for use as a single-quoted YAML scalar."""
+    return value.replace("'", "''")
+
+
+def _build_sigma_stub(rec: EnrichedCve) -> str:
+    """Build a single Sigma rule YAML document for one EnrichedCve.
+
+    The rule is intentionally a SCAFFOLD — the logsource and detection blocks
+    are TODO placeholders so a detection engineer has a pre-tagged starting
+    point rather than a runnable rule. Returns a YAML document string ending
+    with '\\n' (no trailing '---').
+    """
+    rule_id = _stix_uuid("sigma:" + rec.cve_id)
+    level = _sigma_level_for(rec)
+    today = date.today().isoformat().replace("-", "/")
+    cvss_disp = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+    epss_disp = f"{rec.epss_score:.4f}" if rec.epss_score is not None else "N/A"
+    title = f"Detection scaffold for {rec.cve_id} (CVSS {cvss_disp})"
+
+    # Description block ----------------------------------------------------
+    desc_lines = [f"Detection stub for {rec.cve_id}."]
+    desc_lines.append(
+        f"Bucket: {rec.bucket}. CVSS {cvss_disp} ({rec.cvss_severity or 'N/A'}); EPSS {epss_disp}."
+    )
+    if rec.kev_listed:
+        kev_line = "CISA KEV: listed"
+        if rec.kev_due_date:
+            kev_line += f" (due {rec.kev_due_date})"
+        if rec.kev_known_ransomware_use:
+            kev_line += " — known ransomware use"
+        desc_lines.append(kev_line + ".")
+    if rec.linked_actors:
+        desc_lines.append(
+            "Linked actors: " + ", ".join(a.name for a in rec.linked_actors) + "."
+        )
+    if rec.exploit_status and rec.exploit_status != "none":
+        desc_lines.append(f"Public exploit status: {rec.exploit_status}.")
+    desc_lines.append(
+        "SCAFFOLD ONLY — fill in logsource and detection blocks for your environment."
+    )
+    description_block = "\n  ".join(desc_lines)
+
+    # Tags block -----------------------------------------------------------
+    tags = [f"cve.{rec.cve_id.lower()}"]
+    for tid in rec.attack_techniques:
+        # ATT&CK tag conventions: lowercase, sub-techniques use a dot.
+        tags.append("attack." + tid.lower().replace(" ", "_"))
+    if rec.kev_listed:
+        tags.append("cisa.kev")
+    if rec.kev_known_ransomware_use:
+        tags.append("ransomware.known")
+    tag_block = "\n".join(f"  - {t}" for t in tags)
+
+    references = [
+        f"  - https://nvd.nist.gov/vuln/detail/{rec.cve_id}",
+        f"  - https://www.cve.org/CVERecord?id={rec.cve_id}",
+    ]
+    if rec.kev_listed:
+        references.append(
+            "  - https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+        )
+    ref_block = "\n".join(references)
+
+    return (
+        f"title: '{_sigma_yaml_escape(title)}'\n"
+        f"id: {rule_id}\n"
+        f"status: experimental\n"
+        f"description: |\n  {description_block}\n"
+        f"references:\n{ref_block}\n"
+        f"author: ramen-cve\n"
+        f"date: {today}\n"
+        f"tags:\n{tag_block}\n"
+        f"logsource:\n"
+        f"  product: TODO  # e.g. windows | linux | network | webserver\n"
+        f"  service: TODO  # e.g. sysmon | apache | nginx | iis\n"
+        f"detection:\n"
+        f"  selection:\n"
+        f"    TODO: TODO\n"
+        f"  condition: selection\n"
+        f"falsepositives:\n"
+        f"  - TODO — describe expected benign activity\n"
+        f"level: {level}\n"
+    )
+
+
+def write_sigma_stubs(enriched: list[EnrichedCve], out_dir: Path) -> list[Path]:
+    """Write one Sigma rule YAML stub per kev_override/patch_now CVE.
+
+    Returns the list of file paths written. Lower-priority buckets are skipped
+    because they are not actionable for detection engineering. The output dir
+    is created if it doesn't exist.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for rec in enriched:
+        if rec.bucket not in SIGMA_ELIGIBLE_BUCKETS:
+            continue
+        path = out_dir / f"{rec.cve_id}.yml"
+        path.write_text(_build_sigma_stub(rec), encoding="utf-8")
+        written.append(path)
+    return written
 
 
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
@@ -1377,6 +2709,17 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     ";".join(rec.cwe),
                     ";".join(rec.attack_techniques),
                     rec.exploit_status,
+                    ";".join(a.name for a in rec.linked_actors),
+                    ";".join(c.name for c in rec.linked_campaigns),
+                    ";".join(m.name for m in rec.linked_malware),
+                    rec.tlp or "CLEAR",
+                    rec.admiralty or "",
+                    ";".join(rec.affected_hosts),
+                    rec.kill_chain_phase,
+                    rec.diamond_capability,
+                    rec.diamond_adversary,
+                    rec.diamond_infrastructure,
+                    rec.diamond_victim,
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -1420,6 +2763,29 @@ IOC_TYPE_DISPLAY: dict[str, str] = {
     "md5": "MD5 Hashes",
 }
 IOC_TYPE_ORDER = ["url", "domain", "ipv4", "email", "sha256", "sha1", "md5"]
+
+
+def _summarize_enrichment(enricher_name: str, payload: dict) -> str:
+    """Produce a one-line Markdown summary of an enricher payload, or '' to skip."""
+    if not payload or payload.get("found") is False:
+        return ""
+    if enricher_name == "virustotal":
+        mal = payload.get("malicious") or 0
+        sus = payload.get("suspicious") or 0
+        rep = payload.get("reputation")
+        rep_str = f", rep {rep}" if rep is not None else ""
+        return f"malicious={mal} suspicious={sus}{rep_str}"
+    if enricher_name == "abuseipdb":
+        return (
+            f"abuse_confidence={payload.get('abuse_confidence')} "
+            f"reports={payload.get('total_reports')}"
+        )
+    if enricher_name == "otx":
+        return f"pulse_count={payload.get('pulse_count')}"
+    if enricher_name == "malwarebazaar":
+        sig = payload.get("signature") or "unsigned-sample"
+        return f"known sample ({sig})"
+    return ""
 
 
 def write_markdown(
@@ -1499,6 +2865,36 @@ def write_markdown(
             lines.append(f"| {tid} | {name} | {len(cves)} |")
         lines.append("")
 
+    affected_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for host in rec.affected_hosts:
+            affected_rollup.setdefault(host, []).append(rec.cve_id)
+    if affected_rollup:
+        lines += [
+            "## Affected in Your Environment",
+            "",
+            "| Host | CVEs |",
+            "| --- | --- |",
+        ]
+        for host in sorted(affected_rollup):
+            lines.append(f"| {_md_safe(host)} | {len(affected_rollup[host])} |")
+        lines.append("")
+
+    actor_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for actor in rec.linked_actors:
+            actor_rollup.setdefault(actor.name, []).append(rec.cve_id)
+    if actor_rollup:
+        lines += [
+            "## Linked Adversaries",
+            "",
+            "| Actor | CVEs |",
+            "| --- | --- |",
+        ]
+        for actor in sorted(actor_rollup):
+            lines.append(f"| {_md_safe(actor)} | {len(actor_rollup[actor])} |")
+        lines.append("")
+
     if total == 0:
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
@@ -1533,6 +2929,50 @@ def write_markdown(
                 lines.append(f"- **ATT&CK:** {techniques_display}")
             if rec.exploit_status and rec.exploit_status != "none":
                 lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
+            if rec.linked_actors:
+                actors_disp = ", ".join(
+                    f"[{_md_safe(a.name)}]({a.url})" if a.url else _md_safe(a.name)
+                    for a in rec.linked_actors
+                )
+                lines.append(f"- **Linked Actors:** {actors_disp}")
+            if rec.linked_malware:
+                lines.append(
+                    "- **Linked Malware:** "
+                    + ", ".join(_md_safe(m.name) for m in rec.linked_malware)
+                )
+            if rec.linked_campaigns:
+                lines.append(
+                    "- **Linked Campaigns:** "
+                    + ", ".join(_md_safe(c.name) for c in rec.linked_campaigns)
+                )
+            if (rec.tlp and rec.tlp != "CLEAR") or rec.admiralty:
+                tlp_disp = f"TLP:{rec.tlp}" if rec.tlp else ""
+                adm_disp = f"Admiralty {rec.admiralty}" if rec.admiralty else ""
+                provenance = " · ".join(p for p in (tlp_disp, adm_disp) if p)
+                lines.append(f"- **Provenance:** {provenance}")
+            if rec.affected_hosts:
+                shown = rec.affected_hosts[:8]
+                hosts_disp = ", ".join(_md_safe(h) for h in shown)
+                extra = len(rec.affected_hosts) - len(shown)
+                more = f" *(and {extra} more)*" if extra > 0 else ""
+                lines.append(
+                    f"- **Affected in your environment:** {len(rec.affected_hosts)} "
+                    f"host(s) — {hosts_disp}{more}"
+                )
+            if rec.bucket in ("kev_override", "patch_now"):
+                adversary = rec.diamond_adversary or "*unknown actor*"
+                infra = rec.diamond_infrastructure or "*unknown infrastructure*"
+                victim = rec.diamond_victim or (
+                    f"{len(rec.affected_hosts)} inventory host(s)"
+                    if rec.affected_hosts else "*your environment*"
+                )
+                lines.append(
+                    f"- **Diamond Model:** Adversary={_md_safe(adversary)} · "
+                    f"Capability={_md_safe(rec.diamond_capability)} · "
+                    f"Infrastructure={_md_safe(infra)} · "
+                    f"Victim={_md_safe(victim)} · "
+                    f"Kill Chain={rec.kill_chain_phase.replace('_', ' ')}"
+                )
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:
@@ -1571,6 +3011,10 @@ def write_markdown(
             for rec in recs:
                 marker = " *(defanged in source)*" if rec.defanged_in_source else ""
                 lines.append(f"- `{_md_safe(rec.value)}`{marker}")
+                for enricher_name, payload in sorted(rec.enrichments.items()):
+                    summary = _summarize_enrichment(enricher_name, payload)
+                    if summary:
+                        lines.append(f"  - {enricher_name}: {summary}")
             lines.append("")
 
     version = run_metadata.get("version", "0.1")
@@ -1615,12 +3059,62 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cvss-threshold", type=float, default=DEFAULT_CVSS_THRESHOLD)
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
     parser.add_argument("--out-dir", type=Path, default=Path("."))
-    parser.add_argument("--format", choices=["csv", "md", "both"], default="both")
+    parser.add_argument(
+        "--format",
+        choices=["csv", "md", "both", "stix", "sigma", "all"],
+        default="both",
+        help=(
+            "Output format. 'both' = CSV + Markdown; 'sigma' = Sigma stubs only; "
+            "'all' = CSV + Markdown + STIX + Sigma stubs."
+        ),
+    )
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument(
         "--no-exploit-lookup",
         action="store_true",
         help="Skip Exploit-DB / Nuclei / GitHub PoC lookups (offline mode).",
+    )
+    parser.add_argument(
+        "--no-enrich-iocs",
+        action="store_true",
+        help="Skip per-IOC enrichment (VirusTotal / AbuseIPDB / OTX / MalwareBazaar).",
+    )
+    parser.add_argument(
+        "--allow-tlp-red",
+        action="store_true",
+        help=(
+            "Permit writing TLP:RED records to disk. Default behavior is to "
+            "STRIP any TLP:RED records before output and log a warning."
+        ),
+    )
+    parser.add_argument(
+        "--inventory",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to a CSV asset inventory with columns 'host,product,version' "
+            "(or 'host,cpe'). When set, the report annotates each CVE with the "
+            "list of inventory hosts whose product+version matches a CVE CPE."
+        ),
+    )
+    parser.add_argument(
+        "--dispatch",
+        action="store_true",
+        help=(
+            "After writing reports, push every kev_override / patch_now finding "
+            "to configured dispatchers (Slack via SLACK_WEBHOOK_URL, generic "
+            "webhook via RAMEN_DISPATCH_WEBHOOK). Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--associations-file",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to a CVE→adversary associations JSON file. "
+            "Defaults to associations.json in the repo. Pass an empty/missing "
+            "path to disable adversary attribution."
+        ),
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -1650,14 +3144,50 @@ def build_parser() -> argparse.ArgumentParser:
     cve_p.add_argument("--from-file", type=Path, metavar="FILE", help="Text file of CVE IDs.")
     _shared_flags(cve_p)
 
+    # hunt subcommand: list / show / link / log / status against the hunts/ library
+    hunt_p = sub.add_parser("hunt", help="Manage threat-hunt hypotheses.")
+    hunt_p.add_argument(
+        "action",
+        choices=["list", "show", "link", "log", "status"],
+        help="What to do with the hunts library.",
+    )
+    hunt_p.add_argument("hunt_id", nargs="?", help="Hunt id (filename stem under hunts/).")
+    hunt_p.add_argument(
+        "value",
+        nargs="?",
+        help=(
+            "Action argument: CVE-ID for 'link', finding text for 'log', "
+            "new status for 'status'."
+        ),
+    )
+    hunt_p.add_argument(
+        "--hunt-dir",
+        type=Path,
+        default=DEFAULT_HUNT_DIR,
+        help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
+    )
+
+    # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
+    stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
+    stix_p.add_argument("path", nargs="?", type=Path, help="Path to a STIX bundle JSON file.")
+    stix_p.add_argument("--taxii-url", help="TAXII 2.1 API root URL.")
+    stix_p.add_argument("--taxii-collection", help="TAXII 2.1 collection ID.")
+    stix_p.add_argument("--taxii-user", help="Optional TAXII basic-auth username.")
+    stix_p.add_argument("--taxii-pass", help="Optional TAXII basic-auth password.")
+    _shared_flags(stix_p)
+
     return parser
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
-    """Set log level from --quiet / --verbose flags."""
-    if args.quiet:
+    """Set log level from --quiet / --verbose flags.
+
+    The hunt subcommand doesn't share the analysis flags, so we read them
+    defensively via getattr so logging works for every subcommand.
+    """
+    if getattr(args, "quiet", False):
         level = logging.WARNING
-    elif args.verbose:
+    elif getattr(args, "verbose", False):
         level = logging.DEBUG
     else:
         level = logging.INFO
@@ -1860,6 +3390,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args)
+
+    # The hunt subcommand is a pure local-file workflow: no NVD/EPSS/cache
+    # plumbing, no API-key prompt, no shared --no-cache / --format flags.
+    # Short-circuit before any of that runs.
+    if args.subcommand == "hunt":
+        return _run_hunt(args, cache=None, api_key=None)  # type: ignore[arg-type]
+
     _validate_args(args, parser)
 
     cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
@@ -1882,7 +3419,55 @@ def main(argv: list[str] | None = None) -> int:
         return _run_url(args, cache, api_key)
     if args.subcommand == "cve":
         return _run_cve(args, cache, api_key)
+    if args.subcommand == "stix":
+        return _run_stix(args, cache, api_key)
     return 1
+
+
+def _maybe_enrich_iocs(args: argparse.Namespace, iocs: list[IocRecord], cache: Cache) -> None:
+    """Run enrich_iocs unless --no-enrich-iocs was passed."""
+    if iocs and not args.no_enrich_iocs:
+        enrich_iocs(iocs, cache)
+
+
+def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]]:
+    """Resolve which associations file to use for this run.
+
+    Falls back to the bundled DEFAULT_ASSOCIATIONS_PATH unless the user passed
+    --associations-file. A missing file produces an empty dict + warning so the
+    rest of the pipeline still runs.
+    """
+    return load_associations(args.associations_file)
+
+
+def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """If --dispatch is set, push high-priority records to configured dispatchers."""
+    if not getattr(args, "dispatch", False):
+        return
+    sent = dispatch_records(enriched)
+    _log.info("Dispatch complete: %d successful posts.", sent)
+
+
+def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """Load --inventory (if set) and annotate each EnrichedCve with affected_hosts.
+
+    A missing or unreadable inventory file is logged as an error but does NOT
+    abort the run — the rest of the report is still useful without correlation.
+    """
+    inv_path: Path | None = getattr(args, "inventory", None)
+    if not inv_path:
+        return
+    try:
+        inventory = load_inventory(inv_path)
+    except OpmlError as exc:
+        _log.error("Inventory correlation skipped: %s", exc)
+        return
+    correlate_inventory(enriched, inventory)
+    affected = sum(1 for r in enriched if r.affected_hosts)
+    _log.info(
+        "Inventory correlation: %d/%d CVEs affect at least one host (%d inventory rows).",
+        affected, len(enriched), len(inventory),
+    )
 
 
 def _get_github_token() -> str | None:
@@ -1926,6 +3511,9 @@ def _output(
     When `iocs` is non-empty and --format includes csv, an additional
     `<basename>-iocs.csv` file is written next to the main CVE CSV. The
     Markdown report grows an Indicators of Compromise section regardless.
+
+    TLP:RED records are stripped from the output unless --allow-tlp-red was
+    passed; the count of stripped records is logged at WARNING.
     """
     # Microsecond resolution makes single-process collisions essentially
     # impossible; the -N suffix loop in _unique_output_path covers
@@ -1936,7 +3524,21 @@ def _output(
     out_dir.mkdir(parents=True, exist_ok=True)
     iocs = iocs or []
 
-    if args.format in ("csv", "both"):
+    if not getattr(args, "allow_tlp_red", False):
+        before = (len(enriched), len(iocs))
+        enriched = [r for r in enriched if (r.tlp or "CLEAR").upper() != "RED"]
+        iocs = [i for i in iocs if (i.tlp or "CLEAR").upper() != "RED"]
+        stripped_cve = before[0] - len(enriched)
+        stripped_ioc = before[1] - len(iocs)
+        if stripped_cve or stripped_ioc:
+            _log.warning(
+                "Stripped %d TLP:RED CVE record(s) and %d TLP:RED IOC record(s); "
+                "pass --allow-tlp-red to include them.",
+                stripped_cve,
+                stripped_ioc,
+            )
+
+    if args.format in ("csv", "both", "all"):
         csv_path = _unique_output_path(out_dir, ts, "csv")
         write_csv(enriched, csv_path)
         print(str(csv_path))
@@ -1945,10 +3547,25 @@ def _output(
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
 
-    if args.format in ("md", "both"):
+    if args.format in ("md", "both", "all"):
         md_path = _unique_output_path(out_dir, ts, "md")
         write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
+
+    if args.format in ("stix", "all"):
+        stix_path = _unique_output_path(out_dir, ts, "stix.json")
+        write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
+        print(str(stix_path))
+
+    if args.format in ("sigma", "all"):
+        sigma_dir = out_dir / f"ramen-cve-{ts}-sigma"
+        files = write_sigma_stubs(enriched, sigma_dir)
+        if files:
+            print(str(sigma_dir))
+        else:
+            _log.info(
+                "No kev_override / patch_now CVEs in this run; no Sigma stubs written."
+            )
 
 
 def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
@@ -1979,15 +3596,22 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
                     item.get("content", [{}])[0].get("value", "") if item.get("content") else "",
                 ]
             )
-            records.extend(extract_cves(text, feed_source, item_date, "feed_pub"))
-            iocs.extend(extract_iocs(text, feed_source, item_date, "feed_pub"))
+            records.extend(extract_cves(
+                text, feed_source, item_date, "feed_pub",
+                tlp=entry.tlp, admiralty=entry.admiralty,
+            ))
+            iocs.extend(extract_iocs(
+                text, feed_source, item_date, "feed_pub",
+                tlp=entry.tlp, admiralty=entry.admiralty,
+            ))
 
     iocs = _dedupe_iocs(iocs)
 
     date_mode = args.date_mode or "feed"
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -2002,7 +3626,9 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
+    _maybe_enrich_iocs(args, iocs, cache)
     _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
@@ -2043,9 +3669,10 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -2060,16 +3687,18 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
+    _maybe_enrich_iocs(args, iocs, cache)
     _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
 def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
     """Collapse duplicates across multiple feed items into one record per (type, value).
 
-    Keeps the earliest first_seen, OR-merges defanged_in_source, and joins
-    distinct sources with '; ' so the resulting IOC carries provenance from
-    every feed it appeared in.
+    Keeps the earliest first_seen, OR-merges defanged_in_source, joins distinct
+    sources with '; ', and propagates the worst-TLP + best-Admiralty tags so
+    the merged IOC carries provenance from every feed it appeared in.
     """
     by_key: dict[tuple[str, str], IocRecord] = {}
     for ioc in iocs:
@@ -2083,6 +3712,8 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
                 first_seen=ioc.first_seen,
                 first_seen_type=ioc.first_seen_type,
                 defanged_in_source=ioc.defanged_in_source,
+                tlp=ioc.tlp,
+                admiralty=ioc.admiralty,
             )
             continue
         if ioc.first_seen < existing.first_seen:
@@ -2092,6 +3723,8 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
             existing.defanged_in_source = True
         if ioc.source and ioc.source not in existing.source.split("; "):
             existing.source = f"{existing.source}; {ioc.source}"
+        existing.tlp = _worst_tlp(existing.tlp, ioc.tlp)
+        existing.admiralty = _best_admiralty(existing.admiralty, ioc.admiralty)
     return list(by_key.values())
 
 
@@ -2125,9 +3758,10 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -2143,6 +3777,191 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "epss_threshold": args.epss_threshold,
     }
     _output(enriched, args, metadata)
+    return 0
+
+
+def load_hunt(path: Path) -> Hunt:
+    """Load a single hunt JSON file. Raises OpmlError on missing/malformed file."""
+    if not path.exists():
+        raise OpmlError(f"Hunt file not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise OpmlError(f"Could not parse hunt file {path}: {exc}") from exc
+    return Hunt.from_dict(data)
+
+
+def load_all_hunts(dir_path: Path) -> list[Hunt]:
+    """Return every well-formed *.json hunt under `dir_path` (sorted by id)."""
+    if not dir_path.exists():
+        return []
+    out: list[Hunt] = []
+    for p in sorted(dir_path.glob("*.json")):
+        try:
+            out.append(load_hunt(p))
+        except OpmlError as exc:
+            _log.warning("Skipping malformed hunt file %s: %s", p, exc)
+    out.sort(key=lambda h: h.id)
+    return out
+
+
+def save_hunt(hunt: Hunt, path: Path) -> None:
+    """Persist a Hunt to disk as pretty-printed JSON; creates parent dir if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(hunt.to_dict(), indent=2), encoding="utf-8")
+
+
+def _hunt_path(hunt_dir: Path, hunt_id: str) -> Path:
+    """Resolve the on-disk path for a hunt id (no slash characters allowed)."""
+    if "/" in hunt_id or "\\" in hunt_id or hunt_id.startswith("."):
+        raise OpmlError(f"Invalid hunt id: {hunt_id!r}")
+    return hunt_dir / f"{hunt_id}.json"
+
+
+def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Execute the hunt subcommand (list / show / link / log / status)."""
+    hunt_dir: Path = args.hunt_dir
+    action = args.action
+
+    if action == "list":
+        hunts = load_all_hunts(hunt_dir)
+        if not hunts:
+            _log.info("No hunts in %s.", hunt_dir)
+            return 0
+        for h in hunts:
+            print(f"{h.id}\t{h.status}\t{len(h.linked_cves)} CVEs\t{h.name}")
+        return 0
+
+    if not args.hunt_id:
+        _log.error("hunt %s: hunt_id is required", action)
+        return 1
+
+    if action == "show":
+        try:
+            hunt = load_hunt(_hunt_path(hunt_dir, args.hunt_id))
+        except OpmlError as exc:
+            _log.error(str(exc))
+            return 1
+        print(json.dumps(hunt.to_dict(), indent=2))
+        return 0
+
+    # All write actions need to load the hunt first.
+    try:
+        hunt_path = _hunt_path(hunt_dir, args.hunt_id)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+    try:
+        hunt = load_hunt(hunt_path)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+
+    if action == "link":
+        if not args.value:
+            _log.error("hunt link: a CVE-ID value is required")
+            return 1
+        cve = args.value.upper()
+        if not CVE_REGEX.fullmatch(cve):
+            _log.error("hunt link: %r is not a valid CVE ID", args.value)
+            return 1
+        if cve in hunt.linked_cves:
+            _log.info("CVE %s already linked to hunt %s.", cve, hunt.id)
+            return 0
+        hunt.linked_cves.append(cve)
+        save_hunt(hunt, hunt_path)
+        print(f"Linked {cve} to {hunt.id}")
+        return 0
+
+    if action == "log":
+        if not args.value:
+            _log.error("hunt log: a finding text is required")
+            return 1
+        hunt.findings.append({
+            "timestamp": _utcnow().isoformat(timespec="seconds"),
+            "text": args.value,
+        })
+        save_hunt(hunt, hunt_path)
+        print(f"Logged finding on {hunt.id}")
+        return 0
+
+    if action == "status":
+        if not args.value:
+            _log.error("hunt status: a new status value is required (one of %s)",
+                       ", ".join(HUNT_STATUSES))
+            return 1
+        new_status = args.value.lower()
+        if new_status not in HUNT_STATUSES:
+            _log.error("hunt status: %r is not a valid status (use %s)",
+                       args.value, ", ".join(HUNT_STATUSES))
+            return 1
+        hunt.status = new_status
+        save_hunt(hunt, hunt_path)
+        print(f"Set {hunt.id} status → {new_status}")
+        return 0
+
+    _log.error("Unknown hunt action: %r", action)
+    return 1
+
+
+def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Execute the stix subcommand (file or TAXII source).
+
+    The user supplies EITHER `path` or both `--taxii-url` and `--taxii-collection`.
+    Combining the two is rejected so the source is unambiguous.
+    """
+    has_file = bool(args.path)
+    has_taxii = bool(args.taxii_url and args.taxii_collection)
+    if not (has_file or has_taxii):
+        _log.error(
+            "stix: provide a bundle path OR both --taxii-url and --taxii-collection."
+        )
+        return 1
+    if has_file and has_taxii:
+        _log.error("stix: --taxii-url is mutually exclusive with a bundle path.")
+        return 1
+
+    try:
+        if has_file:
+            cve_records, iocs = parse_stix_bundle(args.path)
+            source_label = str(args.path)
+        else:
+            cve_records, iocs = pull_taxii(
+                args.taxii_url,
+                args.taxii_collection,
+                username=args.taxii_user,
+                password=args.taxii_pass,
+            )
+            source_label = f"taxii:{args.taxii_url}/{args.taxii_collection}"
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+
+    if not cve_records and not iocs:
+        _log.warning("STIX source produced no CVEs or IOCs.")
+
+    date_mode = args.date_mode or "disclosure"
+    enriched = enrich_cves(cve_records, cache, api_key)
+    if not args.no_exploit_lookup:
+        enrich_with_exploit_status(enriched, cache, _get_github_token())
+    _maybe_correlate_inventory(args, enriched)
+    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    if args.start or args.end:
+        enriched = filter_by_date(enriched, args.start, args.end, date_mode)
+
+    metadata = {
+        "version": VERSION,
+        "args": f"stix {source_label}",
+        "sources": [source_label],
+        "start": str(args.start) if args.start else None,
+        "end": str(args.end) if args.end else None,
+        "date_mode": date_mode,
+        "cvss_threshold": args.cvss_threshold,
+        "epss_threshold": args.epss_threshold,
+    }
+    _maybe_enrich_iocs(args, iocs, cache)
+    _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
