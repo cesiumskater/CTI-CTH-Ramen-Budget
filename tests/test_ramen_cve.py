@@ -2379,3 +2379,398 @@ def test_cli_no_exploit_lookup_flag_parses():
     assert args.no_exploit_lookup is True
     args2 = build_parser().parse_args(["opml", "x.opml"])
     assert args2.no_exploit_lookup is False
+
+
+# ---------------------------------------------------------------------------
+# Slice 12 — STIX 2.1 / TAXII interoperability
+# ---------------------------------------------------------------------------
+
+
+def test_stix_uuid_is_deterministic_and_uuid4_shaped():
+    """_stix_uuid returns the same string for the same seed and matches UUIDv4 form."""
+    import re as _re
+
+    from ramen_cve import _stix_uuid
+
+    a = _stix_uuid("CVE-2021-44228")
+    b = _stix_uuid("CVE-2021-44228")
+    assert a == b
+    assert _re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}", a
+    )
+    assert _stix_uuid("CVE-2099-9999") != a
+
+
+def test_ioc_to_stix_pattern_covers_all_types():
+    """Every IOC type produces a valid STIX equality pattern; unknown types return None."""
+    from ramen_cve import IocRecord, _ioc_to_stix_pattern
+
+    cases = [
+        ("ipv4", "8.8.8.8", "[ipv4-addr:value = '8.8.8.8']"),
+        ("url", "https://evil.example/c2", "[url:value = 'https://evil.example/c2']"),
+        ("domain", "evil.example.com", "[domain-name:value = 'evil.example.com']"),
+        ("email", "x@y.com", "[email-addr:value = 'x@y.com']"),
+        (
+            "md5",
+            "d41d8cd98f00b204e9800998ecf8427e",
+            "[file:hashes.MD5 = 'd41d8cd98f00b204e9800998ecf8427e']",
+        ),
+        (
+            "sha1",
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "[file:hashes.'SHA-1' = 'da39a3ee5e6b4b0d3255bfef95601890afd80709']",
+        ),
+        (
+            "sha256",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "[file:hashes.'SHA-256' = "
+            "'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855']",
+        ),
+    ]
+    for ioc_type, value, expected in cases:
+        rec = IocRecord(ioc_type, value, "src", date(2024, 1, 1), "feed_pub")
+        assert _ioc_to_stix_pattern(rec) == expected
+
+    unknown = IocRecord("invented", "x", "src", date(2024, 1, 1), "feed_pub")
+    assert _ioc_to_stix_pattern(unknown) is None
+
+
+def test_ioc_to_stix_pattern_escapes_quotes():
+    """An IOC value containing a single quote is escaped so the STIX pattern stays valid."""
+    from ramen_cve import IocRecord, _ioc_to_stix_pattern
+
+    rec = IocRecord("url", "https://evil/'a", "src", date(2024, 1, 1), "feed_pub")
+    pattern = _ioc_to_stix_pattern(rec)
+    assert pattern is not None and "\\'" in pattern
+
+
+def test_write_stix_emits_bundle_with_vuln_note_indicator(tmp_path):
+    """write_stix produces a JSON bundle with the expected SDO mix."""
+    from ramen_cve import EnrichedCve, IocRecord, write_stix
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_short_description="Apache Log4j2 RCE.",
+        cwe=["CWE-502"],
+        attack_techniques=["T1059", "T1190"],
+        exploit_status="exploit_db",
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+    )
+    iocs = [
+        IocRecord("ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub"),
+        IocRecord(
+            "md5", "d41d8cd98f00b204e9800998ecf8427e", "x", date(2024, 1, 2), "feed_pub",
+        ),
+    ]
+    out = tmp_path / "report.stix.json"
+    write_stix([rec], out, iocs=iocs)
+    bundle = json.loads(out.read_text())
+    assert bundle["type"] == "bundle"
+    types = [o["type"] for o in bundle["objects"]]
+    assert "identity" in types
+    assert types.count("vulnerability") == 1
+    assert types.count("note") == 1
+    assert types.count("indicator") == 2
+
+    vuln = next(o for o in bundle["objects"] if o["type"] == "vulnerability")
+    assert vuln["name"] == "CVE-2021-44228"
+    assert any(
+        ref.get("source_name") == "cve" and ref.get("external_id") == "CVE-2021-44228"
+        for ref in vuln["external_references"]
+    )
+    assert any(ref.get("source_name") == "cwe" for ref in vuln["external_references"])
+
+    note = next(o for o in bundle["objects"] if o["type"] == "note")
+    assert "Bucket: kev_override" in note["content"]
+    assert "Apache Log4j2 RCE." in vuln["description"]
+    assert "ATT&CK: T1059, T1190" in note["content"]
+    assert "Exploit Status: exploit_db" in note["content"]
+    assert vuln["id"] in note["object_refs"]
+
+
+def test_write_stix_uses_stable_ids_across_runs(tmp_path):
+    """Two writes for the same CVE should produce the same Vulnerability SDO id."""
+    from ramen_cve import EnrichedCve, write_stix
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-1234",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+    )
+    p1 = tmp_path / "a.stix.json"
+    p2 = tmp_path / "b.stix.json"
+    write_stix([rec], p1)
+    write_stix([rec], p2)
+    a = json.loads(p1.read_text())
+    b = json.loads(p2.read_text())
+    a_vuln = next(o for o in a["objects"] if o["type"] == "vulnerability")
+    b_vuln = next(o for o in b["objects"] if o["type"] == "vulnerability")
+    assert a_vuln["id"] == b_vuln["id"]
+
+
+def test_extract_iocs_from_pattern_round_trips():
+    """The patterns we emit can be parsed back into the same (type, value) pairs."""
+    from ramen_cve import IocRecord, _extract_iocs_from_pattern, _ioc_to_stix_pattern
+
+    pairs = [
+        ("ipv4", "8.8.8.8"),
+        ("url", "https://evil.example/c2"),
+        ("domain", "evil.example.com"),
+        ("email", "x@y.com"),
+        ("md5", "d41d8cd98f00b204e9800998ecf8427e"),
+        ("sha1", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        ("sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ]
+    for ioc_type, value in pairs:
+        rec = IocRecord(ioc_type, value, "src", date(2024, 1, 1), "feed_pub")
+        pattern = _ioc_to_stix_pattern(rec)
+        assert pattern is not None
+        parsed = _extract_iocs_from_pattern(pattern)
+        assert parsed == [(ioc_type, value)], f"round-trip mismatch for {ioc_type}={value}"
+
+
+def test_parse_stix_bundle_extracts_vulns_and_indicators(tmp_path):
+    """parse_stix_bundle reads CVE IDs from Vulnerability SDOs and IOCs from patterns."""
+    from ramen_cve import parse_stix_bundle
+
+    bundle = {
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2021-44228",
+                "external_references": [{"source_name": "cve", "external_id": "CVE-2021-44228"}],
+            },
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000002",
+                "name": "Some narrative name",
+                "external_references": [{"source_name": "cve", "external_id": "CVE-2021-26855"}],
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000003",
+                "pattern": "[ipv4-addr:value = '203.0.113.5']",
+                "pattern_type": "stix",
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000004",
+                "pattern": "[file:hashes.'SHA-256' = "
+                "'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855']",
+                "pattern_type": "stix",
+            },
+            {"type": "identity", "id": "identity--00000000-0000-4000-8000-000000000005"},
+        ],
+    }
+    bundle_path = tmp_path / "in.stix.json"
+    bundle_path.write_text(json.dumps(bundle))
+
+    cves, iocs = parse_stix_bundle(bundle_path)
+    cve_ids = {r.cve_id for r in cves}
+    assert cve_ids == {"CVE-2021-44228", "CVE-2021-26855"}
+    by_type = {(i.ioc_type, i.value) for i in iocs}
+    assert ("ipv4", "203.0.113.5") in by_type
+    assert (
+        "sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ) in by_type
+
+
+def test_parse_stix_bundle_missing_file_raises_friendly_error(tmp_path):
+    """A missing bundle path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, parse_stix_bundle
+
+    with pytest.raises(OpmlError, match="not found"):
+        parse_stix_bundle(tmp_path / "nope.json")
+
+
+def test_parse_stix_bundle_invalid_json_raises_friendly_error(tmp_path):
+    """A malformed bundle file raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, parse_stix_bundle
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid json")
+    with pytest.raises(OpmlError, match="parse"):
+        parse_stix_bundle(p)
+
+
+def test_pull_taxii_basic_fetch_returns_records():
+    """pull_taxii hits the collection-objects endpoint and parses the response."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import pull_taxii
+
+    payload = {
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2024-1234",
+            },
+            {
+                "type": "indicator",
+                "id": "indicator--00000000-0000-4000-8000-000000000002",
+                "pattern": "[ipv4-addr:value = '198.51.100.7']",
+                "pattern_type": "stix",
+            },
+        ]
+    }
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = payload
+
+    with patch("ramen_cve.requests.get", return_value=resp) as mock_get:
+        cves, iocs = pull_taxii(
+            "https://taxii.example/api1",
+            "00000000-0000-4000-8000-000000000099",
+            username="alice",
+            password="hunter2",
+        )
+
+    assert {r.cve_id for r in cves} == {"CVE-2024-1234"}
+    assert {(i.ioc_type, i.value) for i in iocs} == {("ipv4", "198.51.100.7")}
+    call = mock_get.call_args
+    assert call.args[0].endswith(
+        "/collections/00000000-0000-4000-8000-000000000099/objects/"
+    )
+    assert call.kwargs.get("auth") == ("alice", "hunter2")
+
+
+def test_pull_taxii_network_error_returns_empty(caplog):
+    """A network error returns ([], []) and logs a warning instead of raising."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import pull_taxii
+
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("nope")
+    with patch("ramen_cve.requests.get", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        cves, iocs = pull_taxii(
+            "https://taxii.example/api1", "00000000-0000-4000-0000-000000000099",
+        )
+    assert cves == [] and iocs == []
+    assert any("TAXII pull failed" in r.message for r in caplog.records)
+
+
+def test_cli_format_choices_include_stix_and_all():
+    """--format accepts 'stix' and 'all' in addition to csv/md/both."""
+    from ramen_cve import build_parser
+
+    for fmt in ("csv", "md", "both", "stix", "all"):
+        args = build_parser().parse_args(["opml", "x.opml", "--format", fmt])
+        assert args.format == fmt
+
+
+def test_cli_stix_subcommand_parses_path_and_taxii_flags():
+    """The stix subcommand accepts an optional path and --taxii-* flags."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["stix", "bundle.json"])
+    assert args.subcommand == "stix"
+    assert str(args.path) == "bundle.json"
+
+    args2 = build_parser().parse_args([
+        "stix",
+        "--taxii-url", "https://taxii.example/api1",
+        "--taxii-collection", "00000000-0000-4000-0000-000000000001",
+    ])
+    assert args2.subcommand == "stix"
+    assert args2.taxii_url == "https://taxii.example/api1"
+    assert args2.taxii_collection == "00000000-0000-4000-0000-000000000001"
+
+
+def test_run_stix_rejects_missing_source(tmp_path, caplog):
+    """stix subcommand without path or --taxii-* args exits with code 1 and logs an error."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "stix", "--no-cache", "--out-dir", str(tmp_path), "--format", "csv",
+        ])
+    assert rc == 1
+    assert any("provide a bundle path" in r.message for r in caplog.records)
+
+
+def test_run_stix_rejects_combined_path_and_taxii(tmp_path, caplog):
+    """Providing both a path and TAXII flags must error before any HTTP work."""
+    import logging
+
+    import ramen_cve
+
+    bundle = tmp_path / "x.json"
+    bundle.write_text("{}")
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--taxii-url", "https://taxii.example/api1",
+            "--taxii-collection", "00000000-0000-4000-0000-000000000001",
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "csv",
+        ])
+    assert rc == 1
+    assert any("mutually exclusive" in r.message for r in caplog.records)
+
+
+def test_output_writes_stix_when_format_is_all(tmp_path):
+    """--format all writes csv + md + stix, with stix containing the Vulnerability SDO."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    bundle = tmp_path / "in.json"
+    bundle.write_text(json.dumps({
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2024-0001",
+            }
+        ],
+    }))
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        resp.json.return_value = {"vulnerabilities": []}
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "all",
+            "--no-exploit-lookup",
+        ])
+
+    assert rc == 0
+    stix_files = list(tmp_path.glob("ramen-cve-*.stix.json"))
+    assert len(stix_files) == 1
+    bundle_out = json.loads(stix_files[0].read_text())
+    assert any(
+        o.get("type") == "vulnerability" and o.get("name") == "CVE-2024-0001"
+        for o in bundle_out["objects"]
+    )
