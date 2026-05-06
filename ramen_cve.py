@@ -118,6 +118,13 @@ USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
 DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
 
+# TLP (Traffic Light Protocol) levels in ascending order of restrictiveness.
+# CLEAR is the public-share default; RED is "internal eyes only".
+TLP_LEVELS = ("CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED")
+
+# NATO Admiralty Code grades (e.g. "B2"). First letter A-F is source reliability;
+# digit 1-6 is information credibility. Lower letter+digit = more reliable.
+
 # Curated CWE → MITRE ATT&CK technique-ID mapping. Each CWE may map to one or
 # more techniques. This is intrinsically lossy: a CWE describes a *type* of
 # weakness and a technique describes an adversary action — the mapping captures
@@ -213,6 +220,45 @@ def _utcnow() -> datetime:
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
+def _normalize_tlp(value: str | None) -> str:
+    """Coerce a raw TLP attribute value into our canonical UPPER form, defaulting to CLEAR."""
+    if not value:
+        return "CLEAR"
+    v = value.strip().upper()
+    # Accept legacy "WHITE" → CLEAR mapping (TLP v1.0 used "WHITE").
+    if v == "WHITE":
+        return "CLEAR"
+    return v if v in TLP_LEVELS else "CLEAR"
+
+
+def _worst_tlp(a: str | None, b: str | None) -> str:
+    """Return the more-restrictive TLP between two values.
+
+    Order: RED > AMBER+STRICT > AMBER > GREEN > CLEAR.
+    """
+    na, nb = _normalize_tlp(a), _normalize_tlp(b)
+    return TLP_LEVELS[max(TLP_LEVELS.index(na), TLP_LEVELS.index(nb))]
+
+
+def _admiralty_score(grade: str | None) -> tuple[int, int]:
+    """Return a sortable tuple where (0,0) = best (A1) and (99,99) = no rating."""
+    if not grade or len(grade) != 2:
+        return (99, 99)
+    letter, digit = grade[0].upper(), grade[1]
+    if letter not in "ABCDEF" or not digit.isdigit():
+        return (99, 99)
+    return (ord(letter) - ord("A"), int(digit))
+
+
+def _best_admiralty(a: str | None, b: str | None) -> str:
+    """Return the higher-confidence (lower-tuple) Admiralty grade between two values."""
+    sa = _admiralty_score(a)
+    sb = _admiralty_score(b)
+    if sa <= sb:
+        return (a or "").upper()
+    return (b or "").upper()
+
+
 BUCKET_ACTIONS: dict[str, str] = {
     "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
     "patch_now": "Patch now — high CVSS and high EPSS; likely exploitable and high impact.",
@@ -242,21 +288,36 @@ class OpmlError(Exception):
 
 @dataclass
 class FeedEntry:
-    """A single RSS/Atom feed from an OPML file."""
+    """A single RSS/Atom feed from an OPML file.
+
+    Optional `tlp` and `admiralty` are read from data-tlp / data-admiralty
+    attributes on the OPML <outline> element (with inheritance from parent
+    outlines). They propagate through to every CveRecord and IocRecord
+    extracted from this feed.
+    """
 
     title: str
     url: str
     category: str = ""
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 @dataclass
 class CveRecord:
-    """A CVE ID as extracted from a source, before enrichment."""
+    """A CVE ID as extracted from a source, before enrichment.
+
+    `tlp` and `admiralty` carry the source's sharing/reliability tags so the
+    enriched record can surface the most-restrictive TLP and best Admiralty
+    grade across all sources that mentioned the same CVE.
+    """
 
     cve_id: str
     source: str
     first_seen: date
     first_seen_type: str  # "feed_pub" | "disclosure" | "manual_input"
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 # IOC types are kept open-coded as strings so the rest of the pipeline (CSV
@@ -310,6 +371,8 @@ class IocRecord:
     first_seen_type: str
     defanged_in_source: bool = False
     enrichments: dict[str, dict] = field(default_factory=dict)
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
 
 @dataclass
@@ -354,6 +417,10 @@ class EnrichedCve:
     linked_actors: list[ThreatActor] = field(default_factory=list)
     linked_campaigns: list[Campaign] = field(default_factory=list)
     linked_malware: list[Malware] = field(default_factory=list)
+
+    # Provenance tags propagated from the source feed(s).
+    tlp: str = "CLEAR"
+    admiralty: str = ""
 
     # Bucket
     bucket: str = "unknown"
@@ -546,6 +613,11 @@ def parse_opml(path: Path) -> list[FeedEntry]:
     Walks <outline> elements recursively. Only outlines with an xmlUrl attribute
     are returned as FeedEntry objects; folder/category outlines are traversed but
     not emitted. The category is the immediate parent outline's text attribute.
+
+    Two extension attributes are honored: data-tlp ("CLEAR"/"GREEN"/"AMBER"/
+    "AMBER+STRICT"/"RED") and data-admiralty (NATO grade, e.g. "B2"). Both are
+    inherited from parent outlines so a folder can tag every feed beneath it.
+
     Raises OpmlError for missing files or malformed XML.
     """
     if not path.exists():
@@ -562,27 +634,58 @@ def parse_opml(path: Path) -> list[FeedEntry]:
 
     entries: list[FeedEntry] = []
 
-    def _walk(node: ET.Element, category: str) -> None:
+    def _walk(node: ET.Element, category: str, tlp: str, admiralty: str) -> None:
         for outline in node.findall("outline"):
             url = outline.get("xmlUrl")
+            outline_tlp = _normalize_tlp(outline.get("data-tlp")) or tlp
+            outline_adm = (outline.get("data-admiralty") or admiralty or "").upper()
+            # If the attribute is missing on this outline, fall through to the
+            # parent's value (inheritance).
+            effective_tlp = (
+                _normalize_tlp(outline.get("data-tlp")) if outline.get("data-tlp") else tlp
+            )
             if url:
                 title = outline.get("title") or outline.get("text") or url
-                entries.append(FeedEntry(title=title, url=url, category=category))
+                entries.append(
+                    FeedEntry(
+                        title=title,
+                        url=url,
+                        category=category,
+                        tlp=effective_tlp,
+                        admiralty=outline_adm,
+                    )
+                )
             # Recurse into sub-outlines whether this outline has a URL or not
             child_category = outline.get("text") or category
-            _walk(outline, child_category if not url else category)
+            _walk(
+                outline,
+                child_category if not url else category,
+                outline_tlp,
+                outline_adm,
+            )
 
-    _walk(body, "")
+    _walk(body, "", "CLEAR", "")
     return entries
 
 
-def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str) -> list[CveRecord]:
+def extract_cves(
+    text: str,
+    source: str,
+    first_seen: date,
+    first_seen_type: str,
+    *,
+    tlp: str = "CLEAR",
+    admiralty: str = "",
+) -> list[CveRecord]:
     """Extract and deduplicate CVE IDs from arbitrary text.
 
     Normalizes all IDs to upper-case and preserves order of first occurrence.
+    Optional `tlp` and `admiralty` are stamped onto every emitted CveRecord.
     """
     seen: set[str] = set()
     records: list[CveRecord] = []
+    tlp_norm = _normalize_tlp(tlp)
+    admiralty_norm = (admiralty or "").upper()
     for match in CVE_REGEX.finditer(text):
         cve_id = match.group(0).upper()
         if cve_id not in seen:
@@ -593,6 +696,8 @@ def extract_cves(text: str, source: str, first_seen: date, first_seen_type: str)
                     source=source,
                     first_seen=first_seen,
                     first_seen_type=first_seen_type,
+                    tlp=tlp_norm,
+                    admiralty=admiralty_norm,
                 )
             )
     return records
@@ -629,6 +734,9 @@ def extract_iocs(
     source: str,
     first_seen: date,
     first_seen_type: str,
+    *,
+    tlp: str = "CLEAR",
+    admiralty: str = "",
 ) -> list[IocRecord]:
     """Extract a deduplicated list of non-CVE indicators from text.
 
@@ -644,6 +752,8 @@ def extract_iocs(
     """
     defanged_in_source = bool(_DEFANG_DETECT.search(text))
     refanged = _defang_text(text)
+    tlp_norm = _normalize_tlp(tlp)
+    admiralty_norm = (admiralty or "").upper()
 
     seen: set[tuple[str, str]] = set()
     out: list[IocRecord] = []
@@ -661,6 +771,8 @@ def extract_iocs(
                 first_seen=first_seen,
                 first_seen_type=first_seen_type,
                 defanged_in_source=defanged_in_source,
+                tlp=tlp_norm,
+                admiralty=admiralty_norm,
             )
         )
 
@@ -1116,11 +1228,17 @@ def enrich_cves(
     If `associations` is provided, each enriched record is also annotated with
     the linked actors, campaigns, and malware for that CVE.
     """
-    # Deduplicate: keep earliest first_seen per CVE
+    # Deduplicate: keep earliest first_seen per CVE, but merge TLP / Admiralty
+    # across every input record so the most-restrictive sharing tag and the
+    # highest-confidence source rating both reach the EnrichedCve.
     earliest: dict[str, CveRecord] = {}
+    merged_tlp: dict[str, str] = {}
+    merged_adm: dict[str, str] = {}
     for rec in records:
         if rec.cve_id not in earliest or rec.first_seen < earliest[rec.cve_id].first_seen:
             earliest[rec.cve_id] = rec
+        merged_tlp[rec.cve_id] = _worst_tlp(merged_tlp.get(rec.cve_id), rec.tlp)
+        merged_adm[rec.cve_id] = _best_admiralty(merged_adm.get(rec.cve_id), rec.admiralty)
 
     unique_ids = list(earliest.keys())
 
@@ -1194,6 +1312,8 @@ def enrich_cves(
                 kev_product=kev.get("product") if kev else None,
                 kev_short_description=kev.get("shortDescription") if kev else None,
                 attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
+                tlp=merged_tlp.get(cve_id, "CLEAR"),
+                admiralty=merged_adm.get(cve_id, ""),
             )
         )
 
@@ -1674,6 +1794,8 @@ CSV_COLUMNS = [
     "linked_actors",
     "linked_campaigns",
     "linked_malware",
+    "tlp",
+    "admiralty",
     "nvd_published",
     "enriched_at",
 ]
@@ -1687,6 +1809,8 @@ IOC_CSV_COLUMNS = [
     "first_seen_type",
     "defanged_in_source",
     "enrichments",
+    "tlp",
+    "admiralty",
 ]
 
 
@@ -1710,6 +1834,8 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     rec.first_seen_type,
                     str(rec.defanged_in_source).lower(),
                     json.dumps(rec.enrichments) if rec.enrichments else "",
+                    rec.tlp or "CLEAR",
+                    rec.admiralty or "",
                 ]
             )
 
@@ -2156,6 +2282,8 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     ";".join(a.name for a in rec.linked_actors),
                     ";".join(c.name for c in rec.linked_campaigns),
                     ";".join(m.name for m in rec.linked_malware),
+                    rec.tlp or "CLEAR",
+                    rec.admiralty or "",
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -2366,6 +2494,11 @@ def write_markdown(
                     "- **Linked Campaigns:** "
                     + ", ".join(_md_safe(c.name) for c in rec.linked_campaigns)
                 )
+            if (rec.tlp and rec.tlp != "CLEAR") or rec.admiralty:
+                tlp_disp = f"TLP:{rec.tlp}" if rec.tlp else ""
+                adm_disp = f"Admiralty {rec.admiralty}" if rec.admiralty else ""
+                provenance = " · ".join(p for p in (tlp_disp, adm_disp) if p)
+                lines.append(f"- **Provenance:** {provenance}")
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:
@@ -2471,6 +2604,14 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         "--no-enrich-iocs",
         action="store_true",
         help="Skip per-IOC enrichment (VirusTotal / AbuseIPDB / OTX / MalwareBazaar).",
+    )
+    parser.add_argument(
+        "--allow-tlp-red",
+        action="store_true",
+        help=(
+            "Permit writing TLP:RED records to disk. Default behavior is to "
+            "STRIP any TLP:RED records before output and log a warning."
+        ),
     )
     parser.add_argument(
         "--associations-file",
@@ -2813,6 +2954,9 @@ def _output(
     When `iocs` is non-empty and --format includes csv, an additional
     `<basename>-iocs.csv` file is written next to the main CVE CSV. The
     Markdown report grows an Indicators of Compromise section regardless.
+
+    TLP:RED records are stripped from the output unless --allow-tlp-red was
+    passed; the count of stripped records is logged at WARNING.
     """
     # Microsecond resolution makes single-process collisions essentially
     # impossible; the -N suffix loop in _unique_output_path covers
@@ -2822,6 +2966,20 @@ def _output(
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     iocs = iocs or []
+
+    if not getattr(args, "allow_tlp_red", False):
+        before = (len(enriched), len(iocs))
+        enriched = [r for r in enriched if (r.tlp or "CLEAR").upper() != "RED"]
+        iocs = [i for i in iocs if (i.tlp or "CLEAR").upper() != "RED"]
+        stripped_cve = before[0] - len(enriched)
+        stripped_ioc = before[1] - len(iocs)
+        if stripped_cve or stripped_ioc:
+            _log.warning(
+                "Stripped %d TLP:RED CVE record(s) and %d TLP:RED IOC record(s); "
+                "pass --allow-tlp-red to include them.",
+                stripped_cve,
+                stripped_ioc,
+            )
 
     if args.format in ("csv", "both", "all"):
         csv_path = _unique_output_path(out_dir, ts, "csv")
@@ -2881,8 +3039,14 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
                     item.get("content", [{}])[0].get("value", "") if item.get("content") else "",
                 ]
             )
-            records.extend(extract_cves(text, feed_source, item_date, "feed_pub"))
-            iocs.extend(extract_iocs(text, feed_source, item_date, "feed_pub"))
+            records.extend(extract_cves(
+                text, feed_source, item_date, "feed_pub",
+                tlp=entry.tlp, admiralty=entry.admiralty,
+            ))
+            iocs.extend(extract_iocs(
+                text, feed_source, item_date, "feed_pub",
+                tlp=entry.tlp, admiralty=entry.admiralty,
+            ))
 
     iocs = _dedupe_iocs(iocs)
 
@@ -2971,9 +3135,9 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
     """Collapse duplicates across multiple feed items into one record per (type, value).
 
-    Keeps the earliest first_seen, OR-merges defanged_in_source, and joins
-    distinct sources with '; ' so the resulting IOC carries provenance from
-    every feed it appeared in.
+    Keeps the earliest first_seen, OR-merges defanged_in_source, joins distinct
+    sources with '; ', and propagates the worst-TLP + best-Admiralty tags so
+    the merged IOC carries provenance from every feed it appeared in.
     """
     by_key: dict[tuple[str, str], IocRecord] = {}
     for ioc in iocs:
@@ -2987,6 +3151,8 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
                 first_seen=ioc.first_seen,
                 first_seen_type=ioc.first_seen_type,
                 defanged_in_source=ioc.defanged_in_source,
+                tlp=ioc.tlp,
+                admiralty=ioc.admiralty,
             )
             continue
         if ioc.first_seen < existing.first_seen:
@@ -2996,6 +3162,8 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
             existing.defanged_in_source = True
         if ioc.source and ioc.source not in existing.source.split("; "):
             existing.source = f"{existing.source}; {ioc.source}"
+        existing.tlp = _worst_tlp(existing.tlp, ioc.tlp)
+        existing.admiralty = _best_admiralty(existing.admiralty, ioc.admiralty)
     return list(by_key.values())
 
 

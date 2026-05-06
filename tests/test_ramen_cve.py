@@ -3464,6 +3464,308 @@ def test_cli_no_enrich_iocs_flag_parses():
     assert args.no_enrich_iocs is True
 
 
+# ---------------------------------------------------------------------------
+# Slice 16 — TLP + Admiralty source confidence
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tlp_default_clear():
+    """Empty / None / unknown TLP collapses to CLEAR; legacy WHITE → CLEAR."""
+    from ramen_cve import _normalize_tlp
+
+    for v in (None, "", "rubbish", "white"):
+        assert _normalize_tlp(v) == "CLEAR"
+    assert _normalize_tlp("amber") == "AMBER"
+    assert _normalize_tlp("RED") == "RED"
+
+
+def test_worst_tlp_returns_more_restrictive():
+    """RED > AMBER+STRICT > AMBER > GREEN > CLEAR."""
+    from ramen_cve import _worst_tlp
+
+    assert _worst_tlp("CLEAR", "GREEN") == "GREEN"
+    assert _worst_tlp("AMBER", "GREEN") == "AMBER"
+    assert _worst_tlp("AMBER+STRICT", "AMBER") == "AMBER+STRICT"
+    assert _worst_tlp("RED", "AMBER+STRICT") == "RED"
+    assert _worst_tlp("CLEAR", None) == "CLEAR"
+
+
+def test_admiralty_score_handles_invalid_grade():
+    """Invalid grades sort to the worst possible bucket."""
+    from ramen_cve import _admiralty_score
+
+    assert _admiralty_score("A1") == (0, 1)
+    assert _admiralty_score("F6") == (5, 6)
+    assert _admiralty_score("z9") == (99, 99)
+    assert _admiralty_score("") == (99, 99)
+    assert _admiralty_score(None) == (99, 99)
+    assert _admiralty_score("A") == (99, 99)  # too short
+
+
+def test_best_admiralty_returns_higher_confidence_grade():
+    """Lower-tuple (more reliable) grade wins; 'X' loses to 'B2'."""
+    from ramen_cve import _best_admiralty
+
+    assert _best_admiralty("A1", "B2") == "A1"
+    assert _best_admiralty("B2", "A1") == "A1"
+    assert _best_admiralty("", "B2") == "B2"
+    assert _best_admiralty("B2", "") == "B2"
+
+
+def test_parse_opml_reads_data_tlp_and_admiralty(tmp_path):
+    """parse_opml stamps each FeedEntry with the data-* attributes from the outline."""
+    from ramen_cve import parse_opml
+
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(textwrap.dedent("""
+        <?xml version="1.0"?>
+        <opml version="2.0"><body>
+        <outline text="Trusted" data-tlp="GREEN" data-admiralty="A2">
+            <outline type="rss" text="Feed-A" xmlUrl="https://a.example/feed"/>
+        </outline>
+        <outline type="rss" text="Feed-B" xmlUrl="https://b.example/feed"
+                 data-tlp="amber" data-admiralty="C3"/>
+        </body></opml>
+    """).strip())
+
+    entries = parse_opml(opml)
+    by_url = {e.url: e for e in entries}
+    a = by_url["https://a.example/feed"]
+    b = by_url["https://b.example/feed"]
+    # Inheritance: Feed-A has no data-* of its own, takes parent's GREEN/A2
+    assert a.tlp == "GREEN"
+    assert a.admiralty == "A2"
+    # Override: Feed-B sets its own AMBER/C3
+    assert b.tlp == "AMBER"
+    assert b.admiralty == "C3"
+
+
+def test_parse_opml_default_tlp_clear(tmp_path):
+    """Outlines without data-tlp default to CLEAR and admiralty defaults to ''."""
+    from ramen_cve import parse_opml
+
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body>'
+        '<outline type="rss" text="X" xmlUrl="https://x.example/feed"/>'
+        "</body></opml>"
+    )
+    e = parse_opml(opml)[0]
+    assert e.tlp == "CLEAR"
+    assert e.admiralty == ""
+
+
+def test_extract_cves_stamps_tlp_and_admiralty():
+    """extract_cves(tlp=..., admiralty=...) carries the tags onto each CveRecord."""
+    from ramen_cve import extract_cves
+
+    out = extract_cves(
+        "see CVE-2021-44228", "src", TODAY, "feed_pub",
+        tlp="amber", admiralty="B2",
+    )
+    assert out[0].tlp == "AMBER"
+    assert out[0].admiralty == "B2"
+
+
+def test_extract_iocs_stamps_tlp_and_admiralty():
+    """extract_iocs(tlp=..., admiralty=...) carries the tags onto each IocRecord."""
+    from ramen_cve import extract_iocs
+
+    out = extract_iocs(
+        "Beacon to 8.8.8.8", "src", TODAY, "feed_pub",
+        tlp="green", admiralty="A1",
+    )
+    ips = [i for i in out if i.ioc_type == "ipv4"]
+    assert ips[0].tlp == "GREEN"
+    assert ips[0].admiralty == "A1"
+
+
+def test_enrich_cves_propagates_worst_tlp_across_duplicates():
+    """Two CveRecords for the same CVE merge to the more-restrictive TLP."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [
+        CveRecord("CVE-2021-44228", "feed-a", date(2024, 1, 1), "feed_pub",
+                  tlp="GREEN", admiralty="C3"),
+        CveRecord("CVE-2021-44228", "feed-b", date(2024, 1, 5), "feed_pub",
+                  tlp="AMBER", admiralty="A1"),
+    ]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None)
+    assert len(result) == 1
+    # Worst TLP wins
+    assert result[0].tlp == "AMBER"
+    # Best Admiralty wins
+    assert result[0].admiralty == "A1"
+
+
+def test_dedupe_iocs_propagates_worst_tlp_and_best_admiralty():
+    """The same IOC across two feeds keeps worst-TLP and best-Admiralty."""
+    from ramen_cve import IocRecord, _dedupe_iocs
+
+    iocs = [
+        IocRecord("ipv4", "8.8.8.8", "f-a", date(2024, 1, 1), "feed_pub",
+                  tlp="CLEAR", admiralty="C3"),
+        IocRecord("ipv4", "8.8.8.8", "f-b", date(2024, 1, 2), "feed_pub",
+                  tlp="AMBER", admiralty="A1"),
+    ]
+    out = _dedupe_iocs(iocs)
+    assert len(out) == 1
+    assert out[0].tlp == "AMBER"
+    assert out[0].admiralty == "A1"
+
+
+def test_write_csv_includes_tlp_and_admiralty_columns(tmp_path):
+    """CSV header and rows carry tlp + admiralty."""
+    from ramen_cve import EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="AMBER", admiralty="B2",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "tlp" in header and "admiralty" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["tlp"] == "AMBER"
+    assert row["admiralty"] == "B2"
+
+
+def test_write_iocs_csv_includes_tlp_and_admiralty(tmp_path):
+    """IOC CSV carries tlp + admiralty per record."""
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    rec = IocRecord(
+        "ipv4", "8.8.8.8", "src", date(2024, 1, 1), "feed_pub",
+        tlp="GREEN", admiralty="B2",
+    )
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    assert "tlp" in rows[0] and "admiralty" in rows[0]
+    row = dict(zip(rows[0], rows[1], strict=True))
+    assert row["tlp"] == "GREEN"
+    assert row["admiralty"] == "B2"
+    assert IOC_CSV_COLUMNS[-2:] == ["tlp", "admiralty"]
+
+
+def test_write_markdown_renders_provenance_when_set(tmp_path):
+    """Provenance line appears when tlp != CLEAR or admiralty is set."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="AMBER", admiralty="B2",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Provenance:** TLP:AMBER · Admiralty B2" in text
+
+
+def test_write_markdown_omits_provenance_for_clear_unrated(tmp_path):
+    """No Provenance line when tlp=CLEAR and admiralty=''."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="patch_now",
+        tlp="CLEAR", admiralty="",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "**Provenance:**" not in text
+
+
+def test_output_strips_tlp_red_by_default(tmp_path, caplog):
+    """TLP:RED records are excluded from output unless --allow-tlp-red was passed."""
+    import argparse
+    import logging
+
+    from ramen_cve import EnrichedCve, IocRecord, _output
+
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, allow_tlp_red=False,
+    )
+    red_cve = EnrichedCve(
+        cve_id="CVE-2099-RED", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="RED",
+    )
+    green_cve = EnrichedCve(
+        cve_id="CVE-2099-GREEN", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="GREEN",
+    )
+    red_ioc = IocRecord("ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub", tlp="RED")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        _output([red_cve, green_cve], args, {"version": "0.1"}, iocs=[red_ioc])
+
+    csv_files = list(tmp_path.glob("ramen-cve-*.csv"))
+    assert len(csv_files) == 1
+    body = csv_files[0].read_text()
+    assert "CVE-2099-GREEN" in body
+    assert "CVE-2099-RED" not in body
+    assert any("TLP:RED" in r.message for r in caplog.records)
+
+
+def test_output_includes_tlp_red_when_flag_passed(tmp_path):
+    """--allow-tlp-red preserves TLP:RED records in the output."""
+    import argparse
+
+    from ramen_cve import EnrichedCve, _output
+
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, allow_tlp_red=True,
+    )
+    rec = EnrichedCve(
+        cve_id="CVE-2099-RED", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        tlp="RED",
+    )
+    _output([rec], args, {"version": "0.1"})
+    csv_files = list(tmp_path.glob("ramen-cve-*.csv"))
+    assert len(csv_files) == 1
+    body = csv_files[0].read_text()
+    assert "CVE-2099-RED" in body
+
+
+def test_cli_allow_tlp_red_flag_parses():
+    """--allow-tlp-red is accepted at the parser level."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--allow-tlp-red"])
+    assert args.allow_tlp_red is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.allow_tlp_red is False
+
+
 def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
     """--format all produces a *-sigma directory containing one YAML per qualifying CVE."""
     from unittest.mock import MagicMock, patch
