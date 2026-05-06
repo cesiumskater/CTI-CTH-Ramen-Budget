@@ -1,0 +1,41 @@
+# Sample GitHub Actions workflow that runs ramen-cve on a schedule and uploads
+# the resulting CSV / Markdown / STIX / Sigma artifacts. Copy this file into
+# .github/workflows/ in your fork to enable it. Set NVD_API_KEY (and optional
+# enrichment keys) as repository secrets first.
+
+name: Daily CVE triage
+
+on:
+  schedule:
+    # 06:15 UTC every day. cron uses UTC; adjust to your team's morning.
+    - cron: "15 6 * * *"
+  workflow_dispatch: {}  # Allow manual runs from the Actions tab.
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run ramen-cve against bundled OPML
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+          ABUSEIPDB_API_KEY: ${{ secrets.ABUSEIPDB_API_KEY }}
+          OTX_API_KEY: ${{ secrets.OTX_API_KEY }}
+          # Optional dispatch destinations:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python ramen_cve.py opml examples/sample.opml \
+            --format all \
+            --out-dir reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramen-cve-reports
+          path: reports/

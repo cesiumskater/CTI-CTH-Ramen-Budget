@@ -4665,6 +4665,161 @@ def test_write_markdown_diamond_line_skipped_for_low_priority(tmp_path):
     assert "Diamond Model" not in text
 
 
+# ---------------------------------------------------------------------------
+# Slice 21 — Historical trending & scheduled runs
+# ---------------------------------------------------------------------------
+
+
+def patch_cache_path(db_path):
+    """Context manager that points ramen_cve.DEFAULT_CACHE_PATH at a test DB."""
+    from unittest.mock import patch
+
+    return patch("ramen_cve.DEFAULT_CACHE_PATH", str(db_path))
+
+
+def test_cache_record_run_round_trip():
+    """Cache.record_run + get_runs round-trip a sequence in chronological order."""
+    import time as _time
+
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    c.record_run("CVE-2021-44228", "patch_now", 10.0, 0.50)
+    _time.sleep(0.01)  # ensure distinct ts_iso (record_run uses 1s resolution)
+    c.record_run("CVE-2021-44228", "kev_override", 10.0, 0.97)
+    runs = c.get_runs("CVE-2021-44228")
+    # The second call may or may not produce a new ts_iso row depending on
+    # second-level resolution; either way the latest bucket should be reflected.
+    assert len(runs) >= 1
+    assert runs[-1]["bucket"] == "kev_override"
+    assert runs[-1]["epss_score"] == 0.97
+
+
+def test_cache_get_runs_unknown_returns_empty():
+    """Asking for runs on a CVE we've never seen returns []."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    assert c.get_runs("CVE-2099-9999") == []
+
+
+def test_sparkline_basic_mapping():
+    """_sparkline maps low/high to the bottom/top characters of the ramp."""
+    from ramen_cve import _sparkline
+
+    out = _sparkline([0.0, 1.0])
+    assert out[0] == "▁"  # low
+    assert out[-1] == "█"  # high
+
+
+def test_sparkline_handles_none_and_constant():
+    """None values render as a space; constant values render as the lowest char."""
+    from ramen_cve import _sparkline
+
+    assert _sparkline([1.0, None, 2.0])[1] == " "
+    # All-equal is a degenerate range; output should still produce 1 char per
+    # input without crashing.
+    out = _sparkline([0.5, 0.5, 0.5])
+    assert len(out) == 3
+
+
+def test_sparkline_empty_input():
+    """An empty list returns an empty string."""
+    from ramen_cve import _sparkline
+
+    assert _sparkline([]) == ""
+    assert _sparkline([None, None]) == ""
+
+
+def test_record_runs_writes_one_row_per_enriched(tmp_path):
+    """_record_runs walks the enriched list and inserts one row per CVE."""
+    from ramen_cve import Cache, EnrichedCve, _record_runs
+
+    c = Cache(":memory:")
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228", source="x",
+            first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+            cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855", source="x",
+            first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+            cvss_score=9.8, epss_score=0.97, bucket="patch_now",
+        ),
+    ]
+    _record_runs(c, recs)
+    assert len(c.get_runs("CVE-2021-44228")) == 1
+    assert len(c.get_runs("CVE-2021-26855")) == 1
+
+
+def test_run_trend_no_history_logs_info(tmp_path, caplog):
+    """`trend` with no history logs an INFO and exits 0."""
+    import logging
+
+    import ramen_cve
+
+    db = tmp_path / "cache.db"
+    with (
+        caplog.at_level(logging.INFO, logger="ramen_cve"),
+        patch_cache_path(db),
+    ):
+        rc = ramen_cve.main(["trend", "CVE-2099-1234"])
+    assert rc == 0
+    assert any("No historical runs" in r.message for r in caplog.records)
+
+
+def test_run_trend_prints_sparkline_and_table(tmp_path, capsys):
+    """`trend` prints headers, sparklines, and a Markdown table after seeding history."""
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    c = Cache(str(db))
+    c.record_run("CVE-2021-44228", "watch_closely", 10.0, 0.05)
+    c._conn.execute(
+        "INSERT INTO runs VALUES (?, ?, ?, ?, ?)",
+        ("CVE-2021-44228", "2024-06-01T12:00:00", "patch_now", 10.0, 0.50),
+    )
+    c._conn.execute(
+        "INSERT INTO runs VALUES (?, ?, ?, ?, ?)",
+        ("CVE-2021-44228", "2024-06-15T12:00:00", "kev_override", 10.0, 0.97),
+    )
+    c._conn.commit()
+
+    with patch_cache_path(db):
+        rc = ramen_cve.main(["trend", "CVE-2021-44228"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "CVE-2021-44228" in out
+    assert "EPSS:" in out and "CVSS:" in out
+    assert "| Run timestamp (UTC) | Bucket | CVSS | EPSS |" in out
+    assert "patch_now" in out
+    assert "kev_override" in out
+
+
+def test_run_trend_invalid_cve_id_exits_1(tmp_path, caplog):
+    """A bad CVE ID is rejected by the argparse type before the runner runs."""
+    import subprocess
+
+    result = subprocess.run(
+        [".venv/bin/python", "ramen_cve.py", "trend", "NOT-A-CVE"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_cli_trend_subcommand_parses():
+    """`trend CVE-X` parses to subcommand=trend with cve_id set."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["trend", "CVE-2021-44228"])
+    assert args.subcommand == "trend"
+    assert args.cve_id == "CVE-2021-44228"
+
+
 def test_write_markdown_diamond_uses_unknown_when_unset(tmp_path):
     """Missing adversary / infrastructure render as italic placeholders."""
     from ramen_cve import EnrichedCve, write_markdown

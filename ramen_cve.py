@@ -588,6 +588,14 @@ class Cache:
             fetched_at  TEXT NOT NULL,
             PRIMARY KEY (enricher, ioc_type, value)
         );
+        CREATE TABLE IF NOT EXISTS runs (
+            cve_id      TEXT NOT NULL,
+            ts_iso      TEXT NOT NULL,
+            bucket      TEXT NOT NULL,
+            cvss_score  REAL,
+            epss_score  REAL,
+            PRIMARY KEY (cve_id, ts_iso)
+        );
     """
 
     def __init__(self, path: Path | str, ttl_hours: int = DEFAULT_CACHE_TTL_HOURS) -> None:
@@ -709,8 +717,38 @@ class Cache:
         )
         self._conn.commit()
 
+    def record_run(
+        self,
+        cve_id: str,
+        bucket: str,
+        cvss_score: float | None,
+        epss_score: float | None,
+    ) -> None:
+        """Append (or update) a single CVE's snapshot for this run."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?)",
+            (cve_id, _utcnow().isoformat(timespec="seconds"), bucket, cvss_score, epss_score),
+        )
+        self._conn.commit()
+
+    def get_runs(self, cve_id: str) -> list[dict]:
+        """Return every recorded run for `cve_id` in chronological order."""
+        rows = self._conn.execute(
+            "SELECT ts_iso, bucket, cvss_score, epss_score FROM runs "
+            "WHERE cve_id = ? ORDER BY ts_iso ASC",
+            (cve_id,),
+        ).fetchall()
+        return [
+            {"ts_iso": r[0], "bucket": r[1], "cvss_score": r[2], "epss_score": r[3]}
+            for r in rows
+        ]
+
     def purge(self) -> None:
-        """Delete entries older than the TTL from all tables."""
+        """Delete entries older than the TTL from all tables.
+
+        Note: the `runs` table is intentionally NOT purged — historical
+        trending is the whole point of the table.
+        """
         cutoff = (_utcnow() - self._ttl).isoformat()
         self._conn.execute("DELETE FROM nvd_cache WHERE fetched_at < ?", (cutoff,))
         self._conn.execute("DELETE FROM epss_cache WHERE fetched_at < ?", (cutoff,))
@@ -3167,6 +3205,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
     )
 
+    # trend subcommand: historical bucket / CVSS / EPSS for one CVE
+    trend_p = sub.add_parser(
+        "trend", help="Show historical bucket / CVSS / EPSS trend for one CVE."
+    )
+    trend_p.add_argument("cve_id", type=_validate_cve_id, metavar="CVE-ID")
+    trend_p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Use an in-memory cache (yields no history, mostly useful for tests).",
+    )
+    trend_p.add_argument("--quiet", action="store_true")
+    trend_p.add_argument("--verbose", action="store_true")
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=Path, help="Path to a STIX bundle JSON file.")
@@ -3397,6 +3448,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "hunt":
         return _run_hunt(args, cache=None, api_key=None)  # type: ignore[arg-type]
 
+    # The trend subcommand is also a pure read-from-cache workflow — it has
+    # --no-cache but none of the analysis flags _validate_args expects.
+    if args.subcommand == "trend":
+        cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
+        return _run_trend(args, Cache(cache_path), api_key=None)
+
     _validate_args(args, parser)
 
     cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
@@ -3421,6 +3478,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_cve(args, cache, api_key)
     if args.subcommand == "stix":
         return _run_stix(args, cache, api_key)
+    if args.subcommand == "trend":
+        return _run_trend(args, cache, api_key)
     return 1
 
 
@@ -3613,6 +3672,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -3674,6 +3734,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -3763,6 +3824,7 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -3904,6 +3966,62 @@ def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     return 1
 
 
+_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[float | None]) -> str:
+    """Render a list of numbers as a unicode sparkline; None renders as a space."""
+    real = [v for v in values if v is not None]
+    if not real:
+        return ""
+    lo, hi = min(real), max(real)
+    span = hi - lo if hi > lo else 1.0
+    out: list[str] = []
+    for v in values:
+        if v is None:
+            out.append(" ")
+            continue
+        idx = int(((v - lo) / span) * (len(_SPARKLINE_CHARS) - 1))
+        out.append(_SPARKLINE_CHARS[max(0, min(idx, len(_SPARKLINE_CHARS) - 1))])
+    return "".join(out)
+
+
+def _record_runs(cache: Cache, enriched: list[EnrichedCve]) -> None:
+    """Append a snapshot row per enriched CVE so `trend` has history to draw."""
+    for rec in enriched:
+        cache.record_run(rec.cve_id, rec.bucket, rec.cvss_score, rec.epss_score)
+
+
+def _run_trend(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Print a Markdown-friendly historical trend for one CVE."""
+    cve_id = (args.cve_id or "").upper()
+    if not CVE_REGEX.fullmatch(cve_id):
+        _log.error("trend: %r is not a valid CVE ID", args.cve_id)
+        return 1
+    runs = cache.get_runs(cve_id)
+    if not runs:
+        _log.info(
+            "No historical runs recorded for %s. Run a triage with the same "
+            "cache file (default: .ramen-cache.db) to seed history.",
+            cve_id,
+        )
+        return 0
+    epss_values = [r["epss_score"] for r in runs]
+    cvss_values = [r["cvss_score"] for r in runs]
+    print(f"# {cve_id} — {len(runs)} historical run(s)")
+    print()
+    print(f"EPSS: {_sparkline(epss_values)}")
+    print(f"CVSS: {_sparkline(cvss_values)}")
+    print()
+    print("| Run timestamp (UTC) | Bucket | CVSS | EPSS |")
+    print("| --- | --- | --- | --- |")
+    for r in runs:
+        cv = f"{r['cvss_score']:.1f}" if r["cvss_score"] is not None else "N/A"
+        ep = f"{r['epss_score']:.4f}" if r["epss_score"] is not None else "N/A"
+        print(f"| {r['ts_iso']} | {r['bucket']} | {cv} | {ep} |")
+    return 0
+
+
 def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Execute the stix subcommand (file or TAXII source).
 
@@ -3946,6 +4064,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
