@@ -2730,6 +2730,248 @@ def test_run_stix_rejects_combined_path_and_taxii(tmp_path, caplog):
     assert any("mutually exclusive" in r.message for r in caplog.records)
 
 
+# ---------------------------------------------------------------------------
+# Slice 13 — Threat actor / campaign / malware modeling
+# ---------------------------------------------------------------------------
+
+
+def _write_assoc_file(tmp_path: Path, payload: dict) -> Path:
+    p = tmp_path / "assoc.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def test_load_associations_basic(tmp_path):
+    """A well-formed associations file is loaded into ThreatActor / Malware / Campaign objects."""
+    from ramen_cve import Campaign, Malware, ThreatActor, load_associations
+
+    payload = {
+        "CVE-2021-44228": {
+            "actors": [{"name": "APT41", "aliases": ["Wicked Panda"], "url": "https://x"}],
+            "malware": [{"name": "Cobalt Strike"}],
+            "campaigns": [{"name": "Holiday RCE"}],
+        }
+    }
+    p = _write_assoc_file(tmp_path, payload)
+    out = load_associations(p)
+    assert "CVE-2021-44228" in out
+    actors = out["CVE-2021-44228"]["actors"]
+    assert len(actors) == 1 and isinstance(actors[0], ThreatActor)
+    assert actors[0].name == "APT41" and actors[0].aliases == ["Wicked Panda"]
+    assert isinstance(out["CVE-2021-44228"]["malware"][0], Malware)
+    assert isinstance(out["CVE-2021-44228"]["campaigns"][0], Campaign)
+
+
+def test_load_associations_normalizes_cve_case(tmp_path):
+    """Lower-case CVE keys are normalized to upper-case in the loaded dict."""
+    from ramen_cve import load_associations
+
+    p = _write_assoc_file(tmp_path, {"cve-2021-44228": {"actors": [{"name": "x"}]}})
+    out = load_associations(p)
+    assert "CVE-2021-44228" in out
+
+
+def test_load_associations_skips_invalid_cve_keys(tmp_path):
+    """Non-CVE keys (e.g. _README) are silently skipped."""
+    from ramen_cve import load_associations
+
+    p = _write_assoc_file(tmp_path, {
+        "_README": "comment",
+        "CVE-2021-44228": {"actors": []},
+    })
+    out = load_associations(p)
+    assert "_README" not in out
+    assert "CVE-2021-44228" in out
+
+
+def test_load_associations_missing_file_returns_empty(tmp_path, caplog):
+    """A missing file yields an empty dict and a WARNING (no exception)."""
+    import logging
+
+    from ramen_cve import load_associations
+
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_associations(tmp_path / "does-not-exist.json")
+    assert out == {}
+    assert any("not found" in r.message for r in caplog.records)
+
+
+def test_load_associations_invalid_json_returns_empty(tmp_path, caplog):
+    """A malformed file yields {} + WARNING, never crashes the run."""
+    import logging
+
+    from ramen_cve import load_associations
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not: valid json")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_associations(p)
+    assert out == {}
+    assert any("Could not parse associations" in r.message for r in caplog.records)
+
+
+def test_default_associations_file_loads():
+    """The bundled associations.json is well-formed and seeds at least one CVE."""
+    from ramen_cve import DEFAULT_ASSOCIATIONS_PATH, load_associations
+
+    assert DEFAULT_ASSOCIATIONS_PATH.exists()
+    out = load_associations(DEFAULT_ASSOCIATIONS_PATH)
+    assert "CVE-2021-44228" in out
+    assert any(a.name == "APT41" for a in out["CVE-2021-44228"]["actors"])
+
+
+def test_enrich_cves_attaches_associations():
+    """enrich_cves(associations=...) populates linked_actors / linked_malware / linked_campaigns."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, ThreatActor, enrich_cves
+
+    associations = {
+        "CVE-2021-44228": {
+            "actors": [ThreatActor(name="APT41")],
+            "campaigns": [],
+            "malware": [],
+        }
+    }
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations=associations)
+
+    assert len(result) == 1
+    assert [a.name for a in result[0].linked_actors] == ["APT41"]
+
+
+def test_enrich_cves_no_match_leaves_linked_fields_empty():
+    """A CVE not present in the associations dict has empty linked_* lists."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, enrich_cves
+
+    cache = _mem_cache()
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = _load_fixture("epss_batch.json")
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = _load_fixture("nvd_log4shell_v31.json")
+        return resp
+
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations={})
+    assert result[0].linked_actors == []
+
+
+def test_write_csv_includes_linked_columns(tmp_path):
+    """CSV header includes linked_actors / linked_campaigns / linked_malware."""
+    from ramen_cve import EnrichedCve, ThreatActor, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_actors=[ThreatActor("APT41"), ThreatActor("HAFNIUM")],
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "linked_actors" in header
+    assert "linked_campaigns" in header
+    assert "linked_malware" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["linked_actors"] == "APT41;HAFNIUM"
+
+
+def test_write_markdown_renders_actors_and_cross_tab(tmp_path):
+    """Markdown shows per-CVE Linked Actors and a Linked Adversaries cross-tab."""
+    from ramen_cve import EnrichedCve, ThreatActor, write_markdown
+
+    recs = [
+        EnrichedCve(
+            cve_id="CVE-2021-44228",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=10.0,
+            epss_score=0.97,
+            bucket="kev_override",
+            linked_actors=[
+                ThreatActor("APT41", url="https://attack.mitre.org/groups/G0096/"),
+                ThreatActor("HAFNIUM"),
+            ],
+        ),
+        EnrichedCve(
+            cve_id="CVE-2021-26855",
+            source="x",
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=9.8,
+            epss_score=0.97,
+            bucket="patch_now",
+            linked_actors=[ThreatActor("HAFNIUM")],
+        ),
+    ]
+    out = tmp_path / "report.md"
+    write_markdown(recs, out, METADATA)
+    text = out.read_text()
+    # Per-CVE
+    assert "**Linked Actors:**" in text
+    assert "[APT41](https://attack.mitre.org/groups/G0096/)" in text
+    # Cross-tab
+    assert "## Linked Adversaries" in text
+    assert "| HAFNIUM | 2 |" in text
+    assert "| APT41 | 1 |" in text
+
+
+def test_write_markdown_no_actor_section_when_empty(tmp_path):
+    """If no enriched record has linked_actors, the cross-tab is omitted."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        linked_actors=[],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "## Linked Adversaries" not in text
+
+
+def test_cli_associations_file_flag_parses(tmp_path):
+    """--associations-file takes a path that survives parsing."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args([
+        "cve", "CVE-2021-44228",
+        "--associations-file", str(tmp_path / "x.json"),
+    ])
+    assert str(args.associations_file).endswith("x.json")
+
+
 def test_output_writes_stix_when_format_is_all(tmp_path):
     """--format all writes csv + md + stix, with stix containing the Vulnerability SDO."""
     from unittest.mock import MagicMock, patch

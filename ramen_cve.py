@@ -116,6 +116,8 @@ DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
+DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
+
 # Curated CWE → MITRE ATT&CK technique-ID mapping. Each CWE may map to one or
 # more techniques. This is intrinsically lossy: a CWE describes a *type* of
 # weakness and a technique describes an adversary action — the mapping captures
@@ -261,6 +263,33 @@ class CveRecord:
 # columns, Markdown sections) can grow new types without a schema migration.
 # Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
 @dataclass
+class ThreatActor:
+    """A named adversary group; subset of the MITRE ATT&CK Groups schema."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
+class Campaign:
+    """A discrete intrusion campaign attributed to one or more actors."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
+class Malware:
+    """A named malware family or tool used in attacks."""
+
+    name: str
+    aliases: list[str] = field(default_factory=list)
+    url: str | None = None
+
+
+@dataclass
 class IocRecord:
     """A non-CVE indicator extracted from feed/URL text.
 
@@ -315,6 +344,11 @@ class EnrichedCve:
 
     # Public exploit / PoC availability signal: one of EXPLOIT_STATUS_VALUES.
     exploit_status: str = "none"
+
+    # Adversary attribution joined from associations.json (or a user override).
+    linked_actors: list[ThreatActor] = field(default_factory=list)
+    linked_campaigns: list[Campaign] = field(default_factory=list)
+    linked_malware: list[Malware] = field(default_factory=list)
 
     # Bucket
     bucket: str = "unknown"
@@ -971,6 +1005,59 @@ def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
     return catalog
 
 
+def _build_actor(d: dict) -> ThreatActor:
+    return ThreatActor(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                       url=d.get("url"))
+
+
+def _build_campaign(d: dict) -> Campaign:
+    return Campaign(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                    url=d.get("url"))
+
+
+def _build_malware(d: dict) -> Malware:
+    return Malware(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
+                   url=d.get("url"))
+
+
+def load_associations(
+    path: Path | None = None,
+) -> dict[str, dict[str, list]]:
+    """Load CVE → adversary associations from a JSON file.
+
+    Returns a dict keyed on upper-case CVE ID. Each value has the shape:
+        {"actors": [ThreatActor], "campaigns": [Campaign], "malware": [Malware]}
+
+    If `path` is None we fall back to the bundled DEFAULT_ASSOCIATIONS_PATH;
+    if that file is missing or malformed we return an empty dict and log a
+    warning so the rest of the pipeline keeps working with empty linked_*
+    fields.
+    """
+    target = path or DEFAULT_ASSOCIATIONS_PATH
+    if not target.exists():
+        _log.warning("Associations file not found: %s; skipping adversary join.", target)
+        return {}
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("Could not parse associations file %s: %s", target, exc)
+        return {}
+
+    out: dict[str, dict[str, list]] = {}
+    for cve_id, payload in raw.items():
+        if not isinstance(payload, dict) or not CVE_REGEX.fullmatch(cve_id.upper()):
+            continue
+        actors_in = payload.get("actors") or []
+        campaigns_in = payload.get("campaigns") or []
+        malware_in = payload.get("malware") or []
+        out[cve_id.upper()] = {
+            "actors": [_build_actor(a) for a in actors_in if isinstance(a, dict)],
+            "campaigns": [_build_campaign(c) for c in campaigns_in if isinstance(c, dict)],
+            "malware": [_build_malware(m) for m in malware_in if isinstance(m, dict)],
+        }
+    return out
+
+
 def _parse_kev_due_date(value: str | None) -> date | None:
     """Parse a KEV dueDate string (YYYY-MM-DD) tolerating malformed input."""
     if not value:
@@ -986,11 +1073,15 @@ def enrich_cves(
     records: list[CveRecord],
     cache: Cache,
     api_key: str | None,
+    associations: dict[str, dict[str, list]] | None = None,
 ) -> list[EnrichedCve]:
     """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
     Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
     multiple records, only the earliest first_seen date is kept.
+
+    If `associations` is provided, each enriched record is also annotated with
+    the linked actors, campaigns, and malware for that CVE.
     """
     # Deduplicate: keep earliest first_seen per CVE
     earliest: dict[str, CveRecord] = {}
@@ -1072,6 +1163,14 @@ def enrich_cves(
                 attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
             )
         )
+
+    if associations:
+        for rec in enriched:
+            assoc = associations.get(rec.cve_id)
+            if assoc:
+                rec.linked_actors = list(assoc.get("actors") or [])
+                rec.linked_campaigns = list(assoc.get("campaigns") or [])
+                rec.linked_malware = list(assoc.get("malware") or [])
 
     return enriched
 
@@ -1307,6 +1406,9 @@ CSV_COLUMNS = [
     "cwe",
     "attack_techniques",
     "exploit_status",
+    "linked_actors",
+    "linked_campaigns",
+    "linked_malware",
     "nvd_published",
     "enriched_at",
 ]
@@ -1663,6 +1765,9 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     ";".join(rec.cwe),
                     ";".join(rec.attack_techniques),
                     rec.exploit_status,
+                    ";".join(a.name for a in rec.linked_actors),
+                    ";".join(c.name for c in rec.linked_campaigns),
+                    ";".join(m.name for m in rec.linked_malware),
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -1785,6 +1890,21 @@ def write_markdown(
             lines.append(f"| {tid} | {name} | {len(cves)} |")
         lines.append("")
 
+    actor_rollup: dict[str, list[str]] = {}
+    for rec in enriched:
+        for actor in rec.linked_actors:
+            actor_rollup.setdefault(actor.name, []).append(rec.cve_id)
+    if actor_rollup:
+        lines += [
+            "## Linked Adversaries",
+            "",
+            "| Actor | CVEs |",
+            "| --- | --- |",
+        ]
+        for actor in sorted(actor_rollup):
+            lines.append(f"| {_md_safe(actor)} | {len(actor_rollup[actor])} |")
+        lines.append("")
+
     if total == 0:
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
@@ -1819,6 +1939,22 @@ def write_markdown(
                 lines.append(f"- **ATT&CK:** {techniques_display}")
             if rec.exploit_status and rec.exploit_status != "none":
                 lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
+            if rec.linked_actors:
+                actors_disp = ", ".join(
+                    f"[{_md_safe(a.name)}]({a.url})" if a.url else _md_safe(a.name)
+                    for a in rec.linked_actors
+                )
+                lines.append(f"- **Linked Actors:** {actors_disp}")
+            if rec.linked_malware:
+                lines.append(
+                    "- **Linked Malware:** "
+                    + ", ".join(_md_safe(m.name) for m in rec.linked_malware)
+                )
+            if rec.linked_campaigns:
+                lines.append(
+                    "- **Linked Campaigns:** "
+                    + ", ".join(_md_safe(c.name) for c in rec.linked_campaigns)
+                )
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
                 if rec.kev_vendor_project or rec.kev_product:
@@ -1912,6 +2048,16 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         "--no-exploit-lookup",
         action="store_true",
         help="Skip Exploit-DB / Nuclei / GitHub PoC lookups (offline mode).",
+    )
+    parser.add_argument(
+        "--associations-file",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Path to a CVE→adversary associations JSON file. "
+            "Defaults to associations.json in the repo. Pass an empty/missing "
+            "path to disable adversary attribution."
+        ),
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -2187,6 +2333,16 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]]:
+    """Resolve which associations file to use for this run.
+
+    Falls back to the bundled DEFAULT_ASSOCIATIONS_PATH unless the user passed
+    --associations-file. A missing file produces an empty dict + warning so the
+    rest of the pipeline still runs.
+    """
+    return load_associations(args.associations_file)
+
+
 def _get_github_token() -> str | None:
     """Return GITHUB_TOKEN from the environment, or None if absent.
 
@@ -2292,7 +2448,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     iocs = _dedupe_iocs(iocs)
 
     date_mode = args.date_mode or "feed"
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
@@ -2350,7 +2506,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     date_mode = args.date_mode or "feed"
     records = extract_cves(text, args.url, pub_date, "feed_pub")
     iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
@@ -2432,7 +2588,7 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]
-    enriched = enrich_cves(records, cache, api_key)
+    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
