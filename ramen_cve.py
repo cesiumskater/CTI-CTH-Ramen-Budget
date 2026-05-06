@@ -3089,6 +3089,30 @@ def _validate_cve_id(value: str) -> str:
     return value.upper()
 
 
+def _strip_path_quotes(value: str) -> str:
+    """Return `value` with surrounding whitespace and a single layer of paired
+    ASCII or curly quotes stripped.
+
+    Users habitually paste quoted paths, especially on Windows where Explorer's
+    "Copy as path" wraps the result in double quotes. Argparse and questionary
+    treat the quotes as literal characters, which then fails Path operations on
+    Windows (where `"` is a reserved filename character) and silently produces a
+    weirdly-named directory on POSIX.
+    """
+    s = (value or "").strip()
+    pairs = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
+    for opener, closer in pairs:
+        if len(s) >= 2 and s[0] == opener and s[-1] == closer:
+            s = s[1:-1].strip()
+            break
+    return s
+
+
+def _path_arg(value: str) -> Path:
+    """Argparse type for user-supplied paths: strip wrapping quotes, return Path."""
+    return Path(_strip_path_quotes(value))
+
+
 def _shared_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the flags shared by all three subcommands."""
     parser.add_argument("--start", type=_parse_iso_date, metavar="YYYY-MM-DD")
@@ -3096,7 +3120,7 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default=None)
     parser.add_argument("--cvss-threshold", type=float, default=DEFAULT_CVSS_THRESHOLD)
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
-    parser.add_argument("--out-dir", type=Path, default=Path("."))
+    parser.add_argument("--out-dir", type=_path_arg, default=Path("."))
     parser.add_argument(
         "--format",
         choices=["csv", "md", "both", "stix", "sigma", "all"],
@@ -3127,7 +3151,7 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--inventory",
-        type=Path,
+        type=_path_arg,
         metavar="PATH",
         help=(
             "Path to a CSV asset inventory with columns 'host,product,version' "
@@ -3146,7 +3170,7 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--associations-file",
-        type=Path,
+        type=_path_arg,
         metavar="PATH",
         help=(
             "Path to a CVE→adversary associations JSON file. "
@@ -3168,7 +3192,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # opml subcommand
     opml_p = sub.add_parser("opml", help="Process an OPML feed list.")
-    opml_p.add_argument("path", type=Path, help="Path to the OPML file.")
+    opml_p.add_argument("path", type=_path_arg, help="Path to the OPML file.")
     _shared_flags(opml_p)
 
     # url subcommand
@@ -3179,7 +3203,7 @@ def build_parser() -> argparse.ArgumentParser:
     # cve subcommand
     cve_p = sub.add_parser("cve", help="Enrich named CVE IDs directly.")
     cve_p.add_argument("cves", nargs="*", type=_validate_cve_id, metavar="CVE-ID")
-    cve_p.add_argument("--from-file", type=Path, metavar="FILE", help="Text file of CVE IDs.")
+    cve_p.add_argument("--from-file", type=_path_arg, metavar="FILE", help="Text file of CVE IDs.")
     _shared_flags(cve_p)
 
     # hunt subcommand: list / show / link / log / status against the hunts/ library
@@ -3200,7 +3224,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hunt_p.add_argument(
         "--hunt-dir",
-        type=Path,
+        type=_path_arg,
         default=DEFAULT_HUNT_DIR,
         help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
     )
@@ -3220,7 +3244,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
-    stix_p.add_argument("path", nargs="?", type=Path, help="Path to a STIX bundle JSON file.")
+    stix_p.add_argument("path", nargs="?", type=_path_arg, help="Path to a STIX bundle JSON file.")
     stix_p.add_argument("--taxii-url", help="TAXII 2.1 API root URL.")
     stix_p.add_argument("--taxii-collection", help="TAXII 2.1 collection ID.")
     stix_p.add_argument("--taxii-user", help="Optional TAXII basic-auth username.")
@@ -3286,9 +3310,13 @@ def _run_wizard() -> list[str]:
         path = questionary.path(
             "Path to your OPML file:",
             default="examples/sample.opml",
-            validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+            validate=lambda p: (
+                True
+                if Path(_strip_path_quotes(p)).expanduser().is_file()
+                else "File not found."
+            ),
         ).unsafe_ask()
-        argv.append(str(Path(path).expanduser()))
+        argv.append(str(Path(_strip_path_quotes(path)).expanduser()))
     elif mode == "url":
         url = questionary.text(
             "URL to scan:",
@@ -3304,9 +3332,13 @@ def _run_wizard() -> list[str]:
         if from_file:
             file_path = questionary.path(
                 "Path to CVE list file:",
-                validate=lambda p: True if Path(p).expanduser().is_file() else "File not found.",
+                validate=lambda p: (
+                    True
+                    if Path(_strip_path_quotes(p)).expanduser().is_file()
+                    else "File not found."
+                ),
             ).unsafe_ask()
-            argv.extend(["--from-file", str(Path(file_path).expanduser())])
+            argv.extend(["--from-file", str(Path(_strip_path_quotes(file_path)).expanduser())])
         else:
             cves_raw = questionary.text(
                 "CVE IDs (space- or comma-separated):",
@@ -3372,7 +3404,7 @@ def _run_wizard() -> list[str]:
         default=".",
         only_directories=True,
     ).unsafe_ask()
-    argv.extend(["--out-dir", str(Path(out_dir).expanduser())])
+    argv.extend(["--out-dir", str(Path(_strip_path_quotes(out_dir)).expanduser())])
 
     fmt = questionary.select(
         "Output format:",
