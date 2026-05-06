@@ -249,6 +249,9 @@ def test_main_invokes_wizard_when_no_args(tmp_path, monkeypatch):
     import ramen_cve
 
     monkeypatch.setattr("sys.argv", ["ramen_cve.py"])
+    # main() prompts for an NVD API key when none is set; pre-seed one so the
+    # prompt path is skipped and the test doesn't try to read from stdin.
+    monkeypatch.setenv("NVD_API_KEY", "ci-test-key")
 
     fake_argv = [
         "cve", "CVE-2021-44228", "--no-cache", "--format", "csv", "--out-dir", str(tmp_path)
