@@ -4347,6 +4347,206 @@ def test_maybe_correlate_inventory_runs_only_when_flag_set(tmp_path, caplog):
     assert any("Inventory correlation" in r.message for r in caplog.records)
 
 
+# ---------------------------------------------------------------------------
+# Slice 19 — Dissemination dispatchers (Slack + generic webhook)
+# ---------------------------------------------------------------------------
+
+
+def _disp_rec(**overrides) -> "EnrichedCve":  # type: ignore[name-defined]
+    """Convenience: build an EnrichedCve in the kev_override bucket for dispatch tests."""
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    base = dict(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        attack_techniques=["T1059", "T1190"],
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+        exploit_status="exploit_db",
+        linked_actors=[ThreatActor("APT41")],
+        affected_hosts=["web-1", "web-2"],
+    )
+    base.update(overrides)
+    return EnrichedCve(**base)
+
+
+def test_slack_dispatcher_disabled_without_webhook():
+    """No SLACK_WEBHOOK_URL → enabled() is False, dispatch() is never called."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url=None)
+    assert d.enabled() is False
+
+
+def test_slack_dispatcher_payload_contains_cve_and_metadata():
+    """The Slack payload includes the CVE id, bucket, CVSS, KEV due date, ATT&CK list."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    payload = d._build_payload(_disp_rec())
+    assert payload["blocks"][0]["text"]["text"].startswith(":rotating_light: CVE-2021-44228")
+    body_text = payload["blocks"][1]["text"]["text"]
+    assert "Patch immediately." in body_text
+    assert "CVSS:* 10.0 (CRITICAL)" in body_text
+    assert "EPSS:* 0.9700" in body_text
+    assert "CISA KEV:* listed (due 2021-12-24)" in body_text
+    assert "known ransomware use" in body_text
+    assert "ATT&CK:* T1059, T1190" in body_text
+    assert "Exploit Status:*" in body_text and "exploit_db" in body_text
+    assert "Linked Actors:* APT41" in body_text
+    assert "Affected hosts:* 2" in body_text
+    # Footer link to NVD
+    ctx = payload["blocks"][2]["elements"][0]["text"]
+    assert "CVE-2021-44228" in ctx and "nvd.nist.gov" in ctx
+
+
+def test_slack_dispatcher_post_success():
+    """A 200 response from Slack returns True."""
+    from unittest.mock import patch
+
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    with patch("ramen_cve.requests.post", return_value=_make_resp()):
+        assert d.dispatch(_disp_rec()) is True
+
+
+def test_slack_dispatcher_failure_returns_false(caplog):
+    """A network error from Slack logs WARNING and returns False (no raise)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hooks.slack.example/x")
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("nope")
+    with patch("ramen_cve.requests.post", return_value=bad), caplog.at_level(
+        logging.WARNING, logger="ramen_cve"
+    ):
+        assert d.dispatch(_disp_rec()) is False
+    assert any("Slack dispatch failed" in r.message for r in caplog.records)
+
+
+def test_generic_webhook_dispatcher_payload_shape():
+    """The generic webhook payload contains the expected EnrichedCve fields."""
+    from ramen_cve import GenericWebhookDispatcher
+
+    d = GenericWebhookDispatcher(webhook_url="https://x.example/hook")
+    payload = d._build_payload(_disp_rec())
+    assert payload["cve_id"] == "CVE-2021-44228"
+    assert payload["bucket"] == "kev_override"
+    assert payload["cvss_score"] == 10.0
+    assert payload["epss_score"] == 0.97
+    assert payload["kev_listed"] is True
+    assert payload["kev_due_date"] == "2021-12-24"
+    assert payload["attack_techniques"] == ["T1059", "T1190"]
+    assert payload["linked_actors"] == ["APT41"]
+    assert payload["affected_hosts"] == ["web-1", "web-2"]
+
+
+def test_generic_webhook_dispatcher_disabled_without_url():
+    from ramen_cve import GenericWebhookDispatcher
+
+    assert GenericWebhookDispatcher(webhook_url=None).enabled() is False
+    assert GenericWebhookDispatcher(webhook_url="").enabled() is False
+    assert GenericWebhookDispatcher(webhook_url="https://x.example").enabled() is True
+
+
+def test_dispatch_records_skips_low_priority_buckets():
+    """A 'watch_closely' record is NOT dispatched even if a dispatcher is enabled."""
+    from ramen_cve import dispatch_records
+
+    class CountingDisp:
+        name = "counting"
+        calls: int = 0
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec) -> bool:
+            type(self).calls += 1
+            return True
+
+    low = _disp_rec(bucket="watch_closely")
+    high = _disp_rec(bucket="patch_now")
+    sent = dispatch_records([low, high], dispatchers=[CountingDisp()])
+    assert sent == 1  # only 'high' triggered dispatch
+    assert CountingDisp.calls == 1
+
+
+def test_dispatch_records_no_enabled_dispatchers_logs_info(caplog):
+    """If every dispatcher reports enabled=False, log INFO and return 0."""
+    import logging
+
+    from ramen_cve import dispatch_records
+
+    class Disabled:
+        name = "off"
+
+        def enabled(self) -> bool:
+            return False
+
+        def dispatch(self, rec) -> bool:
+            raise AssertionError("should not be called")
+
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        n = dispatch_records([_disp_rec()], dispatchers=[Disabled()])
+    assert n == 0
+    assert any("no dispatchers configured" in r.message for r in caplog.records)
+
+
+def test_dispatch_records_counts_only_successes():
+    """Failed dispatch (returns False) is NOT counted toward the success total."""
+    from ramen_cve import dispatch_records
+
+    class Mixed:
+        name = "mixed"
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec) -> bool:
+            return rec.cve_id != "CVE-2099-FAIL"
+
+    rec_ok = _disp_rec(cve_id="CVE-2099-OK")
+    rec_fail = _disp_rec(cve_id="CVE-2099-FAIL")
+    n = dispatch_records([rec_ok, rec_fail], dispatchers=[Mixed()])
+    assert n == 1
+
+
+def test_cli_dispatch_flag_parses():
+    """--dispatch is accepted on every analysis subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--dispatch"])
+    assert args.dispatch is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.dispatch is False
+
+
+def test_maybe_dispatch_off_by_default(caplog):
+    """_maybe_dispatch is a no-op unless --dispatch is set."""
+    import argparse
+    import logging
+
+    from ramen_cve import _maybe_dispatch
+
+    args = argparse.Namespace(dispatch=False)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        _maybe_dispatch(args, [_disp_rec()])
+    # No INFO log entry from dispatch_records since we never called it
+    assert all("Dispatch complete" not in r.message for r in caplog.records)
+
+
 def test_maybe_correlate_inventory_missing_path_logs_error(tmp_path, caplog):
     """A bogus --inventory path logs ERROR but does NOT abort."""
     import argparse

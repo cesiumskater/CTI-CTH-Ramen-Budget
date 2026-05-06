@@ -1859,6 +1859,192 @@ def correlate_inventory(
     return enriched
 
 
+class _DispatcherBase:
+    """Abstract base for outbound dispatchers (Slack, generic webhook, ...).
+
+    Subclasses set `name`, gate themselves via `enabled()`, and implement
+    `dispatch(rec)` to push one EnrichedCve to the configured target. dispatch()
+    must NEVER raise — return False on failure.
+    """
+
+    name: str = ""
+
+    def enabled(self) -> bool:
+        return False
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        raise NotImplementedError
+
+
+class SlackWebhookDispatcher(_DispatcherBase):
+    """Post a Block-Kit summary to a Slack incoming webhook (SLACK_WEBHOOK_URL)."""
+
+    name = "slack"
+
+    def __init__(self, webhook_url: str | None) -> None:
+        self.webhook_url = webhook_url
+
+    def enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def _build_payload(self, rec: EnrichedCve) -> dict:
+        emoji = {
+            "kev_override": ":rotating_light:",
+            "patch_now": ":rotating_light:",
+            "plan_and_patch": ":construction:",
+            "watch_closely": ":eyes:",
+        }.get(rec.bucket, ":pushpin:")
+        title = f"{emoji} {rec.cve_id} — {rec.bucket.replace('_', ' ').title()}"
+        cvss = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+        epss = f"{rec.epss_score:.4f}" if rec.epss_score is not None else "N/A"
+        body_lines = [
+            f"*Action:* {rec.suggested_action}",
+            f"*CVSS:* {cvss} ({rec.cvss_severity or 'N/A'}) · *EPSS:* {epss}",
+        ]
+        if rec.kev_listed:
+            kev_line = "*CISA KEV:* listed"
+            if rec.kev_due_date:
+                kev_line += f" (due {rec.kev_due_date})"
+            if rec.kev_known_ransomware_use:
+                kev_line += " — known ransomware use"
+            body_lines.append(kev_line)
+        if rec.attack_techniques:
+            body_lines.append(f"*ATT&CK:* {', '.join(rec.attack_techniques)}")
+        if rec.exploit_status and rec.exploit_status != "none":
+            body_lines.append(f"*Exploit Status:* `{rec.exploit_status}`")
+        if rec.linked_actors:
+            body_lines.append(
+                "*Linked Actors:* " + ", ".join(a.name for a in rec.linked_actors)
+            )
+        if rec.affected_hosts:
+            body_lines.append(
+                f"*Affected hosts:* {len(rec.affected_hosts)} in inventory"
+            )
+        return {
+            "blocks": [
+                {"type": "header", "text": {"type": "plain_text", "text": title}},
+                {"type": "section", "text": {"type": "mrkdwn",
+                                             "text": "\n".join(body_lines)}},
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"<https://nvd.nist.gov/vuln/detail/{rec.cve_id}|NVD>",
+                        }
+                    ],
+                },
+            ]
+        }
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        try:
+            resp = requests.post(
+                self.webhook_url or "",
+                json=self._build_payload(rec),
+                headers={"User-Agent": USER_AGENT},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as exc:
+            _log.warning("Slack dispatch failed for %s: %s", rec.cve_id, exc)
+            return False
+
+
+class GenericWebhookDispatcher(_DispatcherBase):
+    """POST a JSON-serialized EnrichedCve summary to RAMEN_DISPATCH_WEBHOOK."""
+
+    name = "webhook"
+
+    def __init__(self, webhook_url: str | None) -> None:
+        self.webhook_url = webhook_url
+
+    def enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def _build_payload(self, rec: EnrichedCve) -> dict:
+        return {
+            "cve_id": rec.cve_id,
+            "bucket": rec.bucket,
+            "suggested_action": rec.suggested_action,
+            "cvss_score": rec.cvss_score,
+            "cvss_severity": rec.cvss_severity,
+            "epss_score": rec.epss_score,
+            "kev_listed": rec.kev_listed,
+            "kev_due_date": str(rec.kev_due_date) if rec.kev_due_date else None,
+            "kev_known_ransomware_use": rec.kev_known_ransomware_use,
+            "cwe": list(rec.cwe),
+            "attack_techniques": list(rec.attack_techniques),
+            "exploit_status": rec.exploit_status,
+            "linked_actors": [a.name for a in rec.linked_actors],
+            "linked_malware": [m.name for m in rec.linked_malware],
+            "linked_campaigns": [c.name for c in rec.linked_campaigns],
+            "affected_hosts": list(rec.affected_hosts),
+            "tlp": rec.tlp,
+            "admiralty": rec.admiralty,
+        }
+
+    def dispatch(self, rec: EnrichedCve) -> bool:
+        try:
+            resp = requests.post(
+                self.webhook_url or "",
+                json=self._build_payload(rec),
+                headers={"User-Agent": USER_AGENT},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as exc:
+            _log.warning("Webhook dispatch failed for %s: %s", rec.cve_id, exc)
+            return False
+
+
+def _build_default_dispatchers() -> list[_DispatcherBase]:
+    """Build the default ordered list of dispatchers, gated by environment vars."""
+    import os
+
+    return [
+        SlackWebhookDispatcher(os.getenv("SLACK_WEBHOOK_URL") or None),
+        GenericWebhookDispatcher(os.getenv("RAMEN_DISPATCH_WEBHOOK") or None),
+    ]
+
+
+# Default bucket transitions worth dispatching on. KEV is highest priority,
+# patch_now is next; everything else is too low-signal for a chat ping.
+DISPATCH_DEFAULT_BUCKETS: tuple[str, ...] = ("kev_override", "patch_now")
+
+
+def dispatch_records(
+    enriched: list[EnrichedCve],
+    *,
+    dispatch_on: tuple[str, ...] = DISPATCH_DEFAULT_BUCKETS,
+    dispatchers: list[_DispatcherBase] | None = None,
+) -> int:
+    """Push records whose bucket is in `dispatch_on` to every enabled dispatcher.
+
+    Returns the count of successful (record, dispatcher) posts. Failures are
+    logged but do not abort the run.
+    """
+    if dispatchers is None:
+        dispatchers = _build_default_dispatchers()
+    enabled = [d for d in dispatchers if d.enabled()]
+    if not enabled:
+        _log.info(
+            "Dispatch enabled but no dispatchers configured "
+            "(set SLACK_WEBHOOK_URL or RAMEN_DISPATCH_WEBHOOK)."
+        )
+        return 0
+    successes = 0
+    for rec in enriched:
+        if rec.bucket not in dispatch_on:
+            continue
+        for d in enabled:
+            if d.dispatch(rec):
+                successes += 1
+    return successes
+
+
 def bucket_and_suggest(
     enriched: list[EnrichedCve],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
@@ -2818,6 +3004,15 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--dispatch",
+        action="store_true",
+        help=(
+            "After writing reports, push every kev_override / patch_now finding "
+            "to configured dispatchers (Slack via SLACK_WEBHOOK_URL, generic "
+            "webhook via RAMEN_DISPATCH_WEBHOOK). Off by default."
+        ),
+    )
+    parser.add_argument(
         "--associations-file",
         type=Path,
         metavar="PATH",
@@ -3151,6 +3346,14 @@ def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]
     return load_associations(args.associations_file)
 
 
+def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """If --dispatch is set, push high-priority records to configured dispatchers."""
+    if not getattr(args, "dispatch", False):
+        return
+    sent = dispatch_records(enriched)
+    _log.info("Dispatch complete: %d successful posts.", sent)
+
+
 def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
     """Load --inventory (if set) and annotate each EnrichedCve with affected_hosts.
 
@@ -3331,6 +3534,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     }
     _maybe_enrich_iocs(args, iocs, cache)
     _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
@@ -3391,6 +3595,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     }
     _maybe_enrich_iocs(args, iocs, cache)
     _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
@@ -3662,6 +3867,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     }
     _maybe_enrich_iocs(args, iocs, cache)
     _output(enriched, args, metadata, iocs=iocs)
+    _maybe_dispatch(args, enriched)
     return 0
 
 
