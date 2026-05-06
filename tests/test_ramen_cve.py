@@ -2972,6 +2972,194 @@ def test_cli_associations_file_flag_parses(tmp_path):
     assert str(args.associations_file).endswith("x.json")
 
 
+# ---------------------------------------------------------------------------
+# Slice 14 — Sigma rule generation
+# ---------------------------------------------------------------------------
+
+
+def _kev_rec(**overrides) -> "EnrichedCve":  # type: ignore[name-defined]
+    """Return a kev_override EnrichedCve suitable for Sigma generation."""
+    from ramen_cve import EnrichedCve
+
+    base = dict(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        cwe=["CWE-502"],
+        attack_techniques=["T1059", "T1190"],
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+        exploit_status="exploit_db",
+    )
+    base.update(overrides)
+    return EnrichedCve(**base)
+
+
+def test_sigma_level_for_kev_is_critical():
+    """A KEV-listed CVE always maps to Sigma level 'critical'."""
+    from ramen_cve import _sigma_level_for
+
+    assert _sigma_level_for(_kev_rec(cvss_score=4.0)) == "critical"
+
+
+def test_sigma_level_for_high_cvss():
+    """CVSS 9.0+ → critical, 7.0-8.9 → high, below 7 in patch_now → medium."""
+    from ramen_cve import _sigma_level_for
+
+    rec = _kev_rec(kev_listed=False, kev_due_date=None, bucket="patch_now", cvss_score=9.5)
+    assert _sigma_level_for(rec) == "critical"
+    rec.cvss_score = 7.5
+    assert _sigma_level_for(rec) == "high"
+    rec.cvss_score = 5.0
+    assert _sigma_level_for(rec) == "medium"
+
+
+def test_build_sigma_stub_contains_required_fields():
+    """The emitted YAML carries title/id/status/level + ATT&CK + CVE tags."""
+    from ramen_cve import _build_sigma_stub
+
+    yaml = _build_sigma_stub(_kev_rec())
+    assert "title:" in yaml
+    assert "id: " in yaml
+    assert "status: experimental" in yaml
+    assert "level: critical" in yaml
+    assert "cve.cve-2021-44228" in yaml
+    assert "attack.t1059" in yaml
+    assert "attack.t1190" in yaml
+    assert "cisa.kev" in yaml
+    assert "ransomware.known" in yaml
+    # The block we want a detection engineer to fill in is clearly marked TODO
+    assert "TODO" in yaml
+
+
+def test_build_sigma_stub_has_stable_id_across_runs():
+    """The same CVE always produces the same Sigma rule id (UUID-shaped)."""
+    import re as _re
+
+    from ramen_cve import _build_sigma_stub
+
+    yaml1 = _build_sigma_stub(_kev_rec())
+    yaml2 = _build_sigma_stub(_kev_rec())
+    id1 = _re.search(r"^id:\s*(\S+)", yaml1, _re.MULTILINE)
+    id2 = _re.search(r"^id:\s*(\S+)", yaml2, _re.MULTILINE)
+    assert id1 is not None and id2 is not None
+    assert id1.group(1) == id2.group(1)
+    assert _re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}",
+        id1.group(1),
+    )
+
+
+def test_write_sigma_stubs_filters_by_bucket(tmp_path):
+    """Only kev_override / patch_now CVEs become Sigma stubs."""
+    from ramen_cve import EnrichedCve, write_sigma_stubs
+
+    kev = _kev_rec()
+    patch_now = EnrichedCve(
+        cve_id="CVE-2021-26855",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.8,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="patch_now",
+    )
+    watch_closely = EnrichedCve(
+        cve_id="CVE-2024-1234",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=4.0,
+        epss_score=0.5,
+        bucket="watch_closely",
+    )
+    out_dir = tmp_path / "sigma"
+    files = write_sigma_stubs([kev, patch_now, watch_closely], out_dir)
+    names = sorted(p.name for p in files)
+    assert names == ["CVE-2021-26855.yml", "CVE-2021-44228.yml"]
+    assert not (out_dir / "CVE-2024-1234.yml").exists()
+
+
+def test_write_sigma_stubs_creates_dir(tmp_path):
+    """The output directory is created if it doesn't yet exist."""
+    from ramen_cve import write_sigma_stubs
+
+    out_dir = tmp_path / "nested" / "sigma"
+    files = write_sigma_stubs([_kev_rec()], out_dir)
+    assert out_dir.is_dir()
+    assert len(files) == 1
+
+
+def test_cli_format_sigma_choice_parses():
+    """--format sigma is accepted."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(["opml", "x.opml", "--format", "sigma"])
+    assert args.format == "sigma"
+
+
+def test_output_writes_sigma_dir_when_format_is_all(tmp_path):
+    """--format all produces a *-sigma directory containing one YAML per qualifying CVE."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    bundle = tmp_path / "in.json"
+    bundle.write_text(json.dumps({
+        "type": "bundle",
+        "id": "bundle--00000000-0000-4000-8000-000000000000",
+        "objects": [
+            {
+                "type": "vulnerability",
+                "id": "vulnerability--00000000-0000-4000-8000-000000000001",
+                "name": "CVE-2021-44228",
+            }
+        ],
+    }))
+
+    nvd = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = nvd
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "stix", str(bundle),
+            "--no-cache", "--out-dir", str(tmp_path), "--format", "all",
+            "--no-exploit-lookup",
+        ])
+
+    assert rc == 0
+    sigma_dirs = list(tmp_path.glob("ramen-cve-*-sigma"))
+    assert len(sigma_dirs) == 1
+    yaml_files = list(sigma_dirs[0].glob("*.yml"))
+    assert len(yaml_files) == 1
+    yaml = yaml_files[0].read_text()
+    assert "CVE-2021-44228" in yaml
+    assert "level: critical" in yaml
+
+
 def test_output_writes_stix_when_format_is_all(tmp_path):
     """--format all writes csv + md + stix, with stix containing the Vulnerability SDO."""
     from unittest.mock import MagicMock, patch
