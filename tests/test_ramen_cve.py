@@ -4533,6 +4533,154 @@ def test_cli_dispatch_flag_parses():
     assert args2.dispatch is False
 
 
+# ---------------------------------------------------------------------------
+# Slice 20 — Diamond Model + Cyber Kill Chain mapping
+# ---------------------------------------------------------------------------
+
+
+def test_map_cwes_to_kill_chain_default_exploitation():
+    """An empty or unmapped CWE list defaults to 'exploitation'."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain([]) == "exploitation"
+    assert map_cwes_to_kill_chain(["CWE-99999"]) == "exploitation"
+
+
+def test_map_cwes_to_kill_chain_overrides():
+    """CWEs in CWE_TO_KILL_CHAIN return their override phase."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["CWE-200"]) == "reconnaissance"
+    assert map_cwes_to_kill_chain(["CWE-269"]) == "installation"
+    assert map_cwes_to_kill_chain(["CWE-601"]) == "delivery"
+    assert map_cwes_to_kill_chain(["CWE-552"]) == "actions_on_objectives"
+
+
+def test_map_cwes_to_kill_chain_first_match_wins():
+    """First CWE override wins so output is deterministic."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["CWE-200", "CWE-269"]) == "reconnaissance"
+
+
+def test_map_cwes_to_kill_chain_case_insensitive():
+    """Lower-case CWE input is normalized."""
+    from ramen_cve import map_cwes_to_kill_chain
+
+    assert map_cwes_to_kill_chain(["cwe-269"]) == "installation"
+
+
+def test_enrich_cves_populates_diamond_and_kill_chain():
+    """End-to-end: a Log4Shell CVE gets Kill Chain + Diamond populated from CWE/actors."""
+    from unittest.mock import MagicMock, patch
+
+    from ramen_cve import CveRecord, ThreatActor, enrich_cves
+
+    cache = _mem_cache()
+    log4shell = _load_fixture("nvd_log4shell_v31.json")
+    epss = _load_fixture("epss_batch.json")
+
+    def _fake_get(url, params=None, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        if "epss" in url:
+            resp.json.return_value = epss
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = log4shell
+        return resp
+
+    associations = {
+        "CVE-2021-44228": {
+            "actors": [ThreatActor(name="APT41")],
+            "campaigns": [],
+            "malware": [],
+        }
+    }
+    records = [CveRecord("CVE-2021-44228", "f", date(2024, 1, 1), "feed_pub")]
+    with patch("ramen_cve.requests.get", side_effect=_fake_get), patch("ramen_cve.time.sleep"):
+        result = enrich_cves(records, cache, api_key=None, associations=associations)
+
+    rec = result[0]
+    # CWE-502 isn't an override, so default 'exploitation' wins.
+    assert rec.kill_chain_phase == "exploitation"
+    # Diamond adversary takes the first linked actor.
+    assert rec.diamond_adversary == "APT41"
+    # Capability is enriched with the primary CWE+technique.
+    assert rec.diamond_capability.startswith("exploit (")
+    assert "CWE-502" in rec.diamond_capability
+    # Infrastructure / victim default to empty (filled by other features).
+    assert rec.diamond_infrastructure == ""
+    assert rec.diamond_victim == ""
+
+
+def test_write_csv_includes_kill_chain_and_diamond_columns(tmp_path):
+    """CSV header contains kill_chain_phase and the four diamond_* fields."""
+    from ramen_cve import CSV_COLUMNS
+
+    for col in (
+        "kill_chain_phase", "diamond_capability", "diamond_adversary",
+        "diamond_infrastructure", "diamond_victim",
+    ):
+        assert col in CSV_COLUMNS, f"missing CSV column {col}"
+
+
+def test_write_markdown_diamond_line_for_high_priority(tmp_path):
+    """The Diamond Model line is rendered for kev_override / patch_now."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec_kev = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        diamond_adversary="APT41",
+        diamond_capability="exploit (CWE-502, T1190)",
+        diamond_infrastructure="",
+        diamond_victim="3 inventory host(s)",
+        kill_chain_phase="exploitation",
+        affected_hosts=["a", "b", "c"],
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec_kev], out, METADATA)
+    text = out.read_text()
+    assert "**Diamond Model:**" in text
+    assert "Adversary=APT41" in text
+    assert "Capability=exploit (CWE-502, T1190)" in text
+    assert "Kill Chain=exploitation" in text
+
+
+def test_write_markdown_diamond_line_skipped_for_low_priority(tmp_path):
+    """No Diamond line for buckets below patch_now."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-9999", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=4.0, epss_score=0.05, bucket="deprioritize",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "Diamond Model" not in text
+
+
+def test_write_markdown_diamond_uses_unknown_when_unset(tmp_path):
+    """Missing adversary / infrastructure render as italic placeholders."""
+    from ramen_cve import EnrichedCve, write_markdown
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "*unknown actor*" in text
+    assert "*unknown infrastructure*" in text
+
+
 def test_maybe_dispatch_off_by_default(caplog):
     """_maybe_dispatch is a no-op unless --dispatch is set."""
     import argparse

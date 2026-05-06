@@ -215,6 +215,49 @@ def map_cwes_to_attack_techniques(cwes: list[str]) -> list[str]:
         techniques.update(CWE_TO_ATTACK.get(cwe.upper(), []))
     return sorted(techniques)
 
+
+# Lockheed Martin Cyber Kill Chain phases. The default phase for a CVE is
+# 'exploitation' — that's what every vulnerability description reduces to.
+# Specific CWEs that reliably indicate a different phase override.
+KILL_CHAIN_PHASES = (
+    "reconnaissance",
+    "weaponization",
+    "delivery",
+    "exploitation",
+    "installation",
+    "command_and_control",
+    "actions_on_objectives",
+)
+
+# CWE → likely Kill Chain phase override. Anything not listed defaults to
+# 'exploitation' since that's how the vast majority of CVEs map.
+CWE_TO_KILL_CHAIN: dict[str, str] = {
+    "CWE-200": "reconnaissance",        # Information Disclosure
+    "CWE-22": "reconnaissance",         # Path Traversal (often pre-exploit recon)
+    "CWE-269": "installation",          # Improper Privilege Management → PrivEsc
+    "CWE-426": "installation",          # Untrusted Search Path → DLL Hijack
+    "CWE-732": "installation",          # Incorrect Permission Assignment
+    "CWE-552": "actions_on_objectives", # Files accessible to unauthorized parties
+    "CWE-319": "actions_on_objectives", # Cleartext Transmission of sensitive data
+    "CWE-601": "delivery",              # Open Redirect → phishing delivery aid
+    "CWE-1021": "delivery",             # UI Restriction Bypass / Clickjacking
+    "CWE-400": "actions_on_objectives", # DoS impact
+}
+
+
+def map_cwes_to_kill_chain(cwes: list[str]) -> str:
+    """Return the most specific Kill Chain phase for the given CWE list.
+
+    If any CWE has an override entry, return its phase (first match wins; the
+    CWE_TO_KILL_CHAIN dict is small and deterministic). Otherwise default to
+    'exploitation'.
+    """
+    for cwe in cwes:
+        phase = CWE_TO_KILL_CHAIN.get(cwe.upper())
+        if phase:
+            return phase
+    return "exploitation"
+
 _log = logging.getLogger(__name__)
 
 
@@ -484,6 +527,18 @@ class EnrichedCve:
 
     # Hosts from the user's --inventory CSV whose product+version match a CPE.
     affected_hosts: list[str] = field(default_factory=list)
+
+    # Lockheed Martin Cyber Kill Chain phase (derived from CWE; default
+    # 'exploitation' since every vulnerability description reduces to that).
+    kill_chain_phase: str = "exploitation"
+
+    # Diamond Model — the vulnerability itself is always a 'capability'.
+    # adversary / infrastructure / victim are filled when other features supply
+    # them (associations.json, future infrastructure feeds, --inventory).
+    diamond_capability: str = "capability"
+    diamond_adversary: str = ""
+    diamond_infrastructure: str = ""
+    diamond_victim: str = ""
 
     # Bucket
     bucket: str = "unknown"
@@ -1396,6 +1451,7 @@ def enrich_cves(
                 tlp=merged_tlp.get(cve_id, "CLEAR"),
                 admiralty=merged_adm.get(cve_id, ""),
                 cpes=list(nvd.get("cpes") or []),
+                kill_chain_phase=map_cwes_to_kill_chain(nvd.get("cwe", [])),
             )
         )
 
@@ -1406,6 +1462,20 @@ def enrich_cves(
                 rec.linked_actors = list(assoc.get("actors") or [])
                 rec.linked_campaigns = list(assoc.get("campaigns") or [])
                 rec.linked_malware = list(assoc.get("malware") or [])
+
+    # Diamond Model adversary defaults to the first linked actor; capability
+    # adds the primary CWE/technique label so the Diamond line in Markdown is
+    # actually informative rather than just the literal word "capability".
+    for rec in enriched:
+        if rec.linked_actors and not rec.diamond_adversary:
+            rec.diamond_adversary = rec.linked_actors[0].name
+        cap_bits: list[str] = []
+        if rec.cwe:
+            cap_bits.append(rec.cwe[0])
+        if rec.attack_techniques:
+            cap_bits.append(rec.attack_techniques[0])
+        if cap_bits:
+            rec.diamond_capability = "exploit (" + ", ".join(cap_bits) + ")"
 
     return enriched
 
@@ -2151,6 +2221,11 @@ CSV_COLUMNS = [
     "tlp",
     "admiralty",
     "affected_hosts",
+    "kill_chain_phase",
+    "diamond_capability",
+    "diamond_adversary",
+    "diamond_infrastructure",
+    "diamond_victim",
     "nvd_published",
     "enriched_at",
 ]
@@ -2640,6 +2715,11 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     rec.tlp or "CLEAR",
                     rec.admiralty or "",
                     ";".join(rec.affected_hosts),
+                    rec.kill_chain_phase,
+                    rec.diamond_capability,
+                    rec.diamond_adversary,
+                    rec.diamond_infrastructure,
+                    rec.diamond_victim,
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]
@@ -2878,6 +2958,20 @@ def write_markdown(
                 lines.append(
                     f"- **Affected in your environment:** {len(rec.affected_hosts)} "
                     f"host(s) — {hosts_disp}{more}"
+                )
+            if rec.bucket in ("kev_override", "patch_now"):
+                adversary = rec.diamond_adversary or "*unknown actor*"
+                infra = rec.diamond_infrastructure or "*unknown infrastructure*"
+                victim = rec.diamond_victim or (
+                    f"{len(rec.affected_hosts)} inventory host(s)"
+                    if rec.affected_hosts else "*your environment*"
+                )
+                lines.append(
+                    f"- **Diamond Model:** Adversary={_md_safe(adversary)} · "
+                    f"Capability={_md_safe(rec.diamond_capability)} · "
+                    f"Infrastructure={_md_safe(infra)} · "
+                    f"Victim={_md_safe(victim)} · "
+                    f"Kill Chain={rec.kill_chain_phase.replace('_', ' ')}"
                 )
             lines.append(f"- **NVD Published:** {rec.nvd_published or 'N/A'}")
             if rec.kev_listed and (rec.kev_due_date or rec.kev_vendor_project):
