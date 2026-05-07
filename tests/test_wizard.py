@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -163,6 +164,74 @@ def test_wizard_epss_mode_forces_single_date():
     assert str(args.end) == "2024-06-01"
 
 
+def test_strip_path_quotes_handles_common_shapes():
+    """ASCII, single, and curly quotes are all stripped; whitespace too."""
+    import ramen_cve
+
+    assert ramen_cve._strip_path_quotes('"C:\\Users\\me\\Downloads"') == "C:\\Users\\me\\Downloads"
+    assert ramen_cve._strip_path_quotes("'/tmp/foo'") == "/tmp/foo"
+    assert ramen_cve._strip_path_quotes("  /tmp/x  ") == "/tmp/x"
+    assert ramen_cve._strip_path_quotes("/tmp/x") == "/tmp/x"
+    # Mismatched quotes are left alone
+    assert ramen_cve._strip_path_quotes('"unmatched') == '"unmatched'
+    # Curly quotes (Word / Slack auto-style)
+    assert ramen_cve._strip_path_quotes("“/tmp/x”") == "/tmp/x"
+    # Empty / None safe
+    assert ramen_cve._strip_path_quotes("") == ""
+    assert ramen_cve._strip_path_quotes(None) == ""
+
+
+def test_path_arg_argparse_type():
+    """The argparse type returns a Path with quotes stripped."""
+    import ramen_cve
+
+    p = ramen_cve._path_arg('"/tmp/output"')
+    assert isinstance(p, Path)
+    assert str(p) == "/tmp/output"
+
+
+def test_cli_out_dir_strips_quotes(tmp_path):
+    """End-to-end: a quoted --out-dir arg parses to a Path without the quotes."""
+    import ramen_cve
+
+    quoted = f'"{tmp_path}"'
+    args = ramen_cve.build_parser().parse_args([
+        "cve", "CVE-2021-44228",
+        "--out-dir", quoted,
+        "--no-cache",
+        "--format", "csv",
+    ])
+    assert isinstance(args.out_dir, Path)
+    assert str(args.out_dir) == str(tmp_path)
+    # Critically: mkdir(exist_ok=True) must work — this is the user-reported crash.
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+
+def test_wizard_strips_quoted_out_dir(tmp_path):
+    """Regression: wizard out_dir prompt must drop the quotes the user pasted."""
+    import ramen_cve
+
+    quoted_out = f'"{tmp_path}"'
+    answers = [
+        "cve",
+        False,                              # from_file? no
+        "CVE-2021-44228",                   # cve list
+        "feed",
+        False,
+        "7.0",
+        "0.10",
+        quoted_out,                         # OUT-DIR with literal quotes
+        "csv",
+        False,
+        "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert str(args.out_dir) == str(tmp_path)
+
+
 def test_wizard_validators():
     """Date and float validators return True for valid input and a string error otherwise."""
     import ramen_cve
@@ -180,6 +249,9 @@ def test_main_invokes_wizard_when_no_args(tmp_path, monkeypatch):
     import ramen_cve
 
     monkeypatch.setattr("sys.argv", ["ramen_cve.py"])
+    # main() prompts for an NVD API key when none is set; pre-seed one so the
+    # prompt path is skipped and the test doesn't try to read from stdin.
+    monkeypatch.setenv("NVD_API_KEY", "ci-test-key")
 
     fake_argv = [
         "cve", "CVE-2021-44228", "--no-cache", "--format", "csv", "--out-dir", str(tmp_path)
