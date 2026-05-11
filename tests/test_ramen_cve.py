@@ -5918,3 +5918,688 @@ def test_write_markdown_dash_when_no_sectors(tmp_path):
     out = tmp_path / "report.md"
     ramen_cve.write_markdown([rec], out, METADATA)
     assert "| Mystery | 1 | — |" in out.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Slice 26 — PIR (Priority Intelligence Requirements) tracking
+# ---------------------------------------------------------------------------
+
+
+def _pir_payload(**overrides) -> dict:
+    base = {
+        "id": "test-pir",
+        "name": "Sample PIR",
+        "question": "Are we exposed?",
+        "owner": "cti-team",
+        "status": "active",
+        "created": "2024-01-01T00:00:00",
+        "tagged_cves": ["CVE-2021-44228"],
+        "tagged_iocs": [],
+        "tagged_actors": ["APT41"],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_pir_dataclass_round_trip():
+    """Pir.from_dict / to_dict round-trip is value-preserving."""
+    from ramen_cve import Pir
+
+    payload = _pir_payload()
+    assert Pir.from_dict(payload).to_dict() == payload
+
+
+def test_pir_dataclass_tolerates_missing_keys():
+    """Optional fields default to sensible empties / strings."""
+    from ramen_cve import Pir
+
+    p = Pir.from_dict({"id": "x", "name": "n", "question": "q?"})
+    assert p.status == "active"
+    assert p.owner == ""
+    assert p.tagged_cves == []
+    assert p.tagged_iocs == []
+    assert p.tagged_actors == []
+
+
+def test_load_pir_round_trip(tmp_path):
+    """load_pir + save_pir round-trip preserves the payload."""
+    from ramen_cve import Pir, load_pir, save_pir
+
+    p = tmp_path / "x.json"
+    save_pir(Pir.from_dict(_pir_payload()), p)
+    out = load_pir(p)
+    assert out.id == "test-pir"
+    assert out.tagged_cves == ["CVE-2021-44228"]
+
+
+def test_load_pir_missing_file_raises(tmp_path):
+    """A missing PIR path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, load_pir
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_pir(tmp_path / "missing.json")
+
+
+def test_load_pir_invalid_json_raises(tmp_path):
+    """Malformed JSON raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, load_pir
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not valid")
+    with pytest.raises(OpmlError, match="parse"):
+        load_pir(p)
+
+
+def test_load_all_pirs_returns_sorted_list(tmp_path):
+    """load_all_pirs returns every well-formed *.json sorted by id."""
+    from ramen_cve import Pir, load_all_pirs, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="zeta")), tmp_path / "zeta.json")
+    save_pir(Pir.from_dict(_pir_payload(id="alpha")), tmp_path / "alpha.json")
+    out = load_all_pirs(tmp_path)
+    assert [p.id for p in out] == ["alpha", "zeta"]
+
+
+def test_load_all_pirs_missing_dir_returns_empty(tmp_path):
+    from ramen_cve import load_all_pirs
+
+    assert load_all_pirs(tmp_path / "no-such-dir") == []
+
+
+def test_load_all_pirs_skips_malformed(tmp_path, caplog):
+    """A malformed PIR file is skipped with a WARNING; others still load."""
+    import logging
+
+    from ramen_cve import Pir, load_all_pirs, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="ok")), tmp_path / "ok.json")
+    (tmp_path / "broken.json").write_text("{not valid")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_all_pirs(tmp_path)
+    assert [p.id for p in out] == ["ok"]
+    assert any("malformed pir" in r.message.lower() for r in caplog.records)
+
+
+def test_default_pir_dir_loads_bundled_sample():
+    """The bundled pirs/log4j-exposure.json is well-formed and loadable."""
+    from ramen_cve import DEFAULT_PIR_DIR, load_all_pirs
+
+    assert DEFAULT_PIR_DIR.exists()
+    pirs = load_all_pirs(DEFAULT_PIR_DIR)
+    assert any(p.id == "log4j-exposure" for p in pirs)
+
+
+def test_cli_pir_subcommand_parses():
+    """`pir list / show / link / coverage` round-trip through the parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["pir", "list"])
+    assert args.subcommand == "pir" and args.action == "list"
+    args2 = ramen_cve.build_parser().parse_args(
+        ["pir", "link", "log4j-exposure", "CVE-2021-44228"]
+    )
+    assert args2.action == "link"
+    assert args2.pir_id == "log4j-exposure"
+    assert args2.value == "CVE-2021-44228"
+
+
+def test_run_pir_list(tmp_path, capsys):
+    """`pir list` prints one tab-delimited line per PIR with key counts."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1", name="First")), tmp_path / "p1.json")
+    save_pir(Pir.from_dict(_pir_payload(id="p2", name="Second")), tmp_path / "p2.json")
+    rc = ramen_cve.main(["pir", "list", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "p1" in out and "First" in out
+    assert "p2" in out and "Second" in out
+    assert "1 CVEs" in out
+
+
+def test_run_pir_show(tmp_path, capsys):
+    """`pir show <id>` prints the PIR as JSON."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1")), tmp_path / "p1.json")
+    rc = ramen_cve.main(["pir", "show", "p1", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["id"] == "p1"
+
+
+def test_run_pir_link_appends_cve(tmp_path):
+    """`pir link <id> <cve>` appends to tagged_cves and persists."""
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-2021-44228"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main([
+        "pir", "link", "p1", "CVE-2021-26855",
+        "--pir-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    pir = load_pir(tmp_path / "p1.json")
+    assert "CVE-2021-26855" in pir.tagged_cves
+
+
+def test_run_pir_link_dedupes(tmp_path):
+    """Linking a CVE that's already tagged is a no-op success."""
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-2021-44228"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main([
+        "pir", "link", "p1", "CVE-2021-44228",
+        "--pir-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    pir = load_pir(tmp_path / "p1.json")
+    assert pir.tagged_cves.count("CVE-2021-44228") == 1
+
+
+def test_run_pir_link_rejects_invalid_cve(tmp_path, caplog):
+    """A bad CVE id exits with code 1 and does not mutate the file."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1")), tmp_path / "p1.json")
+    before = load_pir(tmp_path / "p1.json").tagged_cves
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "pir", "link", "p1", "NOT-A-CVE",
+            "--pir-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert load_pir(tmp_path / "p1.json").tagged_cves == before
+    assert any("not a valid CVE" in r.message for r in caplog.records)
+
+
+def test_run_pir_coverage_prints_markdown_table(tmp_path, capsys):
+    """`pir coverage` prints a Markdown table of CVE / IOC / actor counts."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-X", "CVE-Y"], tagged_actors=["A"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main(["pir", "coverage", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# PIR Coverage" in out
+    assert "| PIR | Status | Tagged CVEs | Tagged IOCs | Tagged Actors |" in out
+    assert "| p1 | active | 2 | 0 | 1 |" in out
+
+
+def test_run_pir_rejects_path_traversal(tmp_path, caplog):
+    """A pir_id with '/' or '..' is refused before any file access."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "pir", "show", "../etc/passwd",
+            "--pir-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("invalid pir id" in r.message.lower() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 27 — Email / daily-digest dispatcher
+# ---------------------------------------------------------------------------
+
+
+def test_email_dispatcher_disabled_without_host_or_sender():
+    """enabled() returns False when either SMTP host or From is missing."""
+    from ramen_cve import EmailDispatcher
+
+    assert EmailDispatcher(host=None, port=587, user=None, password=None,
+                           sender="x@y", use_tls=True).enabled() is False
+    assert EmailDispatcher(host="smtp.example", port=587, user=None, password=None,
+                           sender=None, use_tls=True).enabled() is False
+    assert EmailDispatcher(host="smtp.example", port=587, user=None, password=None,
+                           sender="x@y", use_tls=True).enabled() is True
+
+
+def test_email_dispatcher_from_env_reads_all_keys(monkeypatch):
+    """EmailDispatcher.from_env parses every documented variable correctly."""
+    import ramen_cve
+
+    monkeypatch.setenv("RAMEN_SMTP_HOST", "smtp.example")
+    monkeypatch.setenv("RAMEN_SMTP_PORT", "465")
+    monkeypatch.setenv("RAMEN_SMTP_USER", "alice")
+    monkeypatch.setenv("RAMEN_SMTP_PASS", "hunter2")
+    monkeypatch.setenv("RAMEN_SMTP_FROM", "alice@example")
+    monkeypatch.setenv("RAMEN_SMTP_USE_TLS", "0")
+    monkeypatch.setenv("RAMEN_DIGEST_TO", "team@example")
+    d = ramen_cve.EmailDispatcher.from_env()
+    assert d.host == "smtp.example"
+    assert d.port == 465
+    assert d.user == "alice"
+    assert d.password == "hunter2"
+    assert d.sender == "alice@example"
+    assert d.use_tls is False
+    assert d.fallback_recipient == "team@example"
+
+
+def test_email_dispatcher_from_env_defaults_when_unset(monkeypatch):
+    """from_env defaults port=587 and use_tls=True when envs are absent."""
+    import ramen_cve
+
+    for k in ("RAMEN_SMTP_HOST", "RAMEN_SMTP_PORT", "RAMEN_SMTP_USER",
+              "RAMEN_SMTP_PASS", "RAMEN_SMTP_FROM", "RAMEN_SMTP_USE_TLS",
+              "RAMEN_DIGEST_TO"):
+        monkeypatch.delenv(k, raising=False)
+    d = ramen_cve.EmailDispatcher.from_env()
+    assert d.port == 587
+    assert d.use_tls is True
+    assert d.host is None and d.sender is None
+    assert d.enabled() is False
+
+
+def test_email_dispatcher_build_message_includes_attachments(tmp_path):
+    """The MIME message has the subject, body, and one attachment per readable file."""
+    from ramen_cve import EmailDispatcher
+
+    d = EmailDispatcher(
+        host="smtp.example", port=587, user=None, password=None,
+        sender="alice@example", use_tls=True,
+    )
+    csv = tmp_path / "report.csv"
+    csv.write_text("cve_id,bucket\nCVE-2021-44228,kev_override\n")
+    md = tmp_path / "report.md"
+    md.write_text("# Ramen CVE Triage Report")
+    missing = tmp_path / "ghost.bin"  # should be silently skipped
+    msg = d._build_message(
+        recipient="bob@example",
+        subject="ramen-cve digest 1 actionable",
+        body_markdown="# Body",
+        attachments=[csv, md, missing],
+    )
+    raw = msg.as_string()
+    assert "Subject: ramen-cve digest" in raw
+    assert "To: bob@example" in raw
+    assert "From: alice@example" in raw
+    assert 'filename="report.csv"' in raw
+    assert 'filename="report.md"' in raw
+    # The missing path was skipped, not an exception
+    assert 'filename="ghost.bin"' not in raw
+
+
+def test_email_dispatcher_send_digest_success_calls_smtp(tmp_path, monkeypatch):
+    """send_digest() does login + starttls + send_message + close on success."""
+    from unittest.mock import MagicMock
+
+    import ramen_cve
+
+    d = ramen_cve.EmailDispatcher(
+        host="smtp.example", port=587, user="alice", password="hunter2",
+        sender="alice@example", use_tls=True,
+    )
+    smtp_instance = MagicMock()
+    smtp_class = MagicMock(return_value=smtp_instance)
+    smtp_instance.__enter__.return_value = smtp_instance
+    smtp_instance.__exit__.return_value = False
+    monkeypatch.setattr("smtplib.SMTP", smtp_class)
+
+    ok = d.send_digest(
+        recipient="bob@example",
+        subject="ramen-cve digest",
+        body_markdown="# Body",
+        attachments=[],
+    )
+    assert ok is True
+    smtp_class.assert_called_once()
+    smtp_instance.starttls.assert_called_once()
+    smtp_instance.login.assert_called_once_with("alice", "hunter2")
+    smtp_instance.send_message.assert_called_once()
+
+
+def test_email_dispatcher_send_digest_skips_login_without_credentials(monkeypatch):
+    """No SMTP user/pass → skip login but still send."""
+    from unittest.mock import MagicMock
+
+    import ramen_cve
+
+    d = ramen_cve.EmailDispatcher(
+        host="smtp.example", port=587, user=None, password=None,
+        sender="alice@example", use_tls=False,
+    )
+    smtp_instance = MagicMock()
+    smtp_instance.__enter__.return_value = smtp_instance
+    smtp_instance.__exit__.return_value = False
+    smtp_class = MagicMock(return_value=smtp_instance)
+    monkeypatch.setattr("smtplib.SMTP", smtp_class)
+
+    assert d.send_digest("bob@example", "subj", "body") is True
+    smtp_instance.login.assert_not_called()
+    smtp_instance.starttls.assert_not_called()  # use_tls=False
+    smtp_instance.send_message.assert_called_once()
+
+
+def test_email_dispatcher_send_digest_failure_returns_false(monkeypatch, caplog):
+    """A network exception from smtplib returns False with a WARNING."""
+    import logging
+    from unittest.mock import MagicMock
+
+    import ramen_cve
+
+    d = ramen_cve.EmailDispatcher(
+        host="smtp.example", port=587, user=None, password=None,
+        sender="alice@example", use_tls=True,
+    )
+    smtp_instance = MagicMock()
+    smtp_instance.__enter__.return_value = smtp_instance
+    smtp_instance.__exit__.return_value = False
+    smtp_instance.send_message.side_effect = RuntimeError("connection refused")
+    monkeypatch.setattr("smtplib.SMTP", MagicMock(return_value=smtp_instance))
+
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        ok = d.send_digest("bob@example", "subj", "body")
+    assert ok is False
+    assert any("digest send to bob@example failed" in r.message for r in caplog.records)
+
+
+def test_email_dispatcher_send_digest_not_enabled_warns(caplog, monkeypatch):
+    """Calling send_digest without configuration WARNs and returns False."""
+    import logging
+
+    import ramen_cve
+
+    d = ramen_cve.EmailDispatcher(
+        host=None, port=587, user=None, password=None,
+        sender=None, use_tls=True,
+    )
+    monkeypatch.setattr("smtplib.SMTP", lambda *a, **kw: pytest.fail("must not connect"))
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        ok = d.send_digest("bob@example", "subj", "body")
+    assert ok is False
+    assert any("RAMEN_SMTP_HOST" in r.message for r in caplog.records)
+
+
+def test_load_inventory_captures_owner_column(tmp_path):
+    """The optional `owner` column is preserved per inventory row."""
+    from ramen_cve import load_inventory
+
+    p = tmp_path / "inv.csv"
+    p.write_text(
+        "host,product,version,owner\n"
+        "web-1,log4j,2.14.1,team-a@example\n"
+        "web-2,log4j,2.14.1,\n"
+    )
+    rows = load_inventory(p)
+    assert rows[0]["owner"] == "team-a@example"
+    assert rows[1]["owner"] == ""
+
+
+def test_group_records_by_owner_routes_per_host():
+    """Records are routed to each owner of every affected host."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        affected_hosts=["web-1", "web-2"],
+    )
+    inventory = [
+        {"host": "web-1", "product": "", "version": "", "cpe": "", "owner": "alice@example"},
+        {"host": "web-2", "product": "", "version": "", "cpe": "", "owner": "bob@example"},
+    ]
+    by_owner = ramen_cve._group_records_by_owner(
+        [rec], inventory, fallback_recipient=None
+    )
+    assert set(by_owner) == {"alice@example", "bob@example"}
+    assert rec in by_owner["alice@example"]
+    assert rec in by_owner["bob@example"]
+
+
+def test_group_records_by_owner_uses_fallback_when_no_match():
+    """Records without inventory-matched owners go to the fallback recipient."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-1234",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        affected_hosts=[],  # no inventory hits
+    )
+    by_owner = ramen_cve._group_records_by_owner(
+        [rec], inventory_rows=[], fallback_recipient="team@example"
+    )
+    assert by_owner == {"team@example": [rec]}
+
+
+def test_group_records_by_owner_skips_low_priority_buckets():
+    """Only kev_override / patch_now records are eligible for the digest."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=3.0,
+        epss_score=0.05,
+        bucket="deprioritize",
+    )
+    by_owner = ramen_cve._group_records_by_owner(
+        [rec], inventory_rows=[], fallback_recipient="x@y",
+    )
+    assert by_owner == {}
+
+
+def test_build_digest_body_lists_owned_hosts():
+    """The per-recipient body singles out THIS recipient's owned hosts."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+        affected_hosts=["web-1", "web-2", "web-3"],
+    )
+    inv = [
+        {"host": "web-1", "owner": "alice@example", "product": "", "version": "", "cpe": ""},
+        {"host": "web-3", "owner": "alice@example", "product": "", "version": "", "cpe": ""},
+        {"host": "web-2", "owner": "bob@example", "product": "", "version": "", "cpe": ""},
+    ]
+    body = ramen_cve._build_digest_body("alice@example", [rec], inv)
+    assert "Daily Patch Digest for alice@example" in body
+    assert "CVE-2021-44228" in body
+    assert "Patch immediately." in body
+    assert "CISA KEV due date:** 2021-12-24" in body
+    # Alice's hosts only — bob's web-2 is not listed under "Your hosts"
+    assert "Your hosts (2):** web-1, web-3" in body
+    assert "web-2" not in body.split("Your hosts")[1].split("\n")[0]
+
+
+def test_cli_digest_flag_parses():
+    """--digest is accepted and round-trips through build_parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["opml", "x.opml", "--digest"])
+    assert args.digest is True
+    assert ramen_cve.build_parser().parse_args(
+        ["opml", "x.opml"]
+    ).digest is False
+
+
+def test_maybe_digest_short_circuits_when_flag_off():
+    """Without --digest, _maybe_digest is a complete no-op."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="kev_override",
+    )
+    args = argparse.Namespace(digest=False)
+    # Even with no SMTP env, this must not raise.
+    ramen_cve._maybe_digest(args, [rec], output_paths={})
+
+
+def test_maybe_digest_warns_when_smtp_missing(monkeypatch, caplog):
+    """--digest with no RAMEN_SMTP_HOST / FROM logs a WARNING and returns."""
+    import argparse
+    import logging
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    for k in ("RAMEN_SMTP_HOST", "RAMEN_SMTP_FROM"):
+        monkeypatch.delenv(k, raising=False)
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="kev_override",
+    )
+    args = argparse.Namespace(digest=True, _inventory_rows=[])
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        ramen_cve._maybe_digest(args, [rec], output_paths={})
+    assert any("RAMEN_SMTP_HOST" in r.message for r in caplog.records)
+
+
+def test_maybe_digest_sends_one_email_per_recipient(monkeypatch, tmp_path):
+    """End-to-end with mocked SMTP: one email per owner, with CSV/MD attached."""
+    import argparse
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    # Configure the dispatcher via env
+    monkeypatch.setenv("RAMEN_SMTP_HOST", "smtp.example")
+    monkeypatch.setenv("RAMEN_SMTP_FROM", "alice@example")
+    monkeypatch.delenv("RAMEN_DIGEST_TO", raising=False)
+
+    smtp_instance = MagicMock()
+    smtp_instance.__enter__.return_value = smtp_instance
+    smtp_instance.__exit__.return_value = False
+    smtp_class = MagicMock(return_value=smtp_instance)
+    monkeypatch.setattr("smtplib.SMTP", smtp_class)
+
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text("cve_id,bucket\nCVE-2021-44228,kev_override\n")
+    md_path = tmp_path / "out.md"
+    md_path.write_text("# Report")
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        affected_hosts=["web-1", "db-1"],
+    )
+    args = argparse.Namespace(
+        digest=True,
+        _inventory_rows=[
+            {"host": "web-1", "owner": "alice@example",
+             "product": "", "version": "", "cpe": ""},
+            {"host": "db-1", "owner": "bob@example",
+             "product": "", "version": "", "cpe": ""},
+        ],
+    )
+    ramen_cve._maybe_digest(args, [rec], output_paths={"csv": csv_path, "md": md_path})
+    # send_message is called once per recipient
+    assert smtp_instance.send_message.call_count == 2
+
+
+def test_maybe_digest_no_recipients_logs_info(monkeypatch, caplog):
+    """If nothing maps to a recipient, log INFO and don't connect."""
+    import argparse
+    import logging
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    monkeypatch.setenv("RAMEN_SMTP_HOST", "smtp.example")
+    monkeypatch.setenv("RAMEN_SMTP_FROM", "alice@example")
+    monkeypatch.delenv("RAMEN_DIGEST_TO", raising=False)
+    smtp_class = MagicMock()
+    monkeypatch.setattr("smtplib.SMTP", smtp_class)
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+        affected_hosts=[],  # nothing routable
+    )
+    args = argparse.Namespace(digest=True, _inventory_rows=[])
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        ramen_cve._maybe_digest(args, [rec], output_paths={})
+    smtp_class.assert_not_called()
+    assert any("nothing sent" in r.message for r in caplog.records)
+
+
+def test_output_returns_paths_dict(tmp_path):
+    """_output now returns a dict mapping output kind → Path (or None)."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+    )
+    args = argparse.Namespace(format="both", out_dir=tmp_path,
+                              basename="run42", allow_tlp_red=False)
+    paths = ramen_cve._output([rec], args, {"version": "0.1"})
+    assert isinstance(paths, dict)
+    assert paths["csv"].name == "run42.csv"
+    assert paths["md"].name == "run42.md"
+    assert paths["stix"] is None  # not requested
