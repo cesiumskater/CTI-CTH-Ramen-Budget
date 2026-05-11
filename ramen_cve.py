@@ -5,6 +5,41 @@ Reads an OPML file, a single URL, or a list of CVE IDs; extracts CVE
 identifiers via regex; enriches each with CVSS (NVD) and EPSS (FIRST.org)
 data; buckets by exploitation likelihood and impact (CISA KEV as a hard
 override); and writes a CSV and a Markdown report.
+
+Navigation index — see REFACTOR_PLAN.md for the target ramen_cve/ package
+layout these sections will map to when the single-file design is split up.
+Use the section names with grep / your editor's outline view; line numbers
+will drift.
+
+  Section                                                Future module
+  --------------------------------------------------     -----------------------
+  Imports + module constants                             cli.py (top of)
+  ATT&CK / Kill-Chain mappers                            analyze.py
+  _utcnow + TLP / Admiralty math                         analyze.py
+  Exceptions (OpmlError)                                 models.py
+  Dataclasses (FeedEntry .. EnrichedCve)                 models.py
+  Cache (SQLite + every *_cache + runs + audit_log)      cache.py
+  parse_opml + extract_cves + extract_iocs + defang      extract.py
+  IOC confidence decay (_ioc_confidence, apply_*)        decay.py
+  API-key bootstrap                                      cli.py / wizard.py
+  fetch_nvd / _parse_nvd_response                        enrich/nvd.py
+  fetch_epss                                             enrich/epss.py
+  fetch_kev_catalog                                      enrich/kev.py
+  load_associations + _build_*                           associations.py
+  enrich_cves                                            enrich/orchestrator.py
+  exploit/PoC tracker                                    enrich/exploits.py
+  _EnricherBase + VT/AbuseIPDB/OTX/MalwareBazaar         enrich/iocs.py
+  load_inventory + correlate_inventory                   enrich/inventory.py
+  Dispatchers (Slack / Webhook / Email)                  dispatch/*.py
+  bucket_and_suggest + filter_by_date                    analyze.py
+  CSV / STIX / Sigma / YARA / Markdown writers           output/*.py
+  CLI parser + main + _audit_dispatch + _maybe_* helpers cli.py
+  _run_opml / _run_url / _run_cve / _run_stix            cli.py
+  _run_hunt + Hunt I/O                                   hunt.py
+  _run_pir + PIR I/O                                     pir.py
+  _run_trend + _sparkline + _record_runs                 trend.py
+  _run_audit + _redact_audit_args                        audit.py
+  _run_wizard + path validators                          wizard.py
 """
 
 from __future__ import annotations
