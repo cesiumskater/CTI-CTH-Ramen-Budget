@@ -5255,3 +5255,205 @@ def test_audit_logs_after_cve_subcommand(tmp_path, monkeypatch):
     assert rc == 0
     rows = Cache(str(db)).get_audit(10)
     assert any(r["command"] == "cve" and r["outcome"] == "rc=0" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Slice 23 — YARA rule generation
+# ---------------------------------------------------------------------------
+
+
+def test_yara_safe_name_handles_arbitrary_input():
+    """The helper produces a valid YARA identifier from any input."""
+    import ramen_cve
+
+    assert ramen_cve._yara_safe_name("Cobalt Strike") == "Cobalt_Strike"
+    assert ramen_cve._yara_safe_name("Ryuk!") == "Ryuk"
+    assert ramen_cve._yara_safe_name("CVE-2021-44228") == "CVE_2021_44228"
+    # Leading digit gets prefixed
+    assert ramen_cve._yara_safe_name("404Frame").startswith("_")
+    # Empty / None / whitespace collapses to a sentinel
+    assert ramen_cve._yara_safe_name("") == "Unknown"
+    assert ramen_cve._yara_safe_name("   ") == "Unknown"
+    assert ramen_cve._yara_safe_name(None) == "Unknown"
+
+
+def test_yara_string_escape_basic():
+    """Backslashes and double quotes are escaped for YARA string literals."""
+    import ramen_cve
+
+    assert ramen_cve._yara_string_escape('say "hi"') == 'say \\"hi\\"'
+    assert ramen_cve._yara_string_escape("C:\\evil\\bad.exe") == "C:\\\\evil\\\\bad.exe"
+    assert ramen_cve._yara_string_escape("") == ""
+
+
+def test_build_yara_stub_contains_required_metadata():
+    """Emitted rule includes rule header, id, CVE, malware family, ATT&CK, TODO blocks."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="kev_override",
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        attack_techniques=["T1059", "T1190"],
+    )
+    mw = Malware(name="Cobalt Strike", url="https://attack.mitre.org/software/S0154/")
+    out = ramen_cve._build_yara_stub(rec, mw)
+    assert out.startswith("rule Ramen_Cobalt_Strike_CVE_2021_44228")
+    assert 'cve = "CVE-2021-44228"' in out
+    assert 'malware_family = "Cobalt Strike"' in out
+    assert 'cvss = "10.0"' in out
+    assert 'epss = "0.9700"' in out
+    assert 'attack_techniques = "T1059, T1190"' in out
+    assert 'cisa_kev = "listed (due 2021-12-24) - known ransomware use"' in out
+    assert "mitre_software = \"https://attack.mitre.org/software/S0154/\"" in out
+    assert "TODO_REPLACE_ME" in out
+    assert "condition:" in out
+
+
+def test_build_yara_stub_omits_kev_block_when_not_listed():
+    """A non-KEV CVE produces a rule without the cisa_kev meta field."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        kev_listed=False,
+        attack_techniques=[],
+    )
+    mw = Malware(name="UnknownTrojan")
+    out = ramen_cve._build_yara_stub(rec, mw)
+    assert "cisa_kev" not in out
+    assert "mitre_software" not in out  # Malware.url is empty
+    assert "Ramen_UnknownTrojan_CVE_2024_0001" in out
+
+
+def test_build_yara_stub_uses_stable_id():
+    """Same (CVE, malware) input produces the same rule id across two builds."""
+    import re
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-1234", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        bucket="patch_now", cvss_score=8.0, epss_score=0.3,
+    )
+    mw = Malware(name="Acme")
+    a = ramen_cve._build_yara_stub(rec, mw)
+    b = ramen_cve._build_yara_stub(rec, mw)
+    id_a = re.search(r'id = "([^"]+)"', a).group(1)
+    id_b = re.search(r'id = "([^"]+)"', b).group(1)
+    assert id_a == id_b
+    # UUIDv4 shape
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}", id_a
+    )
+
+
+def test_write_yara_stubs_filters_by_bucket_and_malware(tmp_path):
+    """Only kev_override / patch_now CVEs with linked malware become files."""
+    from ramen_cve import EnrichedCve, Malware, write_yara_stubs
+
+    high_with_mw = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        linked_malware=[Malware("Cobalt Strike"), Malware("Ryuk")],
+    )
+    high_no_mw = EnrichedCve(
+        cve_id="CVE-2021-26855", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.8, epss_score=0.97, bucket="patch_now",
+        linked_malware=[],
+    )
+    low = EnrichedCve(
+        cve_id="CVE-2024-9999", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=4.0, epss_score=0.05, bucket="deprioritize",
+        linked_malware=[Malware("Whatever")],
+    )
+    out_dir = tmp_path / "yara"
+    written = write_yara_stubs([high_with_mw, high_no_mw, low], out_dir)
+    names = sorted(p.name for p in written)
+    assert names == [
+        "Cobalt_Strike_CVE_2021_44228.yar",
+        "Ryuk_CVE_2021_44228.yar",
+    ]
+    # No file for the patch_now CVE without malware, none for the low bucket
+    assert not (out_dir / "Whatever_CVE_2024_9999.yar").exists()
+
+
+def test_write_yara_stubs_creates_output_dir(tmp_path):
+    """Output dir is created if it doesn't already exist."""
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        linked_malware=[Malware("X")],
+    )
+    nested = tmp_path / "deeply" / "nested" / "yara"
+    files = ramen_cve.write_yara_stubs([rec], nested)
+    assert nested.is_dir()
+    assert len(files) == 1
+
+
+def test_cli_format_yara_choice_parses():
+    """--format yara is accepted on every analysis subcommand."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["opml", "x.opml", "--format", "yara"])
+    assert args.format == "yara"
+
+
+def test_output_writes_yara_dir_when_format_is_all(tmp_path):
+    """End-to-end: --format all produces a *-yara directory with one stub per malware."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_malware=[Malware("Cobalt Strike")],
+    )
+    args = argparse.Namespace(
+        format="all",
+        out_dir=tmp_path,
+        basename="run42",
+        allow_tlp_red=False,
+    )
+    ramen_cve._output([rec], args, {"version": "0.1"})
+    yara_dir = tmp_path / "run42-yara"
+    assert yara_dir.is_dir()
+    assert (yara_dir / "Cobalt_Strike_CVE_2021_44228.yar").exists()
