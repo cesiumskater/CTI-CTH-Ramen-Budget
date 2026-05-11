@@ -42,6 +42,7 @@ def test_wizard_opml_full_flow(tmp_path):
         False,                 # apply_window?
         "7.0",                 # cvss
         "0.10",                # epss
+        "",                    # basename (blank = auto)
         str(tmp_path),         # out_dir
         "csv",                 # format
         False,                 # no-cache?
@@ -79,6 +80,7 @@ def test_wizard_cve_inline_ids(tmp_path):
         False,
         "7.0",
         "0.10",
+        "",                                 # basename
         str(tmp_path),
         "both",
         True,                               # no-cache? yes
@@ -113,6 +115,7 @@ def test_wizard_url_with_window():
         "2024-12-31",
         "7.5",
         "0.20",
+        "",                  # basename
         ".",
         "md",
         False,
@@ -148,6 +151,7 @@ def test_wizard_epss_mode_forces_single_date():
         "2024-06-01",        # snapshot date
         "7.0",
         "0.10",
+        "",                  # basename
         ".",
         "csv",
         False,
@@ -220,6 +224,7 @@ def test_wizard_strips_quoted_out_dir(tmp_path):
         False,
         "7.0",
         "0.10",
+        "",                                 # basename
         quoted_out,                         # OUT-DIR with literal quotes
         "csv",
         False,
@@ -282,3 +287,180 @@ def test_main_skips_wizard_when_argv_provided(tmp_path):
         )
 
     wizard.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# UX fixes: empty defaults on OPML / out-dir, user-chosen basename
+# ---------------------------------------------------------------------------
+
+
+def test_wizard_opml_path_prompt_has_no_default(tmp_path):
+    """The OPML path prompt must NOT pre-fill examples/sample.opml; the field is empty."""
+    import inspect
+
+    import ramen_cve
+
+    src = inspect.getsource(ramen_cve._run_wizard)
+    # The pre-filled default for the OPML prompt was 'examples/sample.opml'.
+    # It must no longer appear as a default= kwarg on questionary.path(...).
+    assert 'default="examples/sample.opml"' not in src
+    assert "default='examples/sample.opml'" not in src
+
+
+def test_wizard_out_dir_prompt_has_no_dot_default(tmp_path):
+    """The Output-directory prompt must NOT pre-fill '.'; the field is empty."""
+    import inspect
+
+    import ramen_cve
+
+    src = inspect.getsource(ramen_cve._run_wizard)
+    # The old pre-fill was default=".". Confirm both the kwarg form and the
+    # value have been removed for the out_dir prompt specifically.
+    assert 'default="."' not in src
+    assert "default='.'" not in src
+
+
+def test_safe_basename_strips_path_separators_and_meta():
+    """_safe_basename rejects / \\ : * ? \" < > | and leading dots."""
+    import ramen_cve
+
+    assert ramen_cve._safe_basename("q2-triage") == "q2-triage"
+    assert ramen_cve._safe_basename("../etc/passwd") == "etc_passwd"
+    assert ramen_cve._safe_basename("a/b\\c") == "a_b_c"
+    assert ramen_cve._safe_basename('weird"name?') == "weird_name_"
+    assert ramen_cve._safe_basename("  spaced  ") == "spaced"
+    assert ramen_cve._safe_basename("") == ""
+    assert ramen_cve._safe_basename(None) == ""
+    # Leading dots stripped to avoid hidden files
+    assert ramen_cve._safe_basename(".hidden") == "hidden"
+
+
+def test_unique_output_path_honors_basename(tmp_path):
+    """When a basename is supplied, it becomes the file stem (not the timestamp)."""
+    import ramen_cve
+
+    p = ramen_cve._unique_output_path(tmp_path, "20260101T000000", "csv", basename="q2-triage")
+    assert p.name == "q2-triage.csv"
+    # Collisions still produce -N suffixes
+    p.write_text("first")
+    p2 = ramen_cve._unique_output_path(tmp_path, "20260101T000000", "csv", basename="q2-triage")
+    assert p2.name == "q2-triage-1.csv"
+
+
+def test_unique_output_path_falls_back_to_timestamp(tmp_path):
+    """Empty or missing basename falls back to ramen-cve-<ts>.<suffix>."""
+    import ramen_cve
+
+    p = ramen_cve._unique_output_path(tmp_path, "20260101T120000", "md", basename="")
+    assert p.name == "ramen-cve-20260101T120000.md"
+    p2 = ramen_cve._unique_output_path(tmp_path, "20260101T120000", "md")
+    assert p2.name.startswith("ramen-cve-")
+
+
+def test_cli_basename_flag_parses():
+    """--basename is accepted on every analysis subcommand and round-trips."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args([
+        "cve", "CVE-2021-44228", "--basename", "q2-triage",
+    ])
+    assert args.basename == "q2-triage"
+    # Default is None so existing callers (no flag) keep the timestamp behavior
+    args2 = ramen_cve.build_parser().parse_args(["cve", "CVE-2021-44228"])
+    assert args2.basename is None
+
+
+def test_wizard_basename_prompt_round_trips(tmp_path):
+    """A non-empty basename answer is appended to argv as --basename <value>."""
+    import ramen_cve
+
+    answers = [
+        "cve",
+        False,
+        "CVE-2021-44228",
+        "feed",
+        False,
+        "7.0",
+        "0.10",
+        "q2-triage",          # basename — the user picks a stem
+        str(tmp_path),
+        "csv",
+        False,
+        "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    assert "--basename" in argv
+    assert argv[argv.index("--basename") + 1] == "q2-triage"
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.basename == "q2-triage"
+
+
+def test_wizard_blank_basename_omits_flag(tmp_path):
+    """A blank basename answer must NOT emit a --basename arg (timestamp default holds)."""
+    import ramen_cve
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10",
+        "",                   # basename blank
+        str(tmp_path),
+        "csv", False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    assert "--basename" not in argv
+
+
+def test_wizard_blank_out_dir_defaults_to_cwd(tmp_path):
+    """Empty out_dir answer must resolve to '.' (current working directory)."""
+    import ramen_cve
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10",
+        "",                   # basename
+        "",                   # OUT-DIR left blank
+        "csv", False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    assert "--out-dir" in argv
+    assert argv[argv.index("--out-dir") + 1] == "."
+
+
+def test_output_honors_basename_end_to_end(tmp_path):
+    """End-to-end: --basename produces <name>.csv / <name>.md / <name>-iocs.csv files."""
+    from datetime import date
+    from unittest.mock import patch
+
+    import ramen_cve
+
+    rec = ramen_cve.EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+    )
+    ioc = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "x", date(2024, 1, 1), "feed_pub",
+    )
+    import argparse
+
+    args = argparse.Namespace(
+        format="both",
+        out_dir=tmp_path,
+        basename="my-run",
+        allow_tlp_red=False,
+    )
+    with patch("ramen_cve._maybe_dispatch"):  # not needed for this test
+        ramen_cve._output([rec], args, {"version": "0.1"}, iocs=[ioc])
+    assert (tmp_path / "my-run.csv").exists()
+    assert (tmp_path / "my-run.md").exists()
+    assert (tmp_path / "my-run-iocs.csv").exists()

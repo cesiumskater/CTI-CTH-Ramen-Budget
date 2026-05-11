@@ -3122,6 +3122,17 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
     parser.add_argument("--out-dir", type=_path_arg, default=Path("."))
     parser.add_argument(
+        "--basename",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Stem for output files (no extension). Default: ramen-cve-<UTC timestamp>. "
+            "Path separators are stripped; -iocs is appended to the IOC CSV; -sigma to "
+            "the Sigma rule directory."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=["csv", "md", "both", "stix", "sigma", "all"],
         default="both",
@@ -3309,7 +3320,6 @@ def _run_wizard() -> list[str]:
     if mode == "opml":
         path = questionary.path(
             "Path to your OPML file:",
-            default="examples/sample.opml",
             validate=lambda p: (
                 True
                 if Path(_strip_path_quotes(p)).expanduser().is_file()
@@ -3399,12 +3409,22 @@ def _run_wizard() -> list[str]:
     ).unsafe_ask()
     argv.extend(["--epss-threshold", epss])
 
+    basename = questionary.text(
+        "Output filename stem (no extension; blank = auto timestamp):",
+    ).unsafe_ask()
+    basename_clean = _safe_basename(basename)
+    if basename_clean:
+        argv.extend(["--basename", basename_clean])
+
     out_dir = questionary.path(
-        "Output directory:",
-        default=".",
+        "Output directory (blank = current working directory):",
         only_directories=True,
     ).unsafe_ask()
-    argv.extend(["--out-dir", str(Path(_strip_path_quotes(out_dir)).expanduser())])
+    out_dir_clean = _strip_path_quotes(out_dir)
+    argv.extend([
+        "--out-dir",
+        str(Path(out_dir_clean).expanduser()) if out_dir_clean else ".",
+    ])
 
     fmt = questionary.select(
         "Output format:",
@@ -3573,19 +3593,38 @@ def _get_github_token() -> str | None:
     return token
 
 
-def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
+def _safe_basename(value: str | None) -> str:
+    """Sanitize a user-supplied basename: strip whitespace, drop path separators
+    and other shell-hostile characters. Empty input returns ''.
+
+    The intent is to honor a user choice like 'q2-triage' while rejecting
+    inputs that would create files outside the chosen out-dir or that would
+    confuse common file pickers.
+    """
+    if not value:
+        return ""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", value.strip())
+    # Strip leading dots/dashes/underscores so traversal artifacts ("../etc/p")
+    # and hidden-file-style names (".cache") collapse to a clean stem.
+    return cleaned.lstrip(". -_") or ""
+
+
+def _unique_output_path(
+    out_dir: Path, ts: str, suffix: str, basename: str | None = None
+) -> Path:
     """Return a path that does not yet exist by appending -N if needed.
 
-    Two runs that land in the same wall-clock second must not silently
-    overwrite each other. We probe -1, -2, ... and return the first
-    free name. Bounded at 1000 attempts so we don't loop forever in a
-    pathological setup.
+    If `basename` is provided it becomes the file stem (e.g. 'q2-triage.csv').
+    Otherwise we fall back to the timestamped 'ramen-cve-<ts>.<suffix>' shape.
+    Two runs that land on the same stem must not silently overwrite each other:
+    we probe -1, -2, ... up to 1000 and return the first free name.
     """
-    base = out_dir / f"ramen-cve-{ts}.{suffix}"
+    stem = _safe_basename(basename) or f"ramen-cve-{ts}"
+    base = out_dir / f"{stem}.{suffix}"
     if not base.exists():
         return base
     for i in range(1, 1000):
-        candidate = out_dir / f"ramen-cve-{ts}-{i}.{suffix}"
+        candidate = out_dir / f"{stem}-{i}.{suffix}"
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
@@ -3614,6 +3653,8 @@ def _output(
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     iocs = iocs or []
+    basename = _safe_basename(getattr(args, "basename", None))
+    sigma_stem = basename or f"ramen-cve-{ts}"
 
     if not getattr(args, "allow_tlp_red", False):
         before = (len(enriched), len(iocs))
@@ -3630,26 +3671,35 @@ def _output(
             )
 
     if args.format in ("csv", "both", "all"):
-        csv_path = _unique_output_path(out_dir, ts, "csv")
+        csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
         write_csv(enriched, csv_path)
         print(str(csv_path))
         if iocs:
-            iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            # Without a basename, we want `ramen-cve-<ts>-iocs.csv`. Encoding
+            # the "-iocs" tail via the suffix kwarg keeps that shape. With a
+            # basename, we instead set the stem to `<basename>-iocs` and use
+            # a plain ".csv" suffix so we don't end up with `*-iocs.iocs.csv`.
+            if basename:
+                iocs_path = _unique_output_path(
+                    out_dir, ts, "csv", basename=f"{basename}-iocs"
+                )
+            else:
+                iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
 
     if args.format in ("md", "both", "all"):
-        md_path = _unique_output_path(out_dir, ts, "md")
+        md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
         write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
 
     if args.format in ("stix", "all"):
-        stix_path = _unique_output_path(out_dir, ts, "stix.json")
+        stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
         write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
         print(str(stix_path))
 
     if args.format in ("sigma", "all"):
-        sigma_dir = out_dir / f"ramen-cve-{ts}-sigma"
+        sigma_dir = out_dir / f"{sigma_stem}-sigma"
         files = write_sigma_stubs(enriched, sigma_dir)
         if files:
             print(str(sigma_dir))
