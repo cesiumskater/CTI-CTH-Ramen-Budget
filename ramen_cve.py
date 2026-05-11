@@ -2079,8 +2079,10 @@ def enrich_iocs(
 def load_inventory(path: Path) -> list[dict[str, str]]:
     """Load an inventory CSV with columns host, product, version (case-insensitive).
 
-    Returns a list of dicts. An optional `cpe` column is also accepted; rows
-    that supply `cpe` are matched directly without product/version inference.
+    Returns a list of dicts. Optional columns:
+      - `cpe`: explicit CPE 2.3 string (skips product/version inference).
+      - `owner`: an email address used by the --digest dispatcher to route
+        per-asset patch summaries to the right recipient.
     Raises OpmlError on missing or unreadable files.
     """
     if not path.exists():
@@ -2096,6 +2098,7 @@ def load_inventory(path: Path) -> list[dict[str, str]]:
                         "product": (r.get("product") or "").strip(),
                         "version": (r.get("version") or "").strip(),
                         "cpe": (r.get("cpe") or "").strip(),
+                        "owner": (r.get("owner") or "").strip(),
                     }
                 )
     except OSError as exc:
@@ -2300,6 +2303,133 @@ class GenericWebhookDispatcher(_DispatcherBase):
             return True
         except Exception as exc:
             _log.warning("Webhook dispatch failed for %s: %s", rec.cve_id, exc)
+            return False
+
+
+class EmailDispatcher:
+    """SMTP-based daily-digest dispatcher.
+
+    Unlike Slack / generic-webhook dispatchers, this one is BATCH-shaped: it
+    sends one email per recipient summarizing the day's high-priority
+    findings, with the CSV and Markdown reports attached. The caller is
+    _maybe_digest(), which groups findings by inventory owner before invoking
+    send_digest() once per recipient.
+
+    Configured entirely via env (no CLI surface area for credentials):
+      RAMEN_SMTP_HOST  (required)
+      RAMEN_SMTP_PORT  (default 587)
+      RAMEN_SMTP_USER  (optional)
+      RAMEN_SMTP_PASS  (optional)
+      RAMEN_SMTP_FROM  (required — 'From:' header / envelope-from)
+      RAMEN_SMTP_USE_TLS=1 (default; set to 0 to disable STARTTLS)
+      RAMEN_DIGEST_TO  (fallback recipient when no inventory owner matches)
+    """
+
+    name = "email"
+
+    def __init__(
+        self,
+        host: str | None,
+        port: int,
+        user: str | None,
+        password: str | None,
+        sender: str | None,
+        use_tls: bool,
+        fallback_recipient: str | None = None,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.sender = sender
+        self.use_tls = use_tls
+        self.fallback_recipient = fallback_recipient
+
+    @classmethod
+    def from_env(cls) -> EmailDispatcher:
+        """Build a dispatcher from RAMEN_SMTP_* / RAMEN_DIGEST_TO env vars."""
+        import os
+
+        try:
+            port = int(os.getenv("RAMEN_SMTP_PORT") or "587")
+        except ValueError:
+            port = 587
+        use_tls = (os.getenv("RAMEN_SMTP_USE_TLS") or "1").strip().lower() not in (
+            "0", "false", "no",
+        )
+        return cls(
+            host=os.getenv("RAMEN_SMTP_HOST") or None,
+            port=port,
+            user=os.getenv("RAMEN_SMTP_USER") or None,
+            password=os.getenv("RAMEN_SMTP_PASS") or None,
+            sender=os.getenv("RAMEN_SMTP_FROM") or None,
+            use_tls=use_tls,
+            fallback_recipient=os.getenv("RAMEN_DIGEST_TO") or None,
+        )
+
+    def enabled(self) -> bool:
+        """True only when both SMTP host and From address are configured."""
+        return bool(self.host) and bool(self.sender)
+
+    def _build_message(
+        self,
+        recipient: str,
+        subject: str,
+        body_markdown: str,
+        attachments: list[Path],
+    ) -> object:
+        """Compose a MIME message with a text/plain body and binary attachments."""
+        from email.mime.application import MIMEApplication
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["From"] = self.sender or ""
+        msg["To"] = recipient
+        msg["Subject"] = subject
+        # Markdown is plain text; if the recipient's client renders MD they get
+        # rich formatting, otherwise it reads fine as-is.
+        msg.attach(MIMEText(body_markdown, "plain", "utf-8"))
+        for path in attachments:
+            if not path or not path.exists():
+                continue
+            try:
+                payload = path.read_bytes()
+            except OSError as exc:
+                _log.warning("Could not attach %s to digest: %s", path, exc)
+                continue
+            part = MIMEApplication(payload, Name=path.name)
+            part["Content-Disposition"] = f'attachment; filename="{path.name}"'
+            msg.attach(part)
+        return msg
+
+    def send_digest(
+        self,
+        recipient: str,
+        subject: str,
+        body_markdown: str,
+        attachments: list[Path] | None = None,
+    ) -> bool:
+        """Send one digest email. Returns True on success, False on any failure."""
+        import smtplib
+
+        if not self.enabled():
+            _log.warning(
+                "Email digest is enabled but RAMEN_SMTP_HOST / RAMEN_SMTP_FROM "
+                "are not set; nothing was sent."
+            )
+            return False
+        msg = self._build_message(recipient, subject, body_markdown, attachments or [])
+        try:
+            with smtplib.SMTP(self.host, self.port, timeout=30) as smtp:
+                if self.use_tls:
+                    smtp.starttls()
+                if self.user and self.password:
+                    smtp.login(self.user, self.password)
+                smtp.send_message(msg)
+            return True
+        except Exception as exc:
+            _log.warning("Email digest send to %s failed: %s", recipient, exc)
             return False
 
 
@@ -3518,6 +3648,16 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--digest",
+        action="store_true",
+        help=(
+            "After writing reports, batch-mail one digest email per recipient "
+            "(keyed by the inventory CSV's `owner` column, falling back to "
+            "RAMEN_DIGEST_TO when set). SMTP via RAMEN_SMTP_* env vars. The "
+            "CSV and Markdown reports are attached. Off by default."
+        ),
+    )
+    parser.add_argument(
         "--associations-file",
         type=_path_arg,
         metavar="PATH",
@@ -3999,19 +4139,154 @@ def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> No
     _log.info("Dispatch complete: %d successful posts.", sent)
 
 
+def _group_records_by_owner(
+    enriched: list[EnrichedCve],
+    inventory_rows: list[dict[str, str]],
+    fallback_recipient: str | None,
+) -> dict[str, list[EnrichedCve]]:
+    """Map recipient email → list of EnrichedCves they should receive.
+
+    Each inventory row may have an `owner` email; we build host→owner first,
+    then for every record in (kev_override, patch_now) we route the record to
+    each owner of every affected_host. Records with no inventory match (or
+    whose hosts have no owner) go to fallback_recipient if set.
+    """
+    host_to_owners: dict[str, list[str]] = {}
+    for row in inventory_rows or []:
+        host = (row.get("host") or "").strip()
+        owner = (row.get("owner") or "").strip()
+        if host and owner:
+            host_to_owners.setdefault(host, []).append(owner)
+
+    by_owner: dict[str, list[EnrichedCve]] = {}
+    for rec in enriched:
+        if rec.bucket not in DISPATCH_DEFAULT_BUCKETS:
+            continue
+        owners_for_rec: set[str] = set()
+        for host in rec.affected_hosts:
+            for owner in host_to_owners.get(host, []):
+                owners_for_rec.add(owner)
+        if not owners_for_rec and fallback_recipient:
+            owners_for_rec.add(fallback_recipient)
+        for owner in owners_for_rec:
+            by_owner.setdefault(owner, []).append(rec)
+    return by_owner
+
+
+def _build_digest_body(
+    recipient: str,
+    records: list[EnrichedCve],
+    inventory_rows: list[dict[str, str]],
+) -> str:
+    """Render the per-recipient digest body in Markdown."""
+    host_to_owners: dict[str, list[str]] = {}
+    for row in inventory_rows or []:
+        host = (row.get("host") or "").strip()
+        owner = (row.get("owner") or "").strip()
+        if host and owner:
+            host_to_owners.setdefault(host, []).append(owner)
+
+    lines = [
+        f"# Daily Patch Digest for {recipient}",
+        "",
+        f"You have {len(records)} actionable finding(s) "
+        f"({sum(1 for r in records if r.bucket == 'kev_override')} KEV-listed).",
+        "",
+    ]
+    for rec in records:
+        owned_hosts = [
+            h for h in rec.affected_hosts
+            if recipient in host_to_owners.get(h, [])
+        ]
+        cvss = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+        lines += [
+            f"## {rec.cve_id} ({rec.bucket})",
+            f"- **Action:** {rec.suggested_action}",
+            f"- **CVSS:** {cvss}",
+        ]
+        if rec.kev_listed and rec.kev_due_date:
+            lines.append(f"- **CISA KEV due date:** {rec.kev_due_date}")
+        if owned_hosts:
+            lines.append(
+                f"- **Your hosts ({len(owned_hosts)}):** " + ", ".join(owned_hosts[:8])
+            )
+        elif rec.affected_hosts:
+            lines.append(
+                f"- **Hosts in inventory:** {len(rec.affected_hosts)}"
+            )
+        lines.append("")
+    lines += [
+        "---",
+        "*Full CSV and Markdown reports are attached.*",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _maybe_digest(
+    args: argparse.Namespace,
+    enriched: list[EnrichedCve],
+    output_paths: dict[str, Path | None],
+) -> None:
+    """If --digest is set, send one batched email per recipient with attachments.
+
+    Recipients are derived from the inventory CSV's `owner` column (per host).
+    A `RAMEN_DIGEST_TO` env var catches CVEs whose affected hosts have no
+    explicit owner. CSV (cve + ioc) and Markdown report files are attached.
+    """
+    if not getattr(args, "digest", False):
+        return
+    dispatcher = EmailDispatcher.from_env()
+    if not dispatcher.enabled():
+        _log.warning(
+            "--digest requested but RAMEN_SMTP_HOST / RAMEN_SMTP_FROM are "
+            "not configured; no digest sent."
+        )
+        return
+    inventory_rows = getattr(args, "_inventory_rows", []) or []
+    by_owner = _group_records_by_owner(
+        enriched, inventory_rows, dispatcher.fallback_recipient
+    )
+    if not by_owner:
+        _log.info(
+            "--digest: no kev_override / patch_now records mapped to a recipient; "
+            "nothing sent."
+        )
+        return
+    attachments = [
+        output_paths.get("csv"),
+        output_paths.get("iocs_csv"),
+        output_paths.get("md"),
+    ]
+    attachments = [a for a in attachments if a is not None]
+    sent = 0
+    for recipient, recs in sorted(by_owner.items()):
+        body = _build_digest_body(recipient, recs, inventory_rows)
+        subject = f"ramen-cve digest — {len(recs)} actionable CVE(s)"
+        if dispatcher.send_digest(recipient, subject, body, attachments):
+            sent += 1
+    _log.info(
+        "Email digest complete: %d / %d recipient(s) reached.", sent, len(by_owner),
+    )
+
+
 def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
     """Load --inventory (if set) and annotate each EnrichedCve with affected_hosts.
 
     A missing or unreadable inventory file is logged as an error but does NOT
     abort the run — the rest of the report is still useful without correlation.
+    The parsed inventory rows are stashed on args._inventory_rows so the email
+    digest dispatcher can map hosts → owner email addresses later.
     """
     inv_path: Path | None = getattr(args, "inventory", None)
     if not inv_path:
+        args._inventory_rows = []
         return
     try:
         inventory = load_inventory(inv_path)
     except OpmlError as exc:
         _log.error("Inventory correlation skipped: %s", exc)
+        args._inventory_rows = []
         return
     correlate_inventory(enriched, inventory)
     affected = sum(1 for r in enriched if r.affected_hosts)
@@ -4019,6 +4294,7 @@ def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[Enriched
         "Inventory correlation: %d/%d CVEs affect at least one host (%d inventory rows).",
         affected, len(enriched), len(inventory),
     )
+    args._inventory_rows = inventory
 
 
 def _get_github_token() -> str | None:
@@ -4075,8 +4351,13 @@ def _output(
     args: argparse.Namespace,
     metadata: dict,
     iocs: list[IocRecord] | None = None,
-) -> None:
+) -> dict[str, Path | None]:
     """Write CSV and/or Markdown output based on --format flag.
+
+    Returns a dict mapping output kind ('csv', 'iocs_csv', 'md', 'stix',
+    'sigma_dir', 'yara_dir') to the Path that was written, or None for the
+    kinds that --format didn't ask for. Callers use that dict to attach the
+    rendered files in downstream pushes (see _maybe_digest).
 
     When `iocs` is non-empty and --format includes csv, an additional
     `<basename>-iocs.csv` file is written next to the main CVE CSV. The
@@ -4110,10 +4391,16 @@ def _output(
                 stripped_ioc,
             )
 
+    paths: dict[str, Path | None] = {
+        "csv": None, "iocs_csv": None, "md": None,
+        "stix": None, "sigma_dir": None, "yara_dir": None,
+    }
+
     if args.format in ("csv", "both", "all"):
         csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
         write_csv(enriched, csv_path)
         print(str(csv_path))
+        paths["csv"] = csv_path
         if iocs:
             # Without a basename, we want `ramen-cve-<ts>-iocs.csv`. Encoding
             # the "-iocs" tail via the suffix kwarg keeps that shape. With a
@@ -4127,22 +4414,26 @@ def _output(
                 iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
+            paths["iocs_csv"] = iocs_path
 
     if args.format in ("md", "both", "all"):
         md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
         write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
+        paths["md"] = md_path
 
     if args.format in ("stix", "all"):
         stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
         write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
         print(str(stix_path))
+        paths["stix"] = stix_path
 
     if args.format in ("sigma", "all"):
         sigma_dir = out_dir / f"{sigma_stem}-sigma"
         files = write_sigma_stubs(enriched, sigma_dir)
         if files:
             print(str(sigma_dir))
+            paths["sigma_dir"] = sigma_dir
         else:
             _log.info(
                 "No kev_override / patch_now CVEs in this run; no Sigma stubs written."
@@ -4153,11 +4444,13 @@ def _output(
         files = write_yara_stubs(enriched, yara_dir)
         if files:
             print(str(yara_dir))
+            paths["yara_dir"] = yara_dir
         else:
             _log.info(
                 "No kev_override / patch_now CVEs with linked malware; "
                 "no YARA stubs written."
             )
+    return paths
 
 
 def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
@@ -4222,7 +4515,8 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
     return 0
 
@@ -4286,7 +4580,8 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
     return 0
 
@@ -4845,7 +5140,8 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
     return 0
 
