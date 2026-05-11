@@ -15,6 +15,7 @@ import csv
 import ipaddress
 import json
 import logging
+import math
 import re
 import sqlite3
 import sys
@@ -473,6 +474,13 @@ class IocRecord:
     enrichments: dict[str, dict] = field(default_factory=dict)
     tlp: str = "CLEAR"
     admiralty: str = ""
+    # `last_seen` is the most recent date this exact indicator was observed.
+    # Defaults to None so apply_ioc_decay() can fall back to first_seen, but a
+    # multi-run IOC reservoir should refresh it on every fresh sighting.
+    last_seen: date | None = None
+    # `confidence` decays exponentially per IOC type from 1.0 (just-seen) to 0.0
+    # (long-stale). Populated by apply_ioc_decay() before output.
+    confidence: float = 1.0
 
 
 @dataclass
@@ -926,6 +934,65 @@ def _defang_text(text: str) -> str:
     return text
 
 
+# IOC confidence-decay half-lives (days). 0 means "no decay" — a SHA-256 today
+# is still useful in five years. IP addresses age fastest (CDNs / DHCP); domain
+# names slower (registrations rotate but campaigns reuse domains for weeks);
+# emails and URLs land somewhere in between.
+IOC_HALF_LIFE_DAYS: dict[str, int] = {
+    "ipv4": 30,
+    "domain": 90,
+    "url": 30,
+    "email": 90,
+    "md5": 0,
+    "sha1": 0,
+    "sha256": 0,
+}
+
+
+def _ioc_confidence(
+    ioc_type: str,
+    last_seen: date | None,
+    today: date | None = None,
+) -> float:
+    """Return a 0..1 confidence score for an indicator given when it was last seen.
+
+    confidence = exp(-ln(2) * age_days / half_life)
+    age_days < 0 (clock skew) is clamped to 0 → 1.0.
+    half_life = 0 in IOC_HALF_LIFE_DAYS means "no decay" → 1.0.
+    A missing last_seen returns 1.0 (the IOC was just observed by definition
+    of being in the current run); callers that want stricter behavior should
+    pass an explicit last_seen.
+    """
+    if last_seen is None:
+        return 1.0
+    half_life = IOC_HALF_LIFE_DAYS.get(ioc_type, 30)
+    if half_life <= 0:
+        return 1.0
+    today = today or date.today()
+    age_days = max(0, (today - last_seen).days)
+    return math.exp(-math.log(2) * age_days / half_life)
+
+
+def apply_ioc_decay(iocs: list[IocRecord], today: date | None = None) -> list[IocRecord]:
+    """Set rec.confidence on every IOC using the exponential half-life model.
+
+    Mutates and returns the same list for chaining. `last_seen` falls back to
+    `first_seen` when not set, so a freshly-extracted IOC defaults to 1.0.
+    """
+    today = today or date.today()
+    for ioc in iocs:
+        anchor = ioc.last_seen or ioc.first_seen
+        ioc.confidence = _ioc_confidence(ioc.ioc_type, anchor, today)
+    return iocs
+
+
+def filter_iocs_by_confidence(iocs: list[IocRecord], floor: float) -> list[IocRecord]:
+    """Drop IOCs whose confidence is below the floor. A floor of 0 keeps every IOC."""
+    if floor <= 0:
+        return list(iocs)
+    return [i for i in iocs if (i.confidence or 0.0) >= floor]
+
+
 def _is_public_ip(ip_str: str) -> bool:
     """True if ip_str parses to a globally-routable unicast IPv4/IPv6 address."""
     try:
@@ -983,6 +1050,10 @@ def extract_iocs(
                 defanged_in_source=defanged_in_source,
                 tlp=tlp_norm,
                 admiralty=admiralty_norm,
+                # A freshly-extracted IOC was observed RIGHT NOW; that's the
+                # decay anchor. Multi-run reservoirs (future feature) can
+                # update this value when re-discovering a stale IOC.
+                last_seen=first_seen,
             )
         )
 
@@ -2333,6 +2404,8 @@ IOC_CSV_COLUMNS = [
     "enrichments",
     "tlp",
     "admiralty",
+    "last_seen",
+    "confidence",
 ]
 
 
@@ -2342,6 +2415,7 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
     Columns are in IOC_CSV_COLUMNS order. defanged_in_source is rendered as
     'true'/'false' so consumers can grep the file directly. The enrichments
     column is a JSON-serialized dict so the schema stays one-row-per-IOC.
+    confidence is rendered to 4 decimals (1.0000 means just-seen / no decay).
     """
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
@@ -2358,6 +2432,8 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     json.dumps(rec.enrichments) if rec.enrichments else "",
                     rec.tlp or "CLEAR",
                     rec.admiralty or "",
+                    str(rec.last_seen) if rec.last_seen else "",
+                    f"{rec.confidence:.4f}" if rec.confidence is not None else "",
                 ]
             )
 
@@ -3201,7 +3277,14 @@ def write_markdown(
             lines.append("")
             for rec in recs:
                 marker = " *(defanged in source)*" if rec.defanged_in_source else ""
-                lines.append(f"- `{_md_safe(rec.value)}`{marker}")
+                # Only call out confidence when decay has actually lowered it;
+                # a 1.0 marker would just be noise for fresh extractions.
+                conf_marker = (
+                    f" *(confidence {rec.confidence:.2f})*"
+                    if rec.confidence is not None and rec.confidence < 0.995
+                    else ""
+                )
+                lines.append(f"- `{_md_safe(rec.value)}`{marker}{conf_marker}")
                 for enricher_name, payload in sorted(rec.enrichments.items()):
                     summary = _summarize_enrichment(enricher_name, payload)
                     if summary:
@@ -3305,6 +3388,17 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         "--no-enrich-iocs",
         action="store_true",
         help="Skip per-IOC enrichment (VirusTotal / AbuseIPDB / OTX / MalwareBazaar).",
+    )
+    parser.add_argument(
+        "--ioc-confidence-floor",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Drop IOCs whose decay-weighted confidence is below this floor "
+            "(0.0..1.0; default 0.0 keeps every IOC). Half-lives per type: "
+            "IPv4 30d, URL 30d, domain 90d, email 90d; file hashes never decay."
+        ),
     )
     parser.add_argument(
         "--allow-tlp-red",
@@ -3716,6 +3810,27 @@ def _maybe_enrich_iocs(args: argparse.Namespace, iocs: list[IocRecord], cache: C
         enrich_iocs(iocs, cache)
 
 
+def _decay_and_filter_iocs(
+    args: argparse.Namespace, iocs: list[IocRecord]
+) -> list[IocRecord]:
+    """Stamp every IOC with its decay-weighted confidence and drop any below the floor.
+
+    Mutates each IOC's confidence in place, then returns a (possibly shorter)
+    list with sub-floor entries excluded. The floor defaults to 0.0 — without
+    --ioc-confidence-floor every input survives.
+    """
+    apply_ioc_decay(iocs)
+    floor = float(getattr(args, "ioc_confidence_floor", 0.0) or 0.0)
+    before = len(iocs)
+    out = filter_iocs_by_confidence(iocs, floor)
+    dropped = before - len(out)
+    if dropped:
+        _log.info(
+            "Dropped %d IOC(s) below the confidence floor (%.3f).", dropped, floor,
+        )
+    return out
+
+
 def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]]:
     """Resolve which associations file to use for this run.
 
@@ -3955,6 +4070,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -4017,6 +4133,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -4043,11 +4160,17 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
                 defanged_in_source=ioc.defanged_in_source,
                 tlp=ioc.tlp,
                 admiralty=ioc.admiralty,
+                last_seen=ioc.last_seen or ioc.first_seen,
             )
             continue
         if ioc.first_seen < existing.first_seen:
             existing.first_seen = ioc.first_seen
             existing.first_seen_type = ioc.first_seen_type
+        # last_seen: maximum across all observations wins (most recent sighting
+        # is the decay anchor).
+        new_last = ioc.last_seen or ioc.first_seen
+        if existing.last_seen is None or new_last > existing.last_seen:
+            existing.last_seen = new_last
         if ioc.defanged_in_source and not existing.defanged_in_source:
             existing.defanged_in_source = True
         if ioc.source and ioc.source not in existing.source.split("; "):
@@ -4446,6 +4569,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0

@@ -3665,7 +3665,8 @@ def test_write_iocs_csv_includes_tlp_and_admiralty(tmp_path):
     row = dict(zip(rows[0], rows[1], strict=True))
     assert row["tlp"] == "GREEN"
     assert row["admiralty"] == "B2"
-    assert IOC_CSV_COLUMNS[-2:] == ["tlp", "admiralty"]
+    assert "tlp" in IOC_CSV_COLUMNS
+    assert "admiralty" in IOC_CSV_COLUMNS
 
 
 def test_write_markdown_renders_provenance_when_set(tmp_path):
@@ -5457,3 +5458,249 @@ def test_output_writes_yara_dir_when_format_is_all(tmp_path):
     yara_dir = tmp_path / "run42-yara"
     assert yara_dir.is_dir()
     assert (yara_dir / "Cobalt_Strike_CVE_2021_44228.yar").exists()
+
+
+# ---------------------------------------------------------------------------
+# Slice 24 — IOC confidence decay
+# ---------------------------------------------------------------------------
+
+
+def test_ioc_confidence_no_decay_for_hashes():
+    """Hash IOCs (md5/sha1/sha256) have half_life=0 → confidence stays at 1.0."""
+    from datetime import date
+
+    import ramen_cve
+
+    # Even a year-old hash should still be 1.0
+    old = date(2024, 1, 1)
+    today = date(2025, 1, 1)
+    for t in ("md5", "sha1", "sha256"):
+        assert ramen_cve._ioc_confidence(t, old, today) == 1.0
+
+
+def test_ioc_confidence_decays_for_ipv4_per_half_life():
+    """At one half-life (30 days), an IPv4's confidence is 0.5."""
+    from datetime import date
+
+    import ramen_cve
+
+    seen = date(2024, 6, 1)
+    today = date(2024, 7, 1)  # exactly 30 days later
+    conf = ramen_cve._ioc_confidence("ipv4", seen, today)
+    assert abs(conf - 0.5) < 1e-6
+    # Two half-lives → 0.25
+    two_hl = ramen_cve._ioc_confidence("ipv4", seen, date(2024, 7, 31))
+    assert abs(two_hl - 0.25) < 1e-6
+
+
+def test_ioc_confidence_decays_for_domain_slower():
+    """Domains use 90-day half-life — 30-day-old domain stays ~0.79."""
+    from datetime import date
+
+    import ramen_cve
+
+    conf = ramen_cve._ioc_confidence("domain", date(2024, 6, 1), date(2024, 7, 1))
+    assert 0.79 < conf < 0.80
+
+
+def test_ioc_confidence_none_last_seen_returns_one():
+    """A None last_seen short-circuits to 1.0 (the IOC was 'just observed')."""
+    import ramen_cve
+
+    assert ramen_cve._ioc_confidence("ipv4", None) == 1.0
+
+
+def test_ioc_confidence_clamps_future_dates():
+    """A future last_seen (clock skew) doesn't push confidence above 1.0."""
+    from datetime import date
+
+    import ramen_cve
+
+    # last_seen tomorrow, today is yesterday → age = -1 day → clamped to 0
+    assert ramen_cve._ioc_confidence("ipv4", date(2024, 6, 2), date(2024, 6, 1)) == 1.0
+
+
+def test_apply_ioc_decay_mutates_in_place():
+    """apply_ioc_decay updates each IocRecord.confidence using last_seen ?? first_seen."""
+    from datetime import date
+
+    import ramen_cve
+
+    ip = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    domain = ramen_cve.IocRecord(
+        "domain", "evil.example.com", "x", date(2024, 4, 1), "feed_pub",
+        last_seen=date(2024, 4, 1),
+    )
+    today = date(2024, 4, 1)  # IP is 91 days old, domain is fresh
+    ramen_cve.apply_ioc_decay([ip, domain], today=today)
+    # IP is ~3 half-lives in (91 days / 30 ≈ 3.03), so confidence ≈ 0.123
+    assert 0.1 < ip.confidence < 0.15
+    assert abs(domain.confidence - 1.0) < 1e-6
+
+
+def test_apply_ioc_decay_falls_back_to_first_seen_when_last_seen_unset():
+    """When last_seen is None, decay uses first_seen as the anchor."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 6, 1), "feed_pub",
+        last_seen=None,
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 7, 1))
+    assert abs(rec.confidence - 0.5) < 1e-6
+
+
+def test_filter_iocs_by_confidence_drops_sub_floor():
+    """filter_iocs_by_confidence drops records strictly below the floor."""
+    from datetime import date
+
+    import ramen_cve
+
+    high = ramen_cve.IocRecord("md5", "ab" * 16, "x", date.today(), "feed_pub")
+    low = ramen_cve.IocRecord("ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub")
+    ramen_cve.apply_ioc_decay([high, low])
+    kept = ramen_cve.filter_iocs_by_confidence([high, low], 0.5)
+    assert high in kept
+    assert low not in kept
+
+
+def test_filter_iocs_floor_zero_keeps_everything():
+    """A floor of 0.0 (the default) is a no-op."""
+    from datetime import date
+
+    import ramen_cve
+
+    iocs = [
+        ramen_cve.IocRecord("ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub"),
+    ]
+    ramen_cve.apply_ioc_decay(iocs)
+    assert ramen_cve.filter_iocs_by_confidence(iocs, 0.0) == iocs
+
+
+def test_extract_iocs_sets_last_seen_to_first_seen():
+    """Freshly-extracted IOCs use first_seen as their last_seen so decay anchors today."""
+    from datetime import date
+
+    import ramen_cve
+
+    iocs = ramen_cve.extract_iocs(
+        "Beacon to 8.8.8.8 hash d41d8cd98f00b204e9800998ecf8427e",
+        "src", date(2024, 6, 1), "feed_pub",
+    )
+    assert all(i.last_seen == date(2024, 6, 1) for i in iocs)
+
+
+def test_dedupe_iocs_propagates_most_recent_last_seen():
+    """Two records for the same IOC: the merged record keeps the latest last_seen."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import _dedupe_iocs
+
+    older = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "feed-a", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    newer = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "feed-b", date(2024, 5, 1), "feed_pub",
+        last_seen=date(2024, 5, 1),
+    )
+    out = _dedupe_iocs([older, newer])
+    assert len(out) == 1
+    assert out[0].last_seen == date(2024, 5, 1)
+    # And first_seen still wins on the earliest
+    assert out[0].first_seen == date(2024, 1, 1)
+
+
+def test_write_iocs_csv_includes_confidence_and_last_seen(tmp_path):
+    """CSV header carries the two new columns; freshly-decayed rows render 1.0000."""
+    import csv
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "x", date(2024, 6, 1), "feed_pub",
+        last_seen=date(2024, 6, 1),
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 6, 1))
+    out = tmp_path / "iocs.csv"
+    ramen_cve.write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "confidence" in header and "last_seen" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["last_seen"] == "2024-06-01"
+    assert row["confidence"] == "1.0000"
+
+
+def test_write_markdown_shows_confidence_when_below_one(tmp_path):
+    """Markdown IOC line shows '(confidence X.XX)' when decay has lowered the value."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 7, 1))  # ~6 half-lives
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([], out, METADATA, iocs=[rec])
+    text = out.read_text()
+    assert "(confidence" in text
+    assert "1.2.3.4" in text
+
+
+def test_write_markdown_omits_confidence_when_fresh(tmp_path):
+    """A confidence at 1.0 should NOT clutter the Markdown line."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date.today(), "feed_pub",
+        last_seen=date.today(),
+    )
+    ramen_cve.apply_ioc_decay([rec])
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([], out, METADATA, iocs=[rec])
+    assert "confidence" not in out.read_text()
+
+
+def test_cli_ioc_confidence_floor_flag_parses():
+    """--ioc-confidence-floor is accepted and round-trips as a float."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--ioc-confidence-floor", "0.10"]
+    )
+    assert args.ioc_confidence_floor == 0.10
+
+
+def test_decay_and_filter_iocs_drops_below_floor(caplog):
+    """_decay_and_filter_iocs applies decay then enforces the floor."""
+    import argparse
+    import logging
+    from datetime import date
+
+    import ramen_cve
+
+    fresh = ramen_cve.IocRecord(
+        "md5", "ab" * 16, "x", date.today(), "feed_pub",
+    )
+    stale_ip = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub",
+        last_seen=date(2020, 1, 1),
+    )
+    args = argparse.Namespace(ioc_confidence_floor=0.5)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        out = ramen_cve._decay_and_filter_iocs(args, [fresh, stale_ip])
+    assert fresh in out
+    assert stale_ip not in out
+    assert any("below the confidence floor" in r.message for r in caplog.records)
