@@ -4971,3 +4971,287 @@ def test_output_writes_stix_when_format_is_all(tmp_path):
         o.get("type") == "vulnerability" and o.get("name") == "CVE-2024-0001"
         for o in bundle_out["objects"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 22 — Audit logging
+# ---------------------------------------------------------------------------
+
+
+def test_cache_log_audit_round_trip():
+    """log_audit + get_audit round-trip a row in chronological order."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    c.log_audit("alice", "cve", '{"cves":["CVE-2021-44228"]}', "rc=0")
+    c.log_audit("alice", "opml", '{"path":"feeds.opml"}', "rc=0")
+    rows = c.get_audit(10)
+    assert [r["command"] for r in rows] == ["cve", "opml"]
+    assert rows[0]["actor"] == "alice"
+    assert rows[0]["outcome"] == "rc=0"
+    assert rows[0]["args_redacted"] == '{"cves":["CVE-2021-44228"]}'
+
+
+def test_cache_audit_log_limit_keeps_most_recent():
+    """get_audit(limit=N) returns the most recent N entries, oldest first."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    for i in range(5):
+        c.log_audit("alice", f"cmd-{i}", "{}", "rc=0")
+    rows = c.get_audit(3)
+    assert len(rows) == 3
+    # Most recent 3 are cmd-2, cmd-3, cmd-4 (returned in chronological order)
+    assert [r["command"] for r in rows] == ["cmd-2", "cmd-3", "cmd-4"]
+
+
+def test_cache_audit_log_table_has_no_update_or_delete_helper():
+    """Append-only contract: Cache exposes log_audit / get_audit but no setters
+    that mutate or remove rows. This is the chain-of-custody requirement."""
+    from ramen_cve import Cache
+
+    audit_methods = {m for m in dir(Cache) if "audit" in m.lower()}
+    # Allowed surface: log_audit, get_audit. Nothing else.
+    assert audit_methods == {"log_audit", "get_audit"}
+
+
+def test_audit_actor_returns_str():
+    """`_audit_actor` returns a non-empty string under normal conditions."""
+    import ramen_cve
+
+    assert isinstance(ramen_cve._audit_actor(), str)
+    assert ramen_cve._audit_actor() != ""
+
+
+def test_audit_actor_falls_back_when_getuser_raises(monkeypatch):
+    """If getpass.getuser() raises OSError (no user env), return 'unknown'."""
+    import getpass
+
+    import ramen_cve
+
+    def _boom():
+        raise OSError("no user")
+
+    monkeypatch.setattr(getpass, "getuser", _boom)
+    assert ramen_cve._audit_actor() == "unknown"
+
+
+def test_redact_audit_args_masks_sensitive_fields():
+    """Fields with 'key', 'pass', 'token', 'secret' in the name are replaced with '***'."""
+    import argparse
+
+    import ramen_cve
+
+    ns = argparse.Namespace(
+        cves=["CVE-2021-44228"],
+        nvd_api_key="real-secret-key",
+        taxii_pass="hunter2",
+        github_token="ghp_real",
+        slack_secret="real-webhook",
+        cvss_threshold=7.0,
+    )
+    blob = ramen_cve._redact_audit_args(ns)
+    data = json.loads(blob)
+    assert data["cves"] == ["CVE-2021-44228"]
+    assert data["nvd_api_key"] == "***"
+    assert data["taxii_pass"] == "***"
+    assert data["github_token"] == "***"
+    assert data["slack_secret"] == "***"
+    assert data["cvss_threshold"] == 7.0
+
+
+def test_redact_audit_args_stringifies_path_and_date():
+    """Path and date values become JSON-serializable strings."""
+    import argparse
+    from pathlib import Path
+
+    import ramen_cve
+
+    ns = argparse.Namespace(
+        out_dir=Path("/tmp/reports"),
+        start=date(2024, 6, 1),
+        end=None,
+    )
+    blob = ramen_cve._redact_audit_args(ns)
+    data = json.loads(blob)
+    assert data["out_dir"] == "/tmp/reports"
+    assert data["start"] == "2024-06-01"
+    assert data["end"] is None
+
+
+def test_redact_audit_args_blank_sensitive_field_serializes_as_null():
+    """An unset sensitive arg (None / '') is recorded as null, not '***'."""
+    import argparse
+
+    import ramen_cve
+
+    ns = argparse.Namespace(nvd_api_key=None, taxii_pass="")
+    data = json.loads(ramen_cve._redact_audit_args(ns))
+    assert data["nvd_api_key"] is None
+    assert data["taxii_pass"] is None
+
+
+def test_audit_dispatch_records_success_outcome():
+    """A runner that returns 0 is logged with outcome='rc=0'."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+    args = argparse.Namespace(foo="bar")
+    rc = ramen_cve._audit_dispatch(cache, "cve", args, lambda: 0)
+    assert rc == 0
+    rows = cache.get_audit(10)
+    assert rows[-1]["command"] == "cve"
+    assert rows[-1]["outcome"] == "rc=0"
+
+
+def test_audit_dispatch_records_nonzero_outcome():
+    """A runner that returns non-zero is logged with that rc."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+    rc = ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), lambda: 2)
+    assert rc == 2
+    assert cache.get_audit(1)[0]["outcome"] == "rc=2"
+
+
+def test_audit_dispatch_records_exception_and_reraises():
+    """When the runner raises, the audit row records the exception type and we re-raise."""
+    import argparse
+
+    import pytest
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+
+    def _boom():
+        raise RuntimeError("kaboom")
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), _boom)
+    rows = cache.get_audit(1)
+    assert rows[0]["outcome"].startswith("error: RuntimeError")
+
+
+def test_audit_dispatch_swallows_audit_write_failure(monkeypatch):
+    """If log_audit itself blows up, the runner's result still surfaces."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+
+    def _broken_log(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cache, "log_audit", _broken_log)
+    rc = ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), lambda: 0)
+    assert rc == 0  # audit failure is non-fatal
+
+
+def test_cli_audit_subcommand_parses():
+    """The `audit` subcommand accepts --tail."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["audit", "--tail", "5"])
+    assert args.subcommand == "audit"
+    assert args.tail == 5
+
+
+def test_audit_subcommand_prints_markdown_table(tmp_path, monkeypatch, capsys):
+    """`ramen_cve audit` prints a Markdown header + table of recent entries."""
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    c = Cache(str(db))
+    c.log_audit("alice", "cve", '{"cves":["CVE-2021-44228"]}', "rc=0")
+    c.log_audit("alice", "opml", '{"path":"feeds.opml"}', "rc=0")
+
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    rc = ramen_cve.main(["audit", "--tail", "10"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Audit log" in out
+    assert "| Timestamp (UTC) | Actor | Command | Outcome | Args |" in out
+    assert "| alice | cve |" in out
+    assert "| alice | opml |" in out
+
+
+def test_audit_subcommand_empty_log_logs_info(tmp_path, monkeypatch, caplog):
+    """An empty audit log produces an INFO message, not an empty table."""
+    import logging
+
+    import ramen_cve
+
+    db = tmp_path / "cache.db"
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        rc = ramen_cve.main(["audit"])
+    assert rc == 0
+    assert any("Audit log is empty" in r.message for r in caplog.records)
+
+
+def test_audit_subcommand_does_not_self_log(tmp_path, monkeypatch):
+    """Reading the audit log must NOT append a new audit row."""
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    c = Cache(str(db))
+    c.log_audit("alice", "cve", "{}", "rc=0")
+    before = len(c.get_audit(100))
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    ramen_cve.main(["audit"])
+    # Re-open to bypass connection-level caching, then count again.
+    after = len(Cache(str(db)).get_audit(100))
+    assert after == before
+
+
+def test_audit_logs_after_cve_subcommand(tmp_path, monkeypatch):
+    """End-to-end: running `cve` followed by `audit` shows the cve invocation."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    monkeypatch.setenv("NVD_API_KEY", "test-key")
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.status_code = 200
+        if "epss" in url:
+            resp.json.return_value = {"data": []}
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = {"vulnerabilities": []}
+        resp.text = ""
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.requests.post", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "cve", "CVE-2021-44228",
+            "--out-dir", str(tmp_path),
+            "--format", "csv",
+            "--no-exploit-lookup",
+            "--no-enrich-iocs",
+        ])
+    assert rc == 0
+    rows = Cache(str(db)).get_audit(10)
+    assert any(r["command"] == "cve" and r["outcome"] == "rc=0" for r in rows)

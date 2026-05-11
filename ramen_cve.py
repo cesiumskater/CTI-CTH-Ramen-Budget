@@ -596,6 +596,14 @@ class Cache:
             epss_score  REAL,
             PRIMARY KEY (cve_id, ts_iso)
         );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_iso          TEXT NOT NULL,
+            actor           TEXT NOT NULL,
+            command         TEXT NOT NULL,
+            args_redacted   TEXT NOT NULL,
+            outcome         TEXT NOT NULL
+        );
     """
 
     def __init__(self, path: Path | str, ttl_hours: int = DEFAULT_CACHE_TTL_HOURS) -> None:
@@ -741,6 +749,52 @@ class Cache:
         return [
             {"ts_iso": r[0], "bucket": r[1], "cvss_score": r[2], "epss_score": r[3]}
             for r in rows
+        ]
+
+    def log_audit(
+        self,
+        actor: str,
+        command: str,
+        args_redacted: str,
+        outcome: str,
+        ts_iso: str | None = None,
+    ) -> None:
+        """Append-only audit record.
+
+        Intentionally NEVER updates or deletes — the table is the on-disk
+        chain-of-custody for who ran what when. `ts_iso` may be pre-recorded
+        from the start of the action; if omitted, we stamp now.
+        """
+        self._conn.execute(
+            "INSERT INTO audit_log (ts_iso, actor, command, args_redacted, outcome) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                ts_iso or _utcnow().isoformat(timespec="seconds"),
+                actor,
+                command,
+                args_redacted,
+                outcome,
+            ),
+        )
+        self._conn.commit()
+
+    def get_audit(self, limit: int = 100) -> list[dict]:
+        """Return the most recent `limit` audit entries in chronological order."""
+        rows = self._conn.execute(
+            "SELECT id, ts_iso, actor, command, args_redacted, outcome "
+            "FROM audit_log ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "ts_iso": r[1],
+                "actor": r[2],
+                "command": r[3],
+                "args_redacted": r[4],
+                "outcome": r[5],
+            }
+            for r in reversed(rows)
         ]
 
     def purge(self) -> None:
@@ -3253,6 +3307,22 @@ def build_parser() -> argparse.ArgumentParser:
     trend_p.add_argument("--quiet", action="store_true")
     trend_p.add_argument("--verbose", action="store_true")
 
+    # audit subcommand: tail the append-only audit log
+    audit_p = sub.add_parser(
+        "audit",
+        help="Show the tail of the append-only audit log of past ramen_cve commands.",
+    )
+    audit_p.add_argument(
+        "--tail", type=int, default=20,
+        help="How many of the most recent entries to print (default 20).",
+    )
+    audit_p.add_argument(
+        "--no-cache", action="store_true",
+        help="Read the in-memory audit log only (always empty; useful for tests).",
+    )
+    audit_p.add_argument("--quiet", action="store_true")
+    audit_p.add_argument("--verbose", action="store_true")
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=_path_arg, help="Path to a STIX bundle JSON file.")
@@ -3494,17 +3564,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args)
 
-    # The hunt subcommand is a pure local-file workflow: no NVD/EPSS/cache
-    # plumbing, no API-key prompt, no shared --no-cache / --format flags.
-    # Short-circuit before any of that runs.
+    # The hunt subcommand is a pure local-file workflow but we still open
+    # the cache so audit logging can persist. trend / audit are similar —
+    # all three skip _validate_args (which expects analysis-specific args).
     if args.subcommand == "hunt":
-        return _run_hunt(args, cache=None, api_key=None)  # type: ignore[arg-type]
+        cache_path = DEFAULT_CACHE_PATH
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "hunt", args, lambda: _run_hunt(args, cache, None))
 
-    # The trend subcommand is also a pure read-from-cache workflow — it has
-    # --no-cache but none of the analysis flags _validate_args expects.
     if args.subcommand == "trend":
         cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
-        return _run_trend(args, Cache(cache_path), api_key=None)
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "trend", args, lambda: _run_trend(args, cache, None))
+
+    # The audit subcommand reads the log; it must NOT log itself (every
+    # `ramen_cve audit` would otherwise grow the table it's trying to read).
+    if args.subcommand == "audit":
+        cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
+        return _run_audit(args, Cache(cache_path), api_key=None)
 
     _validate_args(args, parser)
 
@@ -3523,15 +3600,13 @@ def main(argv: list[str] | None = None) -> int:
             api_key = prompted
 
     if args.subcommand == "opml":
-        return _run_opml(args, cache, api_key)
+        return _audit_dispatch(cache, "opml", args, lambda: _run_opml(args, cache, api_key))
     if args.subcommand == "url":
-        return _run_url(args, cache, api_key)
+        return _audit_dispatch(cache, "url", args, lambda: _run_url(args, cache, api_key))
     if args.subcommand == "cve":
-        return _run_cve(args, cache, api_key)
+        return _audit_dispatch(cache, "cve", args, lambda: _run_cve(args, cache, api_key))
     if args.subcommand == "stix":
-        return _run_stix(args, cache, api_key)
-    if args.subcommand == "trend":
-        return _run_trend(args, cache, api_key)
+        return _audit_dispatch(cache, "stix", args, lambda: _run_stix(args, cache, api_key))
     return 1
 
 
@@ -4101,6 +4176,105 @@ def _run_trend(args: argparse.Namespace, cache: Cache, api_key: str | None) -> i
         cv = f"{r['cvss_score']:.1f}" if r["cvss_score"] is not None else "N/A"
         ep = f"{r['epss_score']:.4f}" if r["epss_score"] is not None else "N/A"
         print(f"| {r['ts_iso']} | {r['bucket']} | {cv} | {ep} |")
+    return 0
+
+
+_AUDIT_SENSITIVE_KEYS = ("key", "pass", "token", "secret")
+
+
+def _audit_actor() -> str:
+    """Return the current OS user for audit attribution.
+
+    `getpass.getuser()` consults LOGNAME / USER / LNAME / USERNAME (per the
+    Python stdlib) and raises OSError on platforms that have none of them.
+    Fall back to 'unknown' rather than aborting the run.
+    """
+    import getpass
+
+    try:
+        return getpass.getuser() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def _redact_audit_args(args: argparse.Namespace) -> str:
+    """JSON-serialize argparse Namespace with sensitive values masked.
+
+    Any field whose name contains 'key', 'pass', 'token', or 'secret' is
+    replaced with '***'. Paths / dates / non-JSON-native types are stringified.
+    """
+    out: dict[str, object] = {}
+    for k, v in vars(args).items():
+        if v is None:
+            out[k] = None
+            continue
+        if any(s in k.lower() for s in _AUDIT_SENSITIVE_KEYS):
+            out[k] = "***" if v else None
+            continue
+        if isinstance(v, Path):
+            out[k] = str(v)
+        elif isinstance(v, date):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return json.dumps(out, default=str, sort_keys=True)
+
+
+def _audit_dispatch(
+    cache: Cache | None,
+    command: str,
+    args: argparse.Namespace,
+    runner,
+) -> int:
+    """Run `runner`, persist an audit row, and return the runner's exit code.
+
+    `runner` is a zero-arg callable that returns the subcommand's rc. We
+    capture exceptions, record the outcome, and re-raise so the user-facing
+    behavior is unchanged. A None `cache` (interactive bootstrap before the
+    cache is opened) skips logging silently — never abort a real run for an
+    audit-write failure.
+    """
+    actor = _audit_actor()
+    args_redacted = _redact_audit_args(args)
+    ts_iso = _utcnow().isoformat(timespec="seconds")
+    try:
+        rc = runner()
+    except Exception as exc:
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                cache.log_audit(
+                    actor, command, args_redacted,
+                    outcome=f"error: {type(exc).__name__}",
+                    ts_iso=ts_iso,
+                )
+        raise
+    if cache is not None:
+        with contextlib.suppress(Exception):
+            cache.log_audit(
+                actor, command, args_redacted,
+                outcome=f"rc={rc}",
+                ts_iso=ts_iso,
+            )
+    return rc
+
+
+def _run_audit(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Print the tail of the append-only audit log as a Markdown table."""
+    limit = max(1, int(getattr(args, "tail", 20)))
+    rows = cache.get_audit(limit)
+    if not rows:
+        _log.info("Audit log is empty.")
+        return 0
+    print(f"# Audit log — last {len(rows)} entries")
+    print()
+    print("| Timestamp (UTC) | Actor | Command | Outcome | Args |")
+    print("| --- | --- | --- | --- | --- |")
+    for r in rows:
+        # Backticks around args so JSON commas don't break the markdown column.
+        print(
+            f"| {r['ts_iso']} | {r['actor']} | {r['command']} | "
+            f"{r['outcome']} | `{r['args_redacted']}` |"
+        )
     return 0
 
 
