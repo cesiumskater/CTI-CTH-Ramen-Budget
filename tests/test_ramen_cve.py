@@ -3665,7 +3665,8 @@ def test_write_iocs_csv_includes_tlp_and_admiralty(tmp_path):
     row = dict(zip(rows[0], rows[1], strict=True))
     assert row["tlp"] == "GREEN"
     assert row["admiralty"] == "B2"
-    assert IOC_CSV_COLUMNS[-2:] == ["tlp", "admiralty"]
+    assert "tlp" in IOC_CSV_COLUMNS
+    assert "admiralty" in IOC_CSV_COLUMNS
 
 
 def test_write_markdown_renders_provenance_when_set(tmp_path):
@@ -4971,3 +4972,949 @@ def test_output_writes_stix_when_format_is_all(tmp_path):
         o.get("type") == "vulnerability" and o.get("name") == "CVE-2024-0001"
         for o in bundle_out["objects"]
     )
+
+
+# ---------------------------------------------------------------------------
+# Slice 22 — Audit logging
+# ---------------------------------------------------------------------------
+
+
+def test_cache_log_audit_round_trip():
+    """log_audit + get_audit round-trip a row in chronological order."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    c.log_audit("alice", "cve", '{"cves":["CVE-2021-44228"]}', "rc=0")
+    c.log_audit("alice", "opml", '{"path":"feeds.opml"}', "rc=0")
+    rows = c.get_audit(10)
+    assert [r["command"] for r in rows] == ["cve", "opml"]
+    assert rows[0]["actor"] == "alice"
+    assert rows[0]["outcome"] == "rc=0"
+    assert rows[0]["args_redacted"] == '{"cves":["CVE-2021-44228"]}'
+
+
+def test_cache_audit_log_limit_keeps_most_recent():
+    """get_audit(limit=N) returns the most recent N entries, oldest first."""
+    from ramen_cve import Cache
+
+    c = Cache(":memory:")
+    for i in range(5):
+        c.log_audit("alice", f"cmd-{i}", "{}", "rc=0")
+    rows = c.get_audit(3)
+    assert len(rows) == 3
+    # Most recent 3 are cmd-2, cmd-3, cmd-4 (returned in chronological order)
+    assert [r["command"] for r in rows] == ["cmd-2", "cmd-3", "cmd-4"]
+
+
+def test_cache_audit_log_table_has_no_update_or_delete_helper():
+    """Append-only contract: Cache exposes log_audit / get_audit but no setters
+    that mutate or remove rows. This is the chain-of-custody requirement."""
+    from ramen_cve import Cache
+
+    audit_methods = {m for m in dir(Cache) if "audit" in m.lower()}
+    # Allowed surface: log_audit, get_audit. Nothing else.
+    assert audit_methods == {"log_audit", "get_audit"}
+
+
+def test_audit_actor_returns_str():
+    """`_audit_actor` returns a non-empty string under normal conditions."""
+    import ramen_cve
+
+    assert isinstance(ramen_cve._audit_actor(), str)
+    assert ramen_cve._audit_actor() != ""
+
+
+def test_audit_actor_falls_back_when_getuser_raises(monkeypatch):
+    """If getpass.getuser() raises OSError (no user env), return 'unknown'."""
+    import getpass
+
+    import ramen_cve
+
+    def _boom():
+        raise OSError("no user")
+
+    monkeypatch.setattr(getpass, "getuser", _boom)
+    assert ramen_cve._audit_actor() == "unknown"
+
+
+def test_redact_audit_args_masks_sensitive_fields():
+    """Fields with 'key', 'pass', 'token', 'secret' in the name are replaced with '***'."""
+    import argparse
+
+    import ramen_cve
+
+    ns = argparse.Namespace(
+        cves=["CVE-2021-44228"],
+        nvd_api_key="real-secret-key",
+        taxii_pass="hunter2",
+        github_token="ghp_real",
+        slack_secret="real-webhook",
+        cvss_threshold=7.0,
+    )
+    blob = ramen_cve._redact_audit_args(ns)
+    data = json.loads(blob)
+    assert data["cves"] == ["CVE-2021-44228"]
+    assert data["nvd_api_key"] == "***"
+    assert data["taxii_pass"] == "***"
+    assert data["github_token"] == "***"
+    assert data["slack_secret"] == "***"
+    assert data["cvss_threshold"] == 7.0
+
+
+def test_redact_audit_args_stringifies_path_and_date():
+    """Path and date values become JSON-serializable strings."""
+    import argparse
+    from pathlib import Path
+
+    import ramen_cve
+
+    ns = argparse.Namespace(
+        out_dir=Path("/tmp/reports"),
+        start=date(2024, 6, 1),
+        end=None,
+    )
+    blob = ramen_cve._redact_audit_args(ns)
+    data = json.loads(blob)
+    assert data["out_dir"] == "/tmp/reports"
+    assert data["start"] == "2024-06-01"
+    assert data["end"] is None
+
+
+def test_redact_audit_args_blank_sensitive_field_serializes_as_null():
+    """An unset sensitive arg (None / '') is recorded as null, not '***'."""
+    import argparse
+
+    import ramen_cve
+
+    ns = argparse.Namespace(nvd_api_key=None, taxii_pass="")
+    data = json.loads(ramen_cve._redact_audit_args(ns))
+    assert data["nvd_api_key"] is None
+    assert data["taxii_pass"] is None
+
+
+def test_audit_dispatch_records_success_outcome():
+    """A runner that returns 0 is logged with outcome='rc=0'."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+    args = argparse.Namespace(foo="bar")
+    rc = ramen_cve._audit_dispatch(cache, "cve", args, lambda: 0)
+    assert rc == 0
+    rows = cache.get_audit(10)
+    assert rows[-1]["command"] == "cve"
+    assert rows[-1]["outcome"] == "rc=0"
+
+
+def test_audit_dispatch_records_nonzero_outcome():
+    """A runner that returns non-zero is logged with that rc."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+    rc = ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), lambda: 2)
+    assert rc == 2
+    assert cache.get_audit(1)[0]["outcome"] == "rc=2"
+
+
+def test_audit_dispatch_records_exception_and_reraises():
+    """When the runner raises, the audit row records the exception type and we re-raise."""
+    import argparse
+
+    import pytest
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+
+    def _boom():
+        raise RuntimeError("kaboom")
+
+    with pytest.raises(RuntimeError, match="kaboom"):
+        ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), _boom)
+    rows = cache.get_audit(1)
+    assert rows[0]["outcome"].startswith("error: RuntimeError")
+
+
+def test_audit_dispatch_swallows_audit_write_failure(monkeypatch):
+    """If log_audit itself blows up, the runner's result still surfaces."""
+    import argparse
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    cache = Cache(":memory:")
+
+    def _broken_log(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cache, "log_audit", _broken_log)
+    rc = ramen_cve._audit_dispatch(cache, "cve", argparse.Namespace(), lambda: 0)
+    assert rc == 0  # audit failure is non-fatal
+
+
+def test_cli_audit_subcommand_parses():
+    """The `audit` subcommand accepts --tail."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["audit", "--tail", "5"])
+    assert args.subcommand == "audit"
+    assert args.tail == 5
+
+
+def test_audit_subcommand_prints_markdown_table(tmp_path, monkeypatch, capsys):
+    """`ramen_cve audit` prints a Markdown header + table of recent entries."""
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    c = Cache(str(db))
+    c.log_audit("alice", "cve", '{"cves":["CVE-2021-44228"]}', "rc=0")
+    c.log_audit("alice", "opml", '{"path":"feeds.opml"}', "rc=0")
+
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    rc = ramen_cve.main(["audit", "--tail", "10"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Audit log" in out
+    assert "| Timestamp (UTC) | Actor | Command | Outcome | Args |" in out
+    assert "| alice | cve |" in out
+    assert "| alice | opml |" in out
+
+
+def test_audit_subcommand_empty_log_logs_info(tmp_path, monkeypatch, caplog):
+    """An empty audit log produces an INFO message, not an empty table."""
+    import logging
+
+    import ramen_cve
+
+    db = tmp_path / "cache.db"
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        rc = ramen_cve.main(["audit"])
+    assert rc == 0
+    assert any("Audit log is empty" in r.message for r in caplog.records)
+
+
+def test_audit_subcommand_does_not_self_log(tmp_path, monkeypatch):
+    """Reading the audit log must NOT append a new audit row."""
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    c = Cache(str(db))
+    c.log_audit("alice", "cve", "{}", "rc=0")
+    before = len(c.get_audit(100))
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    ramen_cve.main(["audit"])
+    # Re-open to bypass connection-level caching, then count again.
+    after = len(Cache(str(db)).get_audit(100))
+    assert after == before
+
+
+def test_audit_logs_after_cve_subcommand(tmp_path, monkeypatch):
+    """End-to-end: running `cve` followed by `audit` shows the cve invocation."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+    from ramen_cve import Cache
+
+    db = tmp_path / "cache.db"
+    monkeypatch.setattr("ramen_cve.DEFAULT_CACHE_PATH", str(db))
+    monkeypatch.setenv("NVD_API_KEY", "test-key")
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.status_code = 200
+        if "epss" in url:
+            resp.json.return_value = {"data": []}
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = {"vulnerabilities": []}
+        resp.text = ""
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.requests.post", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+    ):
+        rc = ramen_cve.main([
+            "cve", "CVE-2021-44228",
+            "--out-dir", str(tmp_path),
+            "--format", "csv",
+            "--no-exploit-lookup",
+            "--no-enrich-iocs",
+        ])
+    assert rc == 0
+    rows = Cache(str(db)).get_audit(10)
+    assert any(r["command"] == "cve" and r["outcome"] == "rc=0" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Slice 23 — YARA rule generation
+# ---------------------------------------------------------------------------
+
+
+def test_yara_safe_name_handles_arbitrary_input():
+    """The helper produces a valid YARA identifier from any input."""
+    import ramen_cve
+
+    assert ramen_cve._yara_safe_name("Cobalt Strike") == "Cobalt_Strike"
+    assert ramen_cve._yara_safe_name("Ryuk!") == "Ryuk"
+    assert ramen_cve._yara_safe_name("CVE-2021-44228") == "CVE_2021_44228"
+    # Leading digit gets prefixed
+    assert ramen_cve._yara_safe_name("404Frame").startswith("_")
+    # Empty / None / whitespace collapses to a sentinel
+    assert ramen_cve._yara_safe_name("") == "Unknown"
+    assert ramen_cve._yara_safe_name("   ") == "Unknown"
+    assert ramen_cve._yara_safe_name(None) == "Unknown"
+
+
+def test_yara_string_escape_basic():
+    """Backslashes and double quotes are escaped for YARA string literals."""
+    import ramen_cve
+
+    assert ramen_cve._yara_string_escape('say "hi"') == 'say \\"hi\\"'
+    assert ramen_cve._yara_string_escape("C:\\evil\\bad.exe") == "C:\\\\evil\\\\bad.exe"
+    assert ramen_cve._yara_string_escape("") == ""
+
+
+def test_build_yara_stub_contains_required_metadata():
+    """Emitted rule includes rule header, id, CVE, malware family, ATT&CK, TODO blocks."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="kev_override",
+        kev_listed=True,
+        kev_due_date=date(2021, 12, 24),
+        kev_known_ransomware_use=True,
+        attack_techniques=["T1059", "T1190"],
+    )
+    mw = Malware(name="Cobalt Strike", url="https://attack.mitre.org/software/S0154/")
+    out = ramen_cve._build_yara_stub(rec, mw)
+    assert out.startswith("rule Ramen_Cobalt_Strike_CVE_2021_44228")
+    assert 'cve = "CVE-2021-44228"' in out
+    assert 'malware_family = "Cobalt Strike"' in out
+    assert 'cvss = "10.0"' in out
+    assert 'epss = "0.9700"' in out
+    assert 'attack_techniques = "T1059, T1190"' in out
+    assert 'cisa_kev = "listed (due 2021-12-24) - known ransomware use"' in out
+    assert "mitre_software = \"https://attack.mitre.org/software/S0154/\"" in out
+    assert "TODO_REPLACE_ME" in out
+    assert "condition:" in out
+
+
+def test_build_yara_stub_omits_kev_block_when_not_listed():
+    """A non-KEV CVE produces a rule without the cisa_kev meta field."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        kev_listed=False,
+        attack_techniques=[],
+    )
+    mw = Malware(name="UnknownTrojan")
+    out = ramen_cve._build_yara_stub(rec, mw)
+    assert "cisa_kev" not in out
+    assert "mitre_software" not in out  # Malware.url is empty
+    assert "Ramen_UnknownTrojan_CVE_2024_0001" in out
+
+
+def test_build_yara_stub_uses_stable_id():
+    """Same (CVE, malware) input produces the same rule id across two builds."""
+    import re
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-1234", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        bucket="patch_now", cvss_score=8.0, epss_score=0.3,
+    )
+    mw = Malware(name="Acme")
+    a = ramen_cve._build_yara_stub(rec, mw)
+    b = ramen_cve._build_yara_stub(rec, mw)
+    id_a = re.search(r'id = "([^"]+)"', a).group(1)
+    id_b = re.search(r'id = "([^"]+)"', b).group(1)
+    assert id_a == id_b
+    # UUIDv4 shape
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}", id_a
+    )
+
+
+def test_write_yara_stubs_filters_by_bucket_and_malware(tmp_path):
+    """Only kev_override / patch_now CVEs with linked malware become files."""
+    from ramen_cve import EnrichedCve, Malware, write_yara_stubs
+
+    high_with_mw = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        linked_malware=[Malware("Cobalt Strike"), Malware("Ryuk")],
+    )
+    high_no_mw = EnrichedCve(
+        cve_id="CVE-2021-26855", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.8, epss_score=0.97, bucket="patch_now",
+        linked_malware=[],
+    )
+    low = EnrichedCve(
+        cve_id="CVE-2024-9999", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=4.0, epss_score=0.05, bucket="deprioritize",
+        linked_malware=[Malware("Whatever")],
+    )
+    out_dir = tmp_path / "yara"
+    written = write_yara_stubs([high_with_mw, high_no_mw, low], out_dir)
+    names = sorted(p.name for p in written)
+    assert names == [
+        "Cobalt_Strike_CVE_2021_44228.yar",
+        "Ryuk_CVE_2021_44228.yar",
+    ]
+    # No file for the patch_now CVE without malware, none for the low bucket
+    assert not (out_dir / "Whatever_CVE_2024_9999.yar").exists()
+
+
+def test_write_yara_stubs_creates_output_dir(tmp_path):
+    """Output dir is created if it doesn't already exist."""
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+        linked_malware=[Malware("X")],
+    )
+    nested = tmp_path / "deeply" / "nested" / "yara"
+    files = ramen_cve.write_yara_stubs([rec], nested)
+    assert nested.is_dir()
+    assert len(files) == 1
+
+
+def test_cli_format_yara_choice_parses():
+    """--format yara is accepted on every analysis subcommand."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["opml", "x.opml", "--format", "yara"])
+    assert args.format == "yara"
+
+
+def test_output_writes_yara_dir_when_format_is_all(tmp_path):
+    """End-to-end: --format all produces a *-yara directory with one stub per malware."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, Malware
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        cvss_severity="CRITICAL",
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_malware=[Malware("Cobalt Strike")],
+    )
+    args = argparse.Namespace(
+        format="all",
+        out_dir=tmp_path,
+        basename="run42",
+        allow_tlp_red=False,
+    )
+    ramen_cve._output([rec], args, {"version": "0.1"})
+    yara_dir = tmp_path / "run42-yara"
+    assert yara_dir.is_dir()
+    assert (yara_dir / "Cobalt_Strike_CVE_2021_44228.yar").exists()
+
+
+# ---------------------------------------------------------------------------
+# Slice 24 — IOC confidence decay
+# ---------------------------------------------------------------------------
+
+
+def test_ioc_confidence_no_decay_for_hashes():
+    """Hash IOCs (md5/sha1/sha256) have half_life=0 → confidence stays at 1.0."""
+    from datetime import date
+
+    import ramen_cve
+
+    # Even a year-old hash should still be 1.0
+    old = date(2024, 1, 1)
+    today = date(2025, 1, 1)
+    for t in ("md5", "sha1", "sha256"):
+        assert ramen_cve._ioc_confidence(t, old, today) == 1.0
+
+
+def test_ioc_confidence_decays_for_ipv4_per_half_life():
+    """At one half-life (30 days), an IPv4's confidence is 0.5."""
+    from datetime import date
+
+    import ramen_cve
+
+    seen = date(2024, 6, 1)
+    today = date(2024, 7, 1)  # exactly 30 days later
+    conf = ramen_cve._ioc_confidence("ipv4", seen, today)
+    assert abs(conf - 0.5) < 1e-6
+    # Two half-lives → 0.25
+    two_hl = ramen_cve._ioc_confidence("ipv4", seen, date(2024, 7, 31))
+    assert abs(two_hl - 0.25) < 1e-6
+
+
+def test_ioc_confidence_decays_for_domain_slower():
+    """Domains use 90-day half-life — 30-day-old domain stays ~0.79."""
+    from datetime import date
+
+    import ramen_cve
+
+    conf = ramen_cve._ioc_confidence("domain", date(2024, 6, 1), date(2024, 7, 1))
+    assert 0.79 < conf < 0.80
+
+
+def test_ioc_confidence_none_last_seen_returns_one():
+    """A None last_seen short-circuits to 1.0 (the IOC was 'just observed')."""
+    import ramen_cve
+
+    assert ramen_cve._ioc_confidence("ipv4", None) == 1.0
+
+
+def test_ioc_confidence_clamps_future_dates():
+    """A future last_seen (clock skew) doesn't push confidence above 1.0."""
+    from datetime import date
+
+    import ramen_cve
+
+    # last_seen tomorrow, today is yesterday → age = -1 day → clamped to 0
+    assert ramen_cve._ioc_confidence("ipv4", date(2024, 6, 2), date(2024, 6, 1)) == 1.0
+
+
+def test_apply_ioc_decay_mutates_in_place():
+    """apply_ioc_decay updates each IocRecord.confidence using last_seen ?? first_seen."""
+    from datetime import date
+
+    import ramen_cve
+
+    ip = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    domain = ramen_cve.IocRecord(
+        "domain", "evil.example.com", "x", date(2024, 4, 1), "feed_pub",
+        last_seen=date(2024, 4, 1),
+    )
+    today = date(2024, 4, 1)  # IP is 91 days old, domain is fresh
+    ramen_cve.apply_ioc_decay([ip, domain], today=today)
+    # IP is ~3 half-lives in (91 days / 30 ≈ 3.03), so confidence ≈ 0.123
+    assert 0.1 < ip.confidence < 0.15
+    assert abs(domain.confidence - 1.0) < 1e-6
+
+
+def test_apply_ioc_decay_falls_back_to_first_seen_when_last_seen_unset():
+    """When last_seen is None, decay uses first_seen as the anchor."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 6, 1), "feed_pub",
+        last_seen=None,
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 7, 1))
+    assert abs(rec.confidence - 0.5) < 1e-6
+
+
+def test_filter_iocs_by_confidence_drops_sub_floor():
+    """filter_iocs_by_confidence drops records strictly below the floor."""
+    from datetime import date
+
+    import ramen_cve
+
+    high = ramen_cve.IocRecord("md5", "ab" * 16, "x", date.today(), "feed_pub")
+    low = ramen_cve.IocRecord("ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub")
+    ramen_cve.apply_ioc_decay([high, low])
+    kept = ramen_cve.filter_iocs_by_confidence([high, low], 0.5)
+    assert high in kept
+    assert low not in kept
+
+
+def test_filter_iocs_floor_zero_keeps_everything():
+    """A floor of 0.0 (the default) is a no-op."""
+    from datetime import date
+
+    import ramen_cve
+
+    iocs = [
+        ramen_cve.IocRecord("ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub"),
+    ]
+    ramen_cve.apply_ioc_decay(iocs)
+    assert ramen_cve.filter_iocs_by_confidence(iocs, 0.0) == iocs
+
+
+def test_extract_iocs_sets_last_seen_to_first_seen():
+    """Freshly-extracted IOCs use first_seen as their last_seen so decay anchors today."""
+    from datetime import date
+
+    import ramen_cve
+
+    iocs = ramen_cve.extract_iocs(
+        "Beacon to 8.8.8.8 hash d41d8cd98f00b204e9800998ecf8427e",
+        "src", date(2024, 6, 1), "feed_pub",
+    )
+    assert all(i.last_seen == date(2024, 6, 1) for i in iocs)
+
+
+def test_dedupe_iocs_propagates_most_recent_last_seen():
+    """Two records for the same IOC: the merged record keeps the latest last_seen."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import _dedupe_iocs
+
+    older = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "feed-a", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    newer = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "feed-b", date(2024, 5, 1), "feed_pub",
+        last_seen=date(2024, 5, 1),
+    )
+    out = _dedupe_iocs([older, newer])
+    assert len(out) == 1
+    assert out[0].last_seen == date(2024, 5, 1)
+    # And first_seen still wins on the earliest
+    assert out[0].first_seen == date(2024, 1, 1)
+
+
+def test_write_iocs_csv_includes_confidence_and_last_seen(tmp_path):
+    """CSV header carries the two new columns; freshly-decayed rows render 1.0000."""
+    import csv
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "8.8.8.8", "x", date(2024, 6, 1), "feed_pub",
+        last_seen=date(2024, 6, 1),
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 6, 1))
+    out = tmp_path / "iocs.csv"
+    ramen_cve.write_iocs_csv([rec], out)
+    rows = list(csv.reader(out.open()))
+    header = rows[0]
+    assert "confidence" in header and "last_seen" in header
+    row = dict(zip(header, rows[1], strict=True))
+    assert row["last_seen"] == "2024-06-01"
+    assert row["confidence"] == "1.0000"
+
+
+def test_write_markdown_shows_confidence_when_below_one(tmp_path):
+    """Markdown IOC line shows '(confidence X.XX)' when decay has lowered the value."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2024, 1, 1), "feed_pub",
+        last_seen=date(2024, 1, 1),
+    )
+    ramen_cve.apply_ioc_decay([rec], today=date(2024, 7, 1))  # ~6 half-lives
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([], out, METADATA, iocs=[rec])
+    text = out.read_text()
+    assert "(confidence" in text
+    assert "1.2.3.4" in text
+
+
+def test_write_markdown_omits_confidence_when_fresh(tmp_path):
+    """A confidence at 1.0 should NOT clutter the Markdown line."""
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date.today(), "feed_pub",
+        last_seen=date.today(),
+    )
+    ramen_cve.apply_ioc_decay([rec])
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([], out, METADATA, iocs=[rec])
+    assert "confidence" not in out.read_text()
+
+
+def test_cli_ioc_confidence_floor_flag_parses():
+    """--ioc-confidence-floor is accepted and round-trips as a float."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--ioc-confidence-floor", "0.10"]
+    )
+    assert args.ioc_confidence_floor == 0.10
+
+
+def test_decay_and_filter_iocs_drops_below_floor(caplog):
+    """_decay_and_filter_iocs applies decay then enforces the floor."""
+    import argparse
+    import logging
+    from datetime import date
+
+    import ramen_cve
+
+    fresh = ramen_cve.IocRecord(
+        "md5", "ab" * 16, "x", date.today(), "feed_pub",
+    )
+    stale_ip = ramen_cve.IocRecord(
+        "ipv4", "1.2.3.4", "x", date(2020, 1, 1), "feed_pub",
+        last_seen=date(2020, 1, 1),
+    )
+    args = argparse.Namespace(ioc_confidence_floor=0.5)
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        out = ramen_cve._decay_and_filter_iocs(args, [fresh, stale_ip])
+    assert fresh in out
+    assert stale_ip not in out
+    assert any("below the confidence floor" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 25 — Sector / geopolitical context
+# ---------------------------------------------------------------------------
+
+
+def test_threat_actor_dataclass_carries_sectors():
+    """ThreatActor includes sectors_targeted, defaulting to []."""
+    from ramen_cve import ThreatActor
+
+    a = ThreatActor(name="APT41", sectors_targeted=["financial", "technology"])
+    assert a.sectors_targeted == ["financial", "technology"]
+    b = ThreatActor(name="X")
+    assert b.sectors_targeted == []
+
+
+def test_build_actor_normalizes_sectors_to_lowercase():
+    """JSON 'sectors_targeted' values are lowercased + stripped."""
+    import ramen_cve
+
+    a = ramen_cve._build_actor({
+        "name": "X",
+        "sectors_targeted": [" Financial ", "ENERGY", ""],
+    })
+    assert a.sectors_targeted == ["financial", "energy"]
+
+
+def test_default_associations_carry_sectors_for_apt41():
+    """The bundled associations file declares APT41 sectors after this feature."""
+    import ramen_cve
+
+    out = ramen_cve.load_associations(ramen_cve.DEFAULT_ASSOCIATIONS_PATH)
+    apt41 = next(
+        a for a in out["CVE-2021-44228"]["actors"] if a.name == "APT41"
+    )
+    # Lowercase tags from the JSON
+    assert "financial" in apt41.sectors_targeted
+    assert "technology" in apt41.sectors_targeted
+
+
+def test_maybe_filter_by_sector_keeps_matching_actor():
+    """A CVE with at least one actor targeting the chosen sector is kept."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[
+            ThreatActor(name="Bank-Targeter", sectors_targeted=["financial"]),
+        ],
+    )
+    args = argparse.Namespace(sector="financial")
+    out = ramen_cve._maybe_filter_by_sector(args, [rec])
+    assert out == [rec]
+
+
+def test_maybe_filter_by_sector_drops_nonmatching_actor():
+    """A CVE whose only actor targets a DIFFERENT sector is dropped."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="Energy-Targeter", sectors_targeted=["energy"])],
+    )
+    args = argparse.Namespace(sector="financial")
+    assert ramen_cve._maybe_filter_by_sector(args, [rec]) == []
+
+
+def test_maybe_filter_by_sector_keeps_unattributed_records():
+    """Safe-by-default: CVE without linked_actors stays in the report."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[],
+    )
+    args = argparse.Namespace(sector="financial")
+    out = ramen_cve._maybe_filter_by_sector(args, [rec])
+    assert out == [rec]
+
+
+def test_maybe_filter_by_sector_noop_when_unset():
+    """Blank / None sector argument leaves the list untouched."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+    )
+    assert ramen_cve._maybe_filter_by_sector(argparse.Namespace(sector=None), [rec]) == [rec]
+    assert ramen_cve._maybe_filter_by_sector(argparse.Namespace(sector=""), [rec]) == [rec]
+
+
+def test_maybe_filter_by_sector_case_insensitive():
+    """'Financial' (mixed case) input matches 'financial' (lowercase) on the actor."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="X", sectors_targeted=["financial"])],
+    )
+    args = argparse.Namespace(sector=" Financial ")
+    assert ramen_cve._maybe_filter_by_sector(args, [rec]) == [rec]
+
+
+def test_cli_sector_flag_parses():
+    """--sector accepts a string and round-trips through build_parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--sector", "energy"]
+    )
+    assert args.sector == "energy"
+
+
+def test_write_markdown_adversaries_cross_tab_includes_sectors(tmp_path):
+    """The Linked Adversaries roll-up now has a 'Sectors Targeted' column."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_actors=[
+            ThreatActor(
+                name="APT41",
+                sectors_targeted=["financial", "technology"],
+            )
+        ],
+    )
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "| Actor | CVEs | Sectors Targeted |" in text
+    # Sectors are sorted in the row
+    assert "| APT41 | 1 | financial, technology |" in text
+
+
+def test_write_markdown_dash_when_no_sectors(tmp_path):
+    """If an actor has no sectors_targeted, the column renders as '—'."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="Mystery")],
+    )
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([rec], out, METADATA)
+    assert "| Mystery | 1 | — |" in out.read_text()

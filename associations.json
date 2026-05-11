@@ -1,10 +1,10 @@
 {
-  "_README": "CVE → threat-actor / campaign / malware associations seeded from MITRE Groups and public reporting. Add or correct entries here; ramen_cve loads this file at runtime. Each value object may carry name + aliases + url. The G-IDs / S-IDs / C-IDs are MITRE ATT&CK references (https://attack.mitre.org/).",
+  "_README": "CVE → threat-actor / campaign / malware associations seeded from MITRE Groups and public reporting. Add or correct entries here; ramen_cve loads this file at runtime. Each value object may carry name + aliases + url. The G-IDs / S-IDs / C-IDs are MITRE ATT&CK references (https://attack.mitre.org/). `sectors_targeted` is a lower-case tag list per actor (e.g. \"financial\", \"energy\", \"government\", \"defense\", \"healthcare\", \"manufacturing\", \"technology\", \"telecom\", \"retail\", \"education\", \"diplomacy\", \"ngo\") used by the --sector CLI filter.",
   "CVE-2021-44228": {
     "actors": [
-      {"name": "APT41", "aliases": ["Wicked Panda", "Barium"], "url": "https://attack.mitre.org/groups/G0096/"},
-      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/"},
-      {"name": "Aquatic Panda", "aliases": [], "url": "https://attack.mitre.org/groups/G0143/"}
+      {"name": "APT41", "aliases": ["Wicked Panda", "Barium"], "url": "https://attack.mitre.org/groups/G0096/", "sectors_targeted": ["technology", "financial", "healthcare", "government", "telecom"]},
+      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/", "sectors_targeted": ["defense", "legal", "research", "government"]},
+      {"name": "Aquatic Panda", "aliases": [], "url": "https://attack.mitre.org/groups/G0143/", "sectors_targeted": ["telecom", "technology"]}
     ],
     "malware": [
       {"name": "Cobalt Strike", "url": "https://attack.mitre.org/software/S0154/"}
@@ -13,8 +13,8 @@
   },
   "CVE-2021-26855": {
     "actors": [
-      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/"},
-      {"name": "APT27", "aliases": ["Emissary Panda", "Iron Tiger"], "url": "https://attack.mitre.org/groups/G0027/"}
+      {"name": "HAFNIUM", "aliases": [], "url": "https://attack.mitre.org/groups/G1011/", "sectors_targeted": ["defense", "legal", "research", "government"]},
+      {"name": "APT27", "aliases": ["Emissary Panda", "Iron Tiger"], "url": "https://attack.mitre.org/groups/G0027/", "sectors_targeted": ["defense", "government", "manufacturing", "technology"]}
     ],
     "malware": [
       {"name": "China Chopper", "url": "https://attack.mitre.org/software/S0020/"}
@@ -23,16 +23,16 @@
   },
   "CVE-2021-34527": {
     "actors": [
-      {"name": "Vice Society", "aliases": [], "url": null},
-      {"name": "Magniber", "aliases": [], "url": null}
+      {"name": "Vice Society", "aliases": [], "url": null, "sectors_targeted": ["education", "healthcare"]},
+      {"name": "Magniber", "aliases": [], "url": null, "sectors_targeted": []}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2020-1472": {
     "actors": [
-      {"name": "TA505", "aliases": [], "url": "https://attack.mitre.org/groups/G0092/"},
-      {"name": "Cuba", "aliases": [], "url": null}
+      {"name": "TA505", "aliases": [], "url": "https://attack.mitre.org/groups/G0092/", "sectors_targeted": ["financial", "retail", "hospitality"]},
+      {"name": "Cuba", "aliases": [], "url": null, "sectors_targeted": ["financial", "healthcare", "manufacturing"]}
     ],
     "malware": [
       {"name": "Ryuk", "url": "https://attack.mitre.org/software/S0446/"},
@@ -42,18 +42,18 @@
   },
   "CVE-2017-11882": {
     "actors": [
-      {"name": "SideWinder", "aliases": [], "url": "https://attack.mitre.org/groups/G0121/"},
-      {"name": "Patchwork", "aliases": [], "url": "https://attack.mitre.org/groups/G0040/"},
-      {"name": "Confucius", "aliases": [], "url": "https://attack.mitre.org/groups/G0142/"},
-      {"name": "Cobalt Group", "aliases": [], "url": "https://attack.mitre.org/groups/G0080/"}
+      {"name": "SideWinder", "aliases": [], "url": "https://attack.mitre.org/groups/G0121/", "sectors_targeted": ["government", "defense"]},
+      {"name": "Patchwork", "aliases": [], "url": "https://attack.mitre.org/groups/G0040/", "sectors_targeted": ["government", "defense"]},
+      {"name": "Confucius", "aliases": [], "url": "https://attack.mitre.org/groups/G0142/", "sectors_targeted": ["government"]},
+      {"name": "Cobalt Group", "aliases": [], "url": "https://attack.mitre.org/groups/G0080/", "sectors_targeted": ["financial"]}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2017-0144": {
     "actors": [
-      {"name": "Lazarus Group", "aliases": ["HIDDEN COBRA"], "url": "https://attack.mitre.org/groups/G0032/"},
-      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+      {"name": "Lazarus Group", "aliases": ["HIDDEN COBRA"], "url": "https://attack.mitre.org/groups/G0032/", "sectors_targeted": ["financial", "cryptocurrency", "government", "defense"]},
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/", "sectors_targeted": ["energy", "government", "defense"]}
     ],
     "malware": [
       {"name": "WannaCry", "url": "https://attack.mitre.org/software/S0366/"},
@@ -66,31 +66,31 @@
   },
   "CVE-2018-13379": {
     "actors": [
-      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/"},
-      {"name": "Conti", "aliases": [], "url": null}
+      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/", "sectors_targeted": ["government", "diplomacy", "healthcare"]},
+      {"name": "Conti", "aliases": [], "url": null, "sectors_targeted": ["financial", "manufacturing", "healthcare"]}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2019-11510": {
     "actors": [
-      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/"},
-      {"name": "REvil", "aliases": ["Sodinokibi"], "url": null}
+      {"name": "APT29", "aliases": ["Cozy Bear"], "url": "https://attack.mitre.org/groups/G0016/", "sectors_targeted": ["government", "diplomacy", "healthcare"]},
+      {"name": "REvil", "aliases": ["Sodinokibi"], "url": null, "sectors_targeted": ["financial", "manufacturing", "services"]}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2014-4114": {
     "actors": [
-      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/", "sectors_targeted": ["energy", "government", "defense"]}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2022-30190": {
     "actors": [
-      {"name": "TA413", "aliases": [], "url": null},
-      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/"}
+      {"name": "TA413", "aliases": [], "url": null, "sectors_targeted": ["diplomacy", "ngo"]},
+      {"name": "Sandworm Team", "aliases": [], "url": "https://attack.mitre.org/groups/G0034/", "sectors_targeted": ["energy", "government", "defense"]}
     ],
     "malware": [],
     "campaigns": [
@@ -99,14 +99,14 @@
   },
   "CVE-2023-23397": {
     "actors": [
-      {"name": "APT28", "aliases": ["Fancy Bear", "Sofacy"], "url": "https://attack.mitre.org/groups/G0007/"}
+      {"name": "APT28", "aliases": ["Fancy Bear", "Sofacy"], "url": "https://attack.mitre.org/groups/G0007/", "sectors_targeted": ["government", "defense", "energy", "media"]}
     ],
     "malware": [],
     "campaigns": []
   },
   "CVE-2023-2868": {
     "actors": [
-      {"name": "UNC4841", "aliases": [], "url": null}
+      {"name": "UNC4841", "aliases": [], "url": null, "sectors_targeted": ["government"]}
     ],
     "malware": [],
     "campaigns": [

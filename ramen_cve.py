@@ -15,6 +15,7 @@ import csv
 import ipaddress
 import json
 import logging
+import math
 import re
 import sqlite3
 import sys
@@ -377,11 +378,17 @@ class CveRecord:
 # Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
 @dataclass
 class ThreatActor:
-    """A named adversary group; subset of the MITRE ATT&CK Groups schema."""
+    """A named adversary group; subset of the MITRE ATT&CK Groups schema.
+
+    `sectors_targeted` is a lowercase tag list (e.g. ['financial', 'energy'])
+    used by the --sector filter to keep relevant CVEs and drop ones whose
+    only attribution targets a different sector.
+    """
 
     name: str
     aliases: list[str] = field(default_factory=list)
     url: str | None = None
+    sectors_targeted: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -473,6 +480,13 @@ class IocRecord:
     enrichments: dict[str, dict] = field(default_factory=dict)
     tlp: str = "CLEAR"
     admiralty: str = ""
+    # `last_seen` is the most recent date this exact indicator was observed.
+    # Defaults to None so apply_ioc_decay() can fall back to first_seen, but a
+    # multi-run IOC reservoir should refresh it on every fresh sighting.
+    last_seen: date | None = None
+    # `confidence` decays exponentially per IOC type from 1.0 (just-seen) to 0.0
+    # (long-stale). Populated by apply_ioc_decay() before output.
+    confidence: float = 1.0
 
 
 @dataclass
@@ -595,6 +609,14 @@ class Cache:
             cvss_score  REAL,
             epss_score  REAL,
             PRIMARY KEY (cve_id, ts_iso)
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_iso          TEXT NOT NULL,
+            actor           TEXT NOT NULL,
+            command         TEXT NOT NULL,
+            args_redacted   TEXT NOT NULL,
+            outcome         TEXT NOT NULL
         );
     """
 
@@ -743,6 +765,52 @@ class Cache:
             for r in rows
         ]
 
+    def log_audit(
+        self,
+        actor: str,
+        command: str,
+        args_redacted: str,
+        outcome: str,
+        ts_iso: str | None = None,
+    ) -> None:
+        """Append-only audit record.
+
+        Intentionally NEVER updates or deletes — the table is the on-disk
+        chain-of-custody for who ran what when. `ts_iso` may be pre-recorded
+        from the start of the action; if omitted, we stamp now.
+        """
+        self._conn.execute(
+            "INSERT INTO audit_log (ts_iso, actor, command, args_redacted, outcome) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                ts_iso or _utcnow().isoformat(timespec="seconds"),
+                actor,
+                command,
+                args_redacted,
+                outcome,
+            ),
+        )
+        self._conn.commit()
+
+    def get_audit(self, limit: int = 100) -> list[dict]:
+        """Return the most recent `limit` audit entries in chronological order."""
+        rows = self._conn.execute(
+            "SELECT id, ts_iso, actor, command, args_redacted, outcome "
+            "FROM audit_log ORDER BY id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [
+            {
+                "id": r[0],
+                "ts_iso": r[1],
+                "actor": r[2],
+                "command": r[3],
+                "args_redacted": r[4],
+                "outcome": r[5],
+            }
+            for r in reversed(rows)
+        ]
+
     def purge(self) -> None:
         """Delete entries older than the TTL from all tables.
 
@@ -872,6 +940,65 @@ def _defang_text(text: str) -> str:
     return text
 
 
+# IOC confidence-decay half-lives (days). 0 means "no decay" — a SHA-256 today
+# is still useful in five years. IP addresses age fastest (CDNs / DHCP); domain
+# names slower (registrations rotate but campaigns reuse domains for weeks);
+# emails and URLs land somewhere in between.
+IOC_HALF_LIFE_DAYS: dict[str, int] = {
+    "ipv4": 30,
+    "domain": 90,
+    "url": 30,
+    "email": 90,
+    "md5": 0,
+    "sha1": 0,
+    "sha256": 0,
+}
+
+
+def _ioc_confidence(
+    ioc_type: str,
+    last_seen: date | None,
+    today: date | None = None,
+) -> float:
+    """Return a 0..1 confidence score for an indicator given when it was last seen.
+
+    confidence = exp(-ln(2) * age_days / half_life)
+    age_days < 0 (clock skew) is clamped to 0 → 1.0.
+    half_life = 0 in IOC_HALF_LIFE_DAYS means "no decay" → 1.0.
+    A missing last_seen returns 1.0 (the IOC was just observed by definition
+    of being in the current run); callers that want stricter behavior should
+    pass an explicit last_seen.
+    """
+    if last_seen is None:
+        return 1.0
+    half_life = IOC_HALF_LIFE_DAYS.get(ioc_type, 30)
+    if half_life <= 0:
+        return 1.0
+    today = today or date.today()
+    age_days = max(0, (today - last_seen).days)
+    return math.exp(-math.log(2) * age_days / half_life)
+
+
+def apply_ioc_decay(iocs: list[IocRecord], today: date | None = None) -> list[IocRecord]:
+    """Set rec.confidence on every IOC using the exponential half-life model.
+
+    Mutates and returns the same list for chaining. `last_seen` falls back to
+    `first_seen` when not set, so a freshly-extracted IOC defaults to 1.0.
+    """
+    today = today or date.today()
+    for ioc in iocs:
+        anchor = ioc.last_seen or ioc.first_seen
+        ioc.confidence = _ioc_confidence(ioc.ioc_type, anchor, today)
+    return iocs
+
+
+def filter_iocs_by_confidence(iocs: list[IocRecord], floor: float) -> list[IocRecord]:
+    """Drop IOCs whose confidence is below the floor. A floor of 0 keeps every IOC."""
+    if floor <= 0:
+        return list(iocs)
+    return [i for i in iocs if (i.confidence or 0.0) >= floor]
+
+
 def _is_public_ip(ip_str: str) -> bool:
     """True if ip_str parses to a globally-routable unicast IPv4/IPv6 address."""
     try:
@@ -929,6 +1056,10 @@ def extract_iocs(
                 defanged_in_source=defanged_in_source,
                 tlp=tlp_norm,
                 admiralty=admiralty_norm,
+                # A freshly-extracted IOC was observed RIGHT NOW; that's the
+                # decay anchor. Multi-run reservoirs (future feature) can
+                # update this value when re-discovering a stale IOC.
+                last_seen=first_seen,
             )
         )
 
@@ -1325,8 +1456,14 @@ def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
 
 
 def _build_actor(d: dict) -> ThreatActor:
-    return ThreatActor(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
-                       url=d.get("url"))
+    raw_sectors = d.get("sectors_targeted") or []
+    sectors = [str(s).strip().lower() for s in raw_sectors if str(s).strip()]
+    return ThreatActor(
+        name=d.get("name", ""),
+        aliases=list(d.get("aliases") or []),
+        url=d.get("url"),
+        sectors_targeted=sectors,
+    )
 
 
 def _build_campaign(d: dict) -> Campaign:
@@ -2279,6 +2416,8 @@ IOC_CSV_COLUMNS = [
     "enrichments",
     "tlp",
     "admiralty",
+    "last_seen",
+    "confidence",
 ]
 
 
@@ -2288,6 +2427,7 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
     Columns are in IOC_CSV_COLUMNS order. defanged_in_source is rendered as
     'true'/'false' so consumers can grep the file directly. The enrichments
     column is a JSON-serialized dict so the schema stays one-row-per-IOC.
+    confidence is rendered to 4 decimals (1.0000 means just-seen / no decay).
     """
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
@@ -2304,6 +2444,8 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     json.dumps(rec.enrichments) if rec.enrichments else "",
                     rec.tlp or "CLEAR",
                     rec.admiralty or "",
+                    str(rec.last_seen) if rec.last_seen else "",
+                    f"{rec.confidence:.4f}" if rec.confidence is not None else "",
                 ]
             )
 
@@ -2714,6 +2856,105 @@ def write_sigma_stubs(enriched: list[EnrichedCve], out_dir: Path) -> list[Path]:
     return written
 
 
+def _yara_safe_name(value: str) -> str:
+    """Reduce an arbitrary string to a valid YARA rule-identifier fragment.
+
+    YARA rule names must match [A-Za-z_][A-Za-z0-9_]{0,127}. We collapse every
+    other character to '_' and prefix a leading digit / empty string with '_'
+    so the resulting identifier is always valid.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", (value or "").strip()).strip("_")
+    if not cleaned:
+        return "Unknown"
+    if cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned[:96]
+
+
+def _yara_string_escape(value: str) -> str:
+    """Escape a string for use as a YARA double-quoted metadata literal."""
+    return (value or "").replace("\\", "\\\\").replace("\"", "\\\"")
+
+
+def _build_yara_stub(rec: EnrichedCve, malware: Malware) -> str:
+    """Build one YARA rule scaffold for a (CVE, linked-malware) pair.
+
+    The strings + condition blocks are deliberately TODO placeholders — the
+    rule isn't runnable, but it carries every piece of metadata a detection
+    engineer needs to populate it (CVE, CVSS, EPSS, ATT&CK, KEV, MITRE
+    software URL).
+    """
+    rule_id = _stix_uuid(f"yara:{rec.cve_id}:{malware.name}")
+    rule_name = f"Ramen_{_yara_safe_name(malware.name)}_{_yara_safe_name(rec.cve_id)}"
+    cvss = f"{rec.cvss_score:.1f}" if rec.cvss_score is not None else "N/A"
+    epss = f"{rec.epss_score:.4f}" if rec.epss_score is not None else "N/A"
+    techniques = ", ".join(rec.attack_techniques) if rec.attack_techniques else "(none)"
+    description = (
+        f"Detection scaffold for {malware.name} (linked to {rec.cve_id})"
+    )
+
+    lines: list[str] = [
+        f"rule {rule_name}",
+        "{",
+        "    meta:",
+        f"        id = \"{rule_id}\"",
+        f"        description = \"{_yara_string_escape(description)}\"",
+        "        author = \"ramen-cve\"",
+        f"        date = \"{date.today().isoformat()}\"",
+        f"        cve = \"{rec.cve_id}\"",
+        f"        malware_family = \"{_yara_string_escape(malware.name)}\"",
+        f"        cvss = \"{cvss}\"",
+        f"        epss = \"{epss}\"",
+        f"        attack_techniques = \"{_yara_string_escape(techniques)}\"",
+    ]
+    if rec.kev_listed:
+        kev_text = "listed"
+        if rec.kev_due_date:
+            kev_text += f" (due {rec.kev_due_date})"
+        if rec.kev_known_ransomware_use:
+            kev_text += " - known ransomware use"
+        lines.append(f"        cisa_kev = \"{_yara_string_escape(kev_text)}\"")
+    if malware.url:
+        lines.append(
+            f"        mitre_software = \"{_yara_string_escape(malware.url)}\""
+        )
+    lines += [
+        "    strings:",
+        f"        // TODO: replace with strings characteristic of {malware.name}",
+        "        $stub_a = \"TODO_REPLACE_ME\"",
+        "    condition:",
+        "        // TODO: refine the trigger; default fires on the placeholder string",
+        "        any of them",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+YARA_ELIGIBLE_BUCKETS = SIGMA_ELIGIBLE_BUCKETS  # same precedence as Sigma stubs
+
+
+def write_yara_stubs(enriched: list[EnrichedCve], out_dir: Path) -> list[Path]:
+    """Write one YARA rule scaffold per (kev/patch-now CVE, linked malware) pair.
+
+    Output filenames are `<MalwareSafeName>_<CveSafeName>.yar`. A CVE without
+    linked_malware records produces no files. Returns the list of written
+    paths.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for rec in enriched:
+        if rec.bucket not in YARA_ELIGIBLE_BUCKETS:
+            continue
+        for malware in rec.linked_malware:
+            mw_stem = _yara_safe_name(malware.name)
+            cve_stem = _yara_safe_name(rec.cve_id)
+            path = out_dir / f"{mw_stem}_{cve_stem}.yar"
+            path.write_text(_build_yara_stub(rec, malware), encoding="utf-8")
+            written.append(path)
+    return written
+
+
 def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
     """Write the enriched CVE list to a CSV file.
 
@@ -2919,18 +3160,25 @@ def write_markdown(
         lines.append("")
 
     actor_rollup: dict[str, list[str]] = {}
+    actor_sectors: dict[str, set[str]] = {}
     for rec in enriched:
         for actor in rec.linked_actors:
             actor_rollup.setdefault(actor.name, []).append(rec.cve_id)
+            if actor.sectors_targeted:
+                actor_sectors.setdefault(actor.name, set()).update(actor.sectors_targeted)
     if actor_rollup:
         lines += [
             "## Linked Adversaries",
             "",
-            "| Actor | CVEs |",
-            "| --- | --- |",
+            "| Actor | CVEs | Sectors Targeted |",
+            "| --- | --- | --- |",
         ]
         for actor in sorted(actor_rollup):
-            lines.append(f"| {_md_safe(actor)} | {len(actor_rollup[actor])} |")
+            sectors = sorted(actor_sectors.get(actor, set()))
+            sector_disp = ", ".join(sectors) if sectors else "—"
+            lines.append(
+                f"| {_md_safe(actor)} | {len(actor_rollup[actor])} | {_md_safe(sector_disp)} |"
+            )
         lines.append("")
 
     if total == 0:
@@ -3048,7 +3296,14 @@ def write_markdown(
             lines.append("")
             for rec in recs:
                 marker = " *(defanged in source)*" if rec.defanged_in_source else ""
-                lines.append(f"- `{_md_safe(rec.value)}`{marker}")
+                # Only call out confidence when decay has actually lowered it;
+                # a 1.0 marker would just be noise for fresh extractions.
+                conf_marker = (
+                    f" *(confidence {rec.confidence:.2f})*"
+                    if rec.confidence is not None and rec.confidence < 0.995
+                    else ""
+                )
+                lines.append(f"- `{_md_safe(rec.value)}`{marker}{conf_marker}")
                 for enricher_name, payload in sorted(rec.enrichments.items()):
                     summary = _summarize_enrichment(enricher_name, payload)
                     if summary:
@@ -3122,12 +3377,24 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
     parser.add_argument("--out-dir", type=_path_arg, default=Path("."))
     parser.add_argument(
+        "--basename",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Stem for output files (no extension). Default: ramen-cve-<UTC timestamp>. "
+            "Path separators are stripped; -iocs is appended to the IOC CSV; -sigma to "
+            "the Sigma rule directory."
+        ),
+    )
+    parser.add_argument(
         "--format",
-        choices=["csv", "md", "both", "stix", "sigma", "all"],
+        choices=["csv", "md", "both", "stix", "sigma", "yara", "all"],
         default="both",
         help=(
             "Output format. 'both' = CSV + Markdown; 'sigma' = Sigma stubs only; "
-            "'all' = CSV + Markdown + STIX + Sigma stubs."
+            "'yara' = YARA stubs only (one per linked malware family); "
+            "'all' = CSV + Markdown + STIX + Sigma + YARA."
         ),
     )
     parser.add_argument("--no-cache", action="store_true")
@@ -3140,6 +3407,30 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         "--no-enrich-iocs",
         action="store_true",
         help="Skip per-IOC enrichment (VirusTotal / AbuseIPDB / OTX / MalwareBazaar).",
+    )
+    parser.add_argument(
+        "--ioc-confidence-floor",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Drop IOCs whose decay-weighted confidence is below this floor "
+            "(0.0..1.0; default 0.0 keeps every IOC). Half-lives per type: "
+            "IPv4 30d, URL 30d, domain 90d, email 90d; file hashes never decay."
+        ),
+    )
+    parser.add_argument(
+        "--sector",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Filter the report to CVEs likely relevant to a given sector "
+            "(e.g. 'financial', 'healthcare', 'energy', 'government'). "
+            "Matches against each linked actor's sectors_targeted in "
+            "associations.json. Records with no linked actors are KEPT "
+            "(unattributed CVEs are assumed potentially relevant)."
+        ),
     )
     parser.add_argument(
         "--allow-tlp-red",
@@ -3242,6 +3533,22 @@ def build_parser() -> argparse.ArgumentParser:
     trend_p.add_argument("--quiet", action="store_true")
     trend_p.add_argument("--verbose", action="store_true")
 
+    # audit subcommand: tail the append-only audit log
+    audit_p = sub.add_parser(
+        "audit",
+        help="Show the tail of the append-only audit log of past ramen_cve commands.",
+    )
+    audit_p.add_argument(
+        "--tail", type=int, default=20,
+        help="How many of the most recent entries to print (default 20).",
+    )
+    audit_p.add_argument(
+        "--no-cache", action="store_true",
+        help="Read the in-memory audit log only (always empty; useful for tests).",
+    )
+    audit_p.add_argument("--quiet", action="store_true")
+    audit_p.add_argument("--verbose", action="store_true")
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=_path_arg, help="Path to a STIX bundle JSON file.")
@@ -3309,7 +3616,6 @@ def _run_wizard() -> list[str]:
     if mode == "opml":
         path = questionary.path(
             "Path to your OPML file:",
-            default="examples/sample.opml",
             validate=lambda p: (
                 True
                 if Path(_strip_path_quotes(p)).expanduser().is_file()
@@ -3399,12 +3705,22 @@ def _run_wizard() -> list[str]:
     ).unsafe_ask()
     argv.extend(["--epss-threshold", epss])
 
+    basename = questionary.text(
+        "Output filename stem (no extension; blank = auto timestamp):",
+    ).unsafe_ask()
+    basename_clean = _safe_basename(basename)
+    if basename_clean:
+        argv.extend(["--basename", basename_clean])
+
     out_dir = questionary.path(
-        "Output directory:",
-        default=".",
+        "Output directory (blank = current working directory):",
         only_directories=True,
     ).unsafe_ask()
-    argv.extend(["--out-dir", str(Path(_strip_path_quotes(out_dir)).expanduser())])
+    out_dir_clean = _strip_path_quotes(out_dir)
+    argv.extend([
+        "--out-dir",
+        str(Path(out_dir_clean).expanduser()) if out_dir_clean else ".",
+    ])
 
     fmt = questionary.select(
         "Output format:",
@@ -3474,17 +3790,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args)
 
-    # The hunt subcommand is a pure local-file workflow: no NVD/EPSS/cache
-    # plumbing, no API-key prompt, no shared --no-cache / --format flags.
-    # Short-circuit before any of that runs.
+    # The hunt subcommand is a pure local-file workflow but we still open
+    # the cache so audit logging can persist. trend / audit are similar —
+    # all three skip _validate_args (which expects analysis-specific args).
     if args.subcommand == "hunt":
-        return _run_hunt(args, cache=None, api_key=None)  # type: ignore[arg-type]
+        cache_path = DEFAULT_CACHE_PATH
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "hunt", args, lambda: _run_hunt(args, cache, None))
 
-    # The trend subcommand is also a pure read-from-cache workflow — it has
-    # --no-cache but none of the analysis flags _validate_args expects.
     if args.subcommand == "trend":
         cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
-        return _run_trend(args, Cache(cache_path), api_key=None)
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "trend", args, lambda: _run_trend(args, cache, None))
+
+    # The audit subcommand reads the log; it must NOT log itself (every
+    # `ramen_cve audit` would otherwise grow the table it's trying to read).
+    if args.subcommand == "audit":
+        cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
+        return _run_audit(args, Cache(cache_path), api_key=None)
 
     _validate_args(args, parser)
 
@@ -3503,15 +3826,13 @@ def main(argv: list[str] | None = None) -> int:
             api_key = prompted
 
     if args.subcommand == "opml":
-        return _run_opml(args, cache, api_key)
+        return _audit_dispatch(cache, "opml", args, lambda: _run_opml(args, cache, api_key))
     if args.subcommand == "url":
-        return _run_url(args, cache, api_key)
+        return _audit_dispatch(cache, "url", args, lambda: _run_url(args, cache, api_key))
     if args.subcommand == "cve":
-        return _run_cve(args, cache, api_key)
+        return _audit_dispatch(cache, "cve", args, lambda: _run_cve(args, cache, api_key))
     if args.subcommand == "stix":
-        return _run_stix(args, cache, api_key)
-    if args.subcommand == "trend":
-        return _run_trend(args, cache, api_key)
+        return _audit_dispatch(cache, "stix", args, lambda: _run_stix(args, cache, api_key))
     return 1
 
 
@@ -3519,6 +3840,59 @@ def _maybe_enrich_iocs(args: argparse.Namespace, iocs: list[IocRecord], cache: C
     """Run enrich_iocs unless --no-enrich-iocs was passed."""
     if iocs and not args.no_enrich_iocs:
         enrich_iocs(iocs, cache)
+
+
+def _maybe_filter_by_sector(
+    args: argparse.Namespace, enriched: list[EnrichedCve]
+) -> list[EnrichedCve]:
+    """Drop CVEs whose only adversary attribution targets a different sector.
+
+    Safe-by-default policy: a CVE with NO linked_actors stays in the report
+    (we can't claim it isn't relevant). A CVE with linked_actors stays only
+    if at least one actor's sectors_targeted includes the chosen sector.
+
+    A blank `args.sector` (the default) returns the list untouched.
+    """
+    sector = (getattr(args, "sector", None) or "").strip().lower()
+    if not sector:
+        return enriched
+    kept: list[EnrichedCve] = []
+    dropped = 0
+    for rec in enriched:
+        if not rec.linked_actors:
+            kept.append(rec)
+            continue
+        if any(sector in (a.sectors_targeted or []) for a in rec.linked_actors):
+            kept.append(rec)
+        else:
+            dropped += 1
+    if dropped:
+        _log.info(
+            "Dropped %d CVE(s) whose only adversary attribution did not target %r.",
+            dropped, sector,
+        )
+    return kept
+
+
+def _decay_and_filter_iocs(
+    args: argparse.Namespace, iocs: list[IocRecord]
+) -> list[IocRecord]:
+    """Stamp every IOC with its decay-weighted confidence and drop any below the floor.
+
+    Mutates each IOC's confidence in place, then returns a (possibly shorter)
+    list with sub-floor entries excluded. The floor defaults to 0.0 — without
+    --ioc-confidence-floor every input survives.
+    """
+    apply_ioc_decay(iocs)
+    floor = float(getattr(args, "ioc_confidence_floor", 0.0) or 0.0)
+    before = len(iocs)
+    out = filter_iocs_by_confidence(iocs, floor)
+    dropped = before - len(out)
+    if dropped:
+        _log.info(
+            "Dropped %d IOC(s) below the confidence floor (%.3f).", dropped, floor,
+        )
+    return out
 
 
 def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]]:
@@ -3573,19 +3947,38 @@ def _get_github_token() -> str | None:
     return token
 
 
-def _unique_output_path(out_dir: Path, ts: str, suffix: str) -> Path:
+def _safe_basename(value: str | None) -> str:
+    """Sanitize a user-supplied basename: strip whitespace, drop path separators
+    and other shell-hostile characters. Empty input returns ''.
+
+    The intent is to honor a user choice like 'q2-triage' while rejecting
+    inputs that would create files outside the chosen out-dir or that would
+    confuse common file pickers.
+    """
+    if not value:
+        return ""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", value.strip())
+    # Strip leading dots/dashes/underscores so traversal artifacts ("../etc/p")
+    # and hidden-file-style names (".cache") collapse to a clean stem.
+    return cleaned.lstrip(". -_") or ""
+
+
+def _unique_output_path(
+    out_dir: Path, ts: str, suffix: str, basename: str | None = None
+) -> Path:
     """Return a path that does not yet exist by appending -N if needed.
 
-    Two runs that land in the same wall-clock second must not silently
-    overwrite each other. We probe -1, -2, ... and return the first
-    free name. Bounded at 1000 attempts so we don't loop forever in a
-    pathological setup.
+    If `basename` is provided it becomes the file stem (e.g. 'q2-triage.csv').
+    Otherwise we fall back to the timestamped 'ramen-cve-<ts>.<suffix>' shape.
+    Two runs that land on the same stem must not silently overwrite each other:
+    we probe -1, -2, ... up to 1000 and return the first free name.
     """
-    base = out_dir / f"ramen-cve-{ts}.{suffix}"
+    stem = _safe_basename(basename) or f"ramen-cve-{ts}"
+    base = out_dir / f"{stem}.{suffix}"
     if not base.exists():
         return base
     for i in range(1, 1000):
-        candidate = out_dir / f"ramen-cve-{ts}-{i}.{suffix}"
+        candidate = out_dir / f"{stem}-{i}.{suffix}"
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
@@ -3614,6 +4007,8 @@ def _output(
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     iocs = iocs or []
+    basename = _safe_basename(getattr(args, "basename", None))
+    sigma_stem = basename or f"ramen-cve-{ts}"
 
     if not getattr(args, "allow_tlp_red", False):
         before = (len(enriched), len(iocs))
@@ -3630,32 +4025,52 @@ def _output(
             )
 
     if args.format in ("csv", "both", "all"):
-        csv_path = _unique_output_path(out_dir, ts, "csv")
+        csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
         write_csv(enriched, csv_path)
         print(str(csv_path))
         if iocs:
-            iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            # Without a basename, we want `ramen-cve-<ts>-iocs.csv`. Encoding
+            # the "-iocs" tail via the suffix kwarg keeps that shape. With a
+            # basename, we instead set the stem to `<basename>-iocs` and use
+            # a plain ".csv" suffix so we don't end up with `*-iocs.iocs.csv`.
+            if basename:
+                iocs_path = _unique_output_path(
+                    out_dir, ts, "csv", basename=f"{basename}-iocs"
+                )
+            else:
+                iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
 
     if args.format in ("md", "both", "all"):
-        md_path = _unique_output_path(out_dir, ts, "md")
+        md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
         write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
 
     if args.format in ("stix", "all"):
-        stix_path = _unique_output_path(out_dir, ts, "stix.json")
+        stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
         write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
         print(str(stix_path))
 
     if args.format in ("sigma", "all"):
-        sigma_dir = out_dir / f"ramen-cve-{ts}-sigma"
+        sigma_dir = out_dir / f"{sigma_stem}-sigma"
         files = write_sigma_stubs(enriched, sigma_dir)
         if files:
             print(str(sigma_dir))
         else:
             _log.info(
                 "No kev_override / patch_now CVEs in this run; no Sigma stubs written."
+            )
+
+    if args.format in ("yara", "all"):
+        yara_dir = out_dir / f"{sigma_stem}-yara"
+        files = write_yara_stubs(enriched, yara_dir)
+        if files:
+            print(str(yara_dir))
+        else:
+            _log.info(
+                "No kev_override / patch_now CVEs with linked malware; "
+                "no YARA stubs written."
             )
 
 
@@ -3719,6 +4134,8 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -3781,6 +4198,8 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -3807,11 +4226,17 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
                 defanged_in_source=ioc.defanged_in_source,
                 tlp=ioc.tlp,
                 admiralty=ioc.admiralty,
+                last_seen=ioc.last_seen or ioc.first_seen,
             )
             continue
         if ioc.first_seen < existing.first_seen:
             existing.first_seen = ioc.first_seen
             existing.first_seen_type = ioc.first_seen_type
+        # last_seen: maximum across all observations wins (most recent sighting
+        # is the decay anchor).
+        new_last = ioc.last_seen or ioc.first_seen
+        if existing.last_seen is None or new_last > existing.last_seen:
+            existing.last_seen = new_last
         if ioc.defanged_in_source and not existing.defanged_in_source:
             existing.defanged_in_source = True
         if ioc.source and ioc.source not in existing.source.split("; "):
@@ -4054,6 +4479,105 @@ def _run_trend(args: argparse.Namespace, cache: Cache, api_key: str | None) -> i
     return 0
 
 
+_AUDIT_SENSITIVE_KEYS = ("key", "pass", "token", "secret")
+
+
+def _audit_actor() -> str:
+    """Return the current OS user for audit attribution.
+
+    `getpass.getuser()` consults LOGNAME / USER / LNAME / USERNAME (per the
+    Python stdlib) and raises OSError on platforms that have none of them.
+    Fall back to 'unknown' rather than aborting the run.
+    """
+    import getpass
+
+    try:
+        return getpass.getuser() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def _redact_audit_args(args: argparse.Namespace) -> str:
+    """JSON-serialize argparse Namespace with sensitive values masked.
+
+    Any field whose name contains 'key', 'pass', 'token', or 'secret' is
+    replaced with '***'. Paths / dates / non-JSON-native types are stringified.
+    """
+    out: dict[str, object] = {}
+    for k, v in vars(args).items():
+        if v is None:
+            out[k] = None
+            continue
+        if any(s in k.lower() for s in _AUDIT_SENSITIVE_KEYS):
+            out[k] = "***" if v else None
+            continue
+        if isinstance(v, Path):
+            out[k] = str(v)
+        elif isinstance(v, date):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return json.dumps(out, default=str, sort_keys=True)
+
+
+def _audit_dispatch(
+    cache: Cache | None,
+    command: str,
+    args: argparse.Namespace,
+    runner,
+) -> int:
+    """Run `runner`, persist an audit row, and return the runner's exit code.
+
+    `runner` is a zero-arg callable that returns the subcommand's rc. We
+    capture exceptions, record the outcome, and re-raise so the user-facing
+    behavior is unchanged. A None `cache` (interactive bootstrap before the
+    cache is opened) skips logging silently — never abort a real run for an
+    audit-write failure.
+    """
+    actor = _audit_actor()
+    args_redacted = _redact_audit_args(args)
+    ts_iso = _utcnow().isoformat(timespec="seconds")
+    try:
+        rc = runner()
+    except Exception as exc:
+        if cache is not None:
+            with contextlib.suppress(Exception):
+                cache.log_audit(
+                    actor, command, args_redacted,
+                    outcome=f"error: {type(exc).__name__}",
+                    ts_iso=ts_iso,
+                )
+        raise
+    if cache is not None:
+        with contextlib.suppress(Exception):
+            cache.log_audit(
+                actor, command, args_redacted,
+                outcome=f"rc={rc}",
+                ts_iso=ts_iso,
+            )
+    return rc
+
+
+def _run_audit(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Print the tail of the append-only audit log as a Markdown table."""
+    limit = max(1, int(getattr(args, "tail", 20)))
+    rows = cache.get_audit(limit)
+    if not rows:
+        _log.info("Audit log is empty.")
+        return 0
+    print(f"# Audit log — last {len(rows)} entries")
+    print()
+    print("| Timestamp (UTC) | Actor | Command | Outcome | Args |")
+    print("| --- | --- | --- | --- | --- |")
+    for r in rows:
+        # Backticks around args so JSON commas don't break the markdown column.
+        print(
+            f"| {r['ts_iso']} | {r['actor']} | {r['command']} | "
+            f"{r['outcome']} | `{r['args_redacted']}` |"
+        )
+    return 0
+
+
 def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Execute the stix subcommand (file or TAXII source).
 
@@ -4111,6 +4635,8 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         "epss_threshold": args.epss_threshold,
     }
     _maybe_enrich_iocs(args, iocs, cache)
+    iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
