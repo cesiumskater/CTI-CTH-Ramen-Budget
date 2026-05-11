@@ -5704,3 +5704,217 @@ def test_decay_and_filter_iocs_drops_below_floor(caplog):
     assert fresh in out
     assert stale_ip not in out
     assert any("below the confidence floor" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Slice 25 — Sector / geopolitical context
+# ---------------------------------------------------------------------------
+
+
+def test_threat_actor_dataclass_carries_sectors():
+    """ThreatActor includes sectors_targeted, defaulting to []."""
+    from ramen_cve import ThreatActor
+
+    a = ThreatActor(name="APT41", sectors_targeted=["financial", "technology"])
+    assert a.sectors_targeted == ["financial", "technology"]
+    b = ThreatActor(name="X")
+    assert b.sectors_targeted == []
+
+
+def test_build_actor_normalizes_sectors_to_lowercase():
+    """JSON 'sectors_targeted' values are lowercased + stripped."""
+    import ramen_cve
+
+    a = ramen_cve._build_actor({
+        "name": "X",
+        "sectors_targeted": [" Financial ", "ENERGY", ""],
+    })
+    assert a.sectors_targeted == ["financial", "energy"]
+
+
+def test_default_associations_carry_sectors_for_apt41():
+    """The bundled associations file declares APT41 sectors after this feature."""
+    import ramen_cve
+
+    out = ramen_cve.load_associations(ramen_cve.DEFAULT_ASSOCIATIONS_PATH)
+    apt41 = next(
+        a for a in out["CVE-2021-44228"]["actors"] if a.name == "APT41"
+    )
+    # Lowercase tags from the JSON
+    assert "financial" in apt41.sectors_targeted
+    assert "technology" in apt41.sectors_targeted
+
+
+def test_maybe_filter_by_sector_keeps_matching_actor():
+    """A CVE with at least one actor targeting the chosen sector is kept."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[
+            ThreatActor(name="Bank-Targeter", sectors_targeted=["financial"]),
+        ],
+    )
+    args = argparse.Namespace(sector="financial")
+    out = ramen_cve._maybe_filter_by_sector(args, [rec])
+    assert out == [rec]
+
+
+def test_maybe_filter_by_sector_drops_nonmatching_actor():
+    """A CVE whose only actor targets a DIFFERENT sector is dropped."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="Energy-Targeter", sectors_targeted=["energy"])],
+    )
+    args = argparse.Namespace(sector="financial")
+    assert ramen_cve._maybe_filter_by_sector(args, [rec]) == []
+
+
+def test_maybe_filter_by_sector_keeps_unattributed_records():
+    """Safe-by-default: CVE without linked_actors stays in the report."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[],
+    )
+    args = argparse.Namespace(sector="financial")
+    out = ramen_cve._maybe_filter_by_sector(args, [rec])
+    assert out == [rec]
+
+
+def test_maybe_filter_by_sector_noop_when_unset():
+    """Blank / None sector argument leaves the list untouched."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+    )
+    assert ramen_cve._maybe_filter_by_sector(argparse.Namespace(sector=None), [rec]) == [rec]
+    assert ramen_cve._maybe_filter_by_sector(argparse.Namespace(sector=""), [rec]) == [rec]
+
+
+def test_maybe_filter_by_sector_case_insensitive():
+    """'Financial' (mixed case) input matches 'financial' (lowercase) on the actor."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2099-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="X", sectors_targeted=["financial"])],
+    )
+    args = argparse.Namespace(sector=" Financial ")
+    assert ramen_cve._maybe_filter_by_sector(args, [rec]) == [rec]
+
+
+def test_cli_sector_flag_parses():
+    """--sector accepts a string and round-trips through build_parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(
+        ["cve", "CVE-2021-44228", "--sector", "energy"]
+    )
+    assert args.sector == "energy"
+
+
+def test_write_markdown_adversaries_cross_tab_includes_sectors(tmp_path):
+    """The Linked Adversaries roll-up now has a 'Sectors Targeted' column."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        linked_actors=[
+            ThreatActor(
+                name="APT41",
+                sectors_targeted=["financial", "technology"],
+            )
+        ],
+    )
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([rec], out, METADATA)
+    text = out.read_text()
+    assert "| Actor | CVEs | Sectors Targeted |" in text
+    # Sectors are sorted in the row
+    assert "| APT41 | 1 | financial, technology |" in text
+
+
+def test_write_markdown_dash_when_no_sectors(tmp_path):
+    """If an actor has no sectors_targeted, the column renders as '—'."""
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve, ThreatActor
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=9.0,
+        epss_score=0.5,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="Mystery")],
+    )
+    out = tmp_path / "report.md"
+    ramen_cve.write_markdown([rec], out, METADATA)
+    assert "| Mystery | 1 | — |" in out.read_text()

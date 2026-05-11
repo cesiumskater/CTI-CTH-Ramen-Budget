@@ -378,11 +378,17 @@ class CveRecord:
 # Current values: "ipv4" | "url" | "domain" | "email" | "md5" | "sha1" | "sha256".
 @dataclass
 class ThreatActor:
-    """A named adversary group; subset of the MITRE ATT&CK Groups schema."""
+    """A named adversary group; subset of the MITRE ATT&CK Groups schema.
+
+    `sectors_targeted` is a lowercase tag list (e.g. ['financial', 'energy'])
+    used by the --sector filter to keep relevant CVEs and drop ones whose
+    only attribution targets a different sector.
+    """
 
     name: str
     aliases: list[str] = field(default_factory=list)
     url: str | None = None
+    sectors_targeted: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1450,8 +1456,14 @@ def fetch_kev_catalog(cache: Cache) -> dict[str, dict]:
 
 
 def _build_actor(d: dict) -> ThreatActor:
-    return ThreatActor(name=d.get("name", ""), aliases=list(d.get("aliases") or []),
-                       url=d.get("url"))
+    raw_sectors = d.get("sectors_targeted") or []
+    sectors = [str(s).strip().lower() for s in raw_sectors if str(s).strip()]
+    return ThreatActor(
+        name=d.get("name", ""),
+        aliases=list(d.get("aliases") or []),
+        url=d.get("url"),
+        sectors_targeted=sectors,
+    )
 
 
 def _build_campaign(d: dict) -> Campaign:
@@ -3148,18 +3160,25 @@ def write_markdown(
         lines.append("")
 
     actor_rollup: dict[str, list[str]] = {}
+    actor_sectors: dict[str, set[str]] = {}
     for rec in enriched:
         for actor in rec.linked_actors:
             actor_rollup.setdefault(actor.name, []).append(rec.cve_id)
+            if actor.sectors_targeted:
+                actor_sectors.setdefault(actor.name, set()).update(actor.sectors_targeted)
     if actor_rollup:
         lines += [
             "## Linked Adversaries",
             "",
-            "| Actor | CVEs |",
-            "| --- | --- |",
+            "| Actor | CVEs | Sectors Targeted |",
+            "| --- | --- | --- |",
         ]
         for actor in sorted(actor_rollup):
-            lines.append(f"| {_md_safe(actor)} | {len(actor_rollup[actor])} |")
+            sectors = sorted(actor_sectors.get(actor, set()))
+            sector_disp = ", ".join(sectors) if sectors else "—"
+            lines.append(
+                f"| {_md_safe(actor)} | {len(actor_rollup[actor])} | {_md_safe(sector_disp)} |"
+            )
         lines.append("")
 
     if total == 0:
@@ -3398,6 +3417,19 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
             "Drop IOCs whose decay-weighted confidence is below this floor "
             "(0.0..1.0; default 0.0 keeps every IOC). Half-lives per type: "
             "IPv4 30d, URL 30d, domain 90d, email 90d; file hashes never decay."
+        ),
+    )
+    parser.add_argument(
+        "--sector",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Filter the report to CVEs likely relevant to a given sector "
+            "(e.g. 'financial', 'healthcare', 'energy', 'government'). "
+            "Matches against each linked actor's sectors_targeted in "
+            "associations.json. Records with no linked actors are KEPT "
+            "(unattributed CVEs are assumed potentially relevant)."
         ),
     )
     parser.add_argument(
@@ -3810,6 +3842,38 @@ def _maybe_enrich_iocs(args: argparse.Namespace, iocs: list[IocRecord], cache: C
         enrich_iocs(iocs, cache)
 
 
+def _maybe_filter_by_sector(
+    args: argparse.Namespace, enriched: list[EnrichedCve]
+) -> list[EnrichedCve]:
+    """Drop CVEs whose only adversary attribution targets a different sector.
+
+    Safe-by-default policy: a CVE with NO linked_actors stays in the report
+    (we can't claim it isn't relevant). A CVE with linked_actors stays only
+    if at least one actor's sectors_targeted includes the chosen sector.
+
+    A blank `args.sector` (the default) returns the list untouched.
+    """
+    sector = (getattr(args, "sector", None) or "").strip().lower()
+    if not sector:
+        return enriched
+    kept: list[EnrichedCve] = []
+    dropped = 0
+    for rec in enriched:
+        if not rec.linked_actors:
+            kept.append(rec)
+            continue
+        if any(sector in (a.sectors_targeted or []) for a in rec.linked_actors):
+            kept.append(rec)
+        else:
+            dropped += 1
+    if dropped:
+        _log.info(
+            "Dropped %d CVE(s) whose only adversary attribution did not target %r.",
+            dropped, sector,
+        )
+    return kept
+
+
 def _decay_and_filter_iocs(
     args: argparse.Namespace, iocs: list[IocRecord]
 ) -> list[IocRecord]:
@@ -4071,6 +4135,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     }
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -4134,6 +4199,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     }
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
@@ -4570,6 +4636,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     }
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
+    enriched = _maybe_filter_by_sector(args, enriched)
     _output(enriched, args, metadata, iocs=iocs)
     _maybe_dispatch(args, enriched)
     return 0
