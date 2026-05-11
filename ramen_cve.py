@@ -119,6 +119,7 @@ USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
 DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
 DEFAULT_HUNT_DIR = Path(__file__).resolve().parent / "hunts"
+DEFAULT_PIR_DIR = Path(__file__).resolve().parent / "pirs"
 
 HUNT_STATUSES = (
     "open",
@@ -126,6 +127,16 @@ HUNT_STATUSES = (
     "closed_true_positive",
     "closed_false_positive",
     "closed_inconclusive",
+)
+
+# PIR (Priority Intelligence Requirement) lifecycle states. Mirrors how a
+# leadership-tracked question moves from "we want answers" to "shelved" via
+# the analyst team.
+PIR_STATUSES = (
+    "active",
+    "monitoring",
+    "satisfied",
+    "retired",
 )
 
 # TLP (Traffic Light Protocol) levels in ascending order of restrictiveness.
@@ -454,6 +465,53 @@ class Hunt:
             "status": self.status,
             "created": self.created,
             "findings": list(self.findings),
+        }
+
+
+@dataclass
+class Pir:
+    """A Priority Intelligence Requirement — the leadership-blessed question
+    the CTI program exists to answer.
+
+    Mirrors the Hunt convention: one JSON file per PIR under DEFAULT_PIR_DIR.
+    """
+
+    id: str
+    name: str
+    question: str
+    owner: str = ""
+    status: str = "active"
+    created: str = ""
+    tagged_cves: list[str] = field(default_factory=list)
+    tagged_iocs: list[str] = field(default_factory=list)
+    tagged_actors: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Pir:
+        """Build a Pir from a dict, tolerating missing keys with sensible defaults."""
+        return cls(
+            id=str(d.get("id") or ""),
+            name=str(d.get("name") or ""),
+            question=str(d.get("question") or ""),
+            owner=str(d.get("owner") or ""),
+            status=str(d.get("status") or "active"),
+            created=str(d.get("created") or ""),
+            tagged_cves=list(d.get("tagged_cves") or []),
+            tagged_iocs=list(d.get("tagged_iocs") or []),
+            tagged_actors=list(d.get("tagged_actors") or []),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "question": self.question,
+            "owner": self.owner,
+            "status": self.status,
+            "created": self.created,
+            "tagged_cves": list(self.tagged_cves),
+            "tagged_iocs": list(self.tagged_iocs),
+            "tagged_actors": list(self.tagged_actors),
         }
 
 
@@ -3520,6 +3578,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
     )
 
+    # pir subcommand: leadership-blessed Priority Intelligence Requirements
+    pir_p = sub.add_parser(
+        "pir", help="Manage Priority Intelligence Requirements (PIRs)."
+    )
+    pir_p.add_argument(
+        "action",
+        choices=["list", "show", "link", "coverage"],
+        help="What to do with the PIR library.",
+    )
+    pir_p.add_argument(
+        "pir_id", nargs="?", help="PIR id (filename stem under pirs/)."
+    )
+    pir_p.add_argument(
+        "value", nargs="?",
+        help="Action argument: CVE-ID for 'link' (other actions ignore this).",
+    )
+    pir_p.add_argument(
+        "--pir-dir",
+        type=_path_arg,
+        default=DEFAULT_PIR_DIR,
+        help="Directory of PIR JSON files (default: pirs/ next to ramen_cve.py).",
+    )
+
     # trend subcommand: historical bucket / CVSS / EPSS for one CVE
     trend_p = sub.add_parser(
         "trend", help="Show historical bucket / CVSS / EPSS trend for one CVE."
@@ -3791,12 +3872,17 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args)
 
     # The hunt subcommand is a pure local-file workflow but we still open
-    # the cache so audit logging can persist. trend / audit are similar —
-    # all three skip _validate_args (which expects analysis-specific args).
+    # the cache so audit logging can persist. trend / pir / audit are similar
+    # — all skip _validate_args (which expects analysis-specific args).
     if args.subcommand == "hunt":
         cache_path = DEFAULT_CACHE_PATH
         cache = Cache(cache_path)
         return _audit_dispatch(cache, "hunt", args, lambda: _run_hunt(args, cache, None))
+
+    if args.subcommand == "pir":
+        cache_path = DEFAULT_CACHE_PATH
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "pir", args, lambda: _run_pir(args, cache, None))
 
     if args.subcommand == "trend":
         cache_path = ":memory:" if args.no_cache else DEFAULT_CACHE_PATH
@@ -4420,6 +4506,128 @@ def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         return 0
 
     _log.error("Unknown hunt action: %r", action)
+    return 1
+
+
+def load_pir(path: Path) -> Pir:
+    """Load a single PIR JSON file. Raises OpmlError on missing / malformed file."""
+    if not path.exists():
+        raise OpmlError(f"PIR file not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise OpmlError(f"Could not parse PIR file {path}: {exc}") from exc
+    return Pir.from_dict(data)
+
+
+def load_all_pirs(dir_path: Path) -> list[Pir]:
+    """Return every well-formed *.json PIR under `dir_path` (sorted by id)."""
+    if not dir_path.exists():
+        return []
+    out: list[Pir] = []
+    for p in sorted(dir_path.glob("*.json")):
+        try:
+            out.append(load_pir(p))
+        except OpmlError as exc:
+            _log.warning("Skipping malformed PIR file %s: %s", p, exc)
+    out.sort(key=lambda x: x.id)
+    return out
+
+
+def save_pir(pir: Pir, path: Path) -> None:
+    """Persist a Pir to disk as pretty-printed JSON; creates parent dir if needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pir.to_dict(), indent=2), encoding="utf-8")
+
+
+def _pir_path(pir_dir: Path, pir_id: str) -> Path:
+    """Resolve the on-disk path for a PIR id (no slash characters allowed)."""
+    if "/" in pir_id or "\\" in pir_id or pir_id.startswith("."):
+        raise OpmlError(f"Invalid PIR id: {pir_id!r}")
+    return pir_dir / f"{pir_id}.json"
+
+
+def _run_pir(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Execute the pir subcommand (list / show / link / coverage).
+
+    - list:     tab-delimited table of all PIRs.
+    - show:     pretty-printed JSON for one PIR.
+    - link:     append a CVE id (uppercase, regex-checked) to tagged_cves.
+    - coverage: roll-up table of every PIR's tagged-CVE / IOC / actor counts.
+    """
+    pir_dir: Path = args.pir_dir
+    action = args.action
+
+    if action == "list":
+        pirs = load_all_pirs(pir_dir)
+        if not pirs:
+            _log.info("No PIRs in %s.", pir_dir)
+            return 0
+        for p in pirs:
+            print(
+                f"{p.id}\t{p.status}\t{len(p.tagged_cves)} CVEs"
+                f"\t{len(p.tagged_actors)} actors\t{p.name}"
+            )
+        return 0
+
+    if action == "coverage":
+        pirs = load_all_pirs(pir_dir)
+        if not pirs:
+            _log.info("No PIRs in %s — nothing to report.", pir_dir)
+            return 0
+        print("# PIR Coverage")
+        print()
+        print("| PIR | Status | Tagged CVEs | Tagged IOCs | Tagged Actors |")
+        print("| --- | --- | --- | --- | --- |")
+        for p in pirs:
+            print(
+                f"| {p.id} | {p.status} | {len(p.tagged_cves)} | "
+                f"{len(p.tagged_iocs)} | {len(p.tagged_actors)} |"
+            )
+        return 0
+
+    if not args.pir_id:
+        _log.error("pir %s: pir_id is required", action)
+        return 1
+
+    if action == "show":
+        try:
+            pir = load_pir(_pir_path(pir_dir, args.pir_id))
+        except OpmlError as exc:
+            _log.error(str(exc))
+            return 1
+        print(json.dumps(pir.to_dict(), indent=2))
+        return 0
+
+    # All write actions need to load the PIR first.
+    try:
+        pir_path = _pir_path(pir_dir, args.pir_id)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+    try:
+        pir = load_pir(pir_path)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+
+    if action == "link":
+        if not args.value:
+            _log.error("pir link: a CVE-ID value is required")
+            return 1
+        cve = args.value.upper()
+        if not CVE_REGEX.fullmatch(cve):
+            _log.error("pir link: %r is not a valid CVE ID", args.value)
+            return 1
+        if cve in pir.tagged_cves:
+            _log.info("CVE %s already tagged on PIR %s.", cve, pir.id)
+            return 0
+        pir.tagged_cves.append(cve)
+        save_pir(pir, pir_path)
+        print(f"Linked {cve} to {pir.id}")
+        return 0
+
+    _log.error("Unknown pir action: %r", action)
     return 1
 
 

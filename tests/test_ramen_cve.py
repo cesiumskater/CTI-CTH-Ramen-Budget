@@ -5918,3 +5918,240 @@ def test_write_markdown_dash_when_no_sectors(tmp_path):
     out = tmp_path / "report.md"
     ramen_cve.write_markdown([rec], out, METADATA)
     assert "| Mystery | 1 | — |" in out.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Slice 26 — PIR (Priority Intelligence Requirements) tracking
+# ---------------------------------------------------------------------------
+
+
+def _pir_payload(**overrides) -> dict:
+    base = {
+        "id": "test-pir",
+        "name": "Sample PIR",
+        "question": "Are we exposed?",
+        "owner": "cti-team",
+        "status": "active",
+        "created": "2024-01-01T00:00:00",
+        "tagged_cves": ["CVE-2021-44228"],
+        "tagged_iocs": [],
+        "tagged_actors": ["APT41"],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_pir_dataclass_round_trip():
+    """Pir.from_dict / to_dict round-trip is value-preserving."""
+    from ramen_cve import Pir
+
+    payload = _pir_payload()
+    assert Pir.from_dict(payload).to_dict() == payload
+
+
+def test_pir_dataclass_tolerates_missing_keys():
+    """Optional fields default to sensible empties / strings."""
+    from ramen_cve import Pir
+
+    p = Pir.from_dict({"id": "x", "name": "n", "question": "q?"})
+    assert p.status == "active"
+    assert p.owner == ""
+    assert p.tagged_cves == []
+    assert p.tagged_iocs == []
+    assert p.tagged_actors == []
+
+
+def test_load_pir_round_trip(tmp_path):
+    """load_pir + save_pir round-trip preserves the payload."""
+    from ramen_cve import Pir, load_pir, save_pir
+
+    p = tmp_path / "x.json"
+    save_pir(Pir.from_dict(_pir_payload()), p)
+    out = load_pir(p)
+    assert out.id == "test-pir"
+    assert out.tagged_cves == ["CVE-2021-44228"]
+
+
+def test_load_pir_missing_file_raises(tmp_path):
+    """A missing PIR path raises OpmlError, not FileNotFoundError."""
+    from ramen_cve import OpmlError, load_pir
+
+    with pytest.raises(OpmlError, match="not found"):
+        load_pir(tmp_path / "missing.json")
+
+
+def test_load_pir_invalid_json_raises(tmp_path):
+    """Malformed JSON raises OpmlError, not JSONDecodeError."""
+    from ramen_cve import OpmlError, load_pir
+
+    p = tmp_path / "bad.json"
+    p.write_text("{not valid")
+    with pytest.raises(OpmlError, match="parse"):
+        load_pir(p)
+
+
+def test_load_all_pirs_returns_sorted_list(tmp_path):
+    """load_all_pirs returns every well-formed *.json sorted by id."""
+    from ramen_cve import Pir, load_all_pirs, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="zeta")), tmp_path / "zeta.json")
+    save_pir(Pir.from_dict(_pir_payload(id="alpha")), tmp_path / "alpha.json")
+    out = load_all_pirs(tmp_path)
+    assert [p.id for p in out] == ["alpha", "zeta"]
+
+
+def test_load_all_pirs_missing_dir_returns_empty(tmp_path):
+    from ramen_cve import load_all_pirs
+
+    assert load_all_pirs(tmp_path / "no-such-dir") == []
+
+
+def test_load_all_pirs_skips_malformed(tmp_path, caplog):
+    """A malformed PIR file is skipped with a WARNING; others still load."""
+    import logging
+
+    from ramen_cve import Pir, load_all_pirs, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="ok")), tmp_path / "ok.json")
+    (tmp_path / "broken.json").write_text("{not valid")
+    with caplog.at_level(logging.WARNING, logger="ramen_cve"):
+        out = load_all_pirs(tmp_path)
+    assert [p.id for p in out] == ["ok"]
+    assert any("malformed pir" in r.message.lower() for r in caplog.records)
+
+
+def test_default_pir_dir_loads_bundled_sample():
+    """The bundled pirs/log4j-exposure.json is well-formed and loadable."""
+    from ramen_cve import DEFAULT_PIR_DIR, load_all_pirs
+
+    assert DEFAULT_PIR_DIR.exists()
+    pirs = load_all_pirs(DEFAULT_PIR_DIR)
+    assert any(p.id == "log4j-exposure" for p in pirs)
+
+
+def test_cli_pir_subcommand_parses():
+    """`pir list / show / link / coverage` round-trip through the parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["pir", "list"])
+    assert args.subcommand == "pir" and args.action == "list"
+    args2 = ramen_cve.build_parser().parse_args(
+        ["pir", "link", "log4j-exposure", "CVE-2021-44228"]
+    )
+    assert args2.action == "link"
+    assert args2.pir_id == "log4j-exposure"
+    assert args2.value == "CVE-2021-44228"
+
+
+def test_run_pir_list(tmp_path, capsys):
+    """`pir list` prints one tab-delimited line per PIR with key counts."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1", name="First")), tmp_path / "p1.json")
+    save_pir(Pir.from_dict(_pir_payload(id="p2", name="Second")), tmp_path / "p2.json")
+    rc = ramen_cve.main(["pir", "list", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "p1" in out and "First" in out
+    assert "p2" in out and "Second" in out
+    assert "1 CVEs" in out
+
+
+def test_run_pir_show(tmp_path, capsys):
+    """`pir show <id>` prints the PIR as JSON."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1")), tmp_path / "p1.json")
+    rc = ramen_cve.main(["pir", "show", "p1", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["id"] == "p1"
+
+
+def test_run_pir_link_appends_cve(tmp_path):
+    """`pir link <id> <cve>` appends to tagged_cves and persists."""
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-2021-44228"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main([
+        "pir", "link", "p1", "CVE-2021-26855",
+        "--pir-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    pir = load_pir(tmp_path / "p1.json")
+    assert "CVE-2021-26855" in pir.tagged_cves
+
+
+def test_run_pir_link_dedupes(tmp_path):
+    """Linking a CVE that's already tagged is a no-op success."""
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-2021-44228"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main([
+        "pir", "link", "p1", "CVE-2021-44228",
+        "--pir-dir", str(tmp_path),
+    ])
+    assert rc == 0
+    pir = load_pir(tmp_path / "p1.json")
+    assert pir.tagged_cves.count("CVE-2021-44228") == 1
+
+
+def test_run_pir_link_rejects_invalid_cve(tmp_path, caplog):
+    """A bad CVE id exits with code 1 and does not mutate the file."""
+    import logging
+
+    import ramen_cve
+    from ramen_cve import Pir, load_pir, save_pir
+
+    save_pir(Pir.from_dict(_pir_payload(id="p1")), tmp_path / "p1.json")
+    before = load_pir(tmp_path / "p1.json").tagged_cves
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "pir", "link", "p1", "NOT-A-CVE",
+            "--pir-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert load_pir(tmp_path / "p1.json").tagged_cves == before
+    assert any("not a valid CVE" in r.message for r in caplog.records)
+
+
+def test_run_pir_coverage_prints_markdown_table(tmp_path, capsys):
+    """`pir coverage` prints a Markdown table of CVE / IOC / actor counts."""
+    import ramen_cve
+    from ramen_cve import Pir, save_pir
+
+    save_pir(
+        Pir.from_dict(_pir_payload(id="p1", tagged_cves=["CVE-X", "CVE-Y"], tagged_actors=["A"])),
+        tmp_path / "p1.json",
+    )
+    rc = ramen_cve.main(["pir", "coverage", "--pir-dir", str(tmp_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# PIR Coverage" in out
+    assert "| PIR | Status | Tagged CVEs | Tagged IOCs | Tagged Actors |" in out
+    assert "| p1 | active | 2 | 0 | 1 |" in out
+
+
+def test_run_pir_rejects_path_traversal(tmp_path, caplog):
+    """A pir_id with '/' or '..' is refused before any file access."""
+    import logging
+
+    import ramen_cve
+
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve.main([
+            "pir", "show", "../etc/passwd",
+            "--pir-dir", str(tmp_path),
+        ])
+    assert rc == 1
+    assert any("invalid pir id" in r.message.lower() for r in caplog.records)

@@ -1,0 +1,11 @@
+{
+  "id": "log4j-exposure",
+  "name": "Log4j / Log4Shell exposure",
+  "question": "Are we still vulnerable anywhere to CVE-2021-44228 or its bypass variants (44832, 45046)? Are any of the threat actors known to exploit Log4Shell currently active against organizations in our sector?",
+  "owner": "cti-team",
+  "status": "active",
+  "created": "2024-01-01T00:00:00",
+  "tagged_cves": ["CVE-2021-44228", "CVE-2021-44832", "CVE-2021-45046"],
+  "tagged_iocs": [],
+  "tagged_actors": ["APT41", "HAFNIUM", "Aquatic Panda"]
+}
