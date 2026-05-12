@@ -1,5 +1,85 @@
+# --------------------------------------------------------------------------
+# ramen-cve — CVE triage on a ramen budget
+# --------------------------------------------------------------------------
+# Companion code for the BSidesSLC 2026 talk
+# "Threat Intel on a Ramen Budget" by Danny Page (@cesiumskater).
+# --------------------------------------------------------------------------
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ramen-cve"
+version = "0.2.0"
+description = "CVE triage on a ramen budget — single-file friendly CTI/CTH pipeline."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Danny Page", email = "cesiumskater@users.noreply.github.com"},
+]
+keywords = ["cti", "threat-intelligence", "threat-hunting", "cve", "nvd", "epss", "kev"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "requests>=2.31,<3",
+    "feedparser>=6.0,<7",
+    "python-dotenv>=1.0,<2",
+    "questionary>=2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+    "ruff>=0.4,<1",
+]
+
+[project.scripts]
+# After `pip install -e .` (or `pip install ramen-cve`) the `ramen-cve`
+# console script becomes available globally.
+ramen-cve = "ramen_cve:main"
+
+[project.urls]
+Homepage = "https://github.com/cesiumskater/cti-cth-ramen-budget"
+Issues = "https://github.com/cesiumskater/cti-cth-ramen-budget/issues"
+
+# --------------------------------------------------------------------------
+# Setuptools — src layout
+# --------------------------------------------------------------------------
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"ramen_cve" = ["data/**/*.json"]
+
+# --------------------------------------------------------------------------
+# Ruff — lint + format
+# --------------------------------------------------------------------------
+
 [tool.ruff]
 line-length = 100
+extend-exclude = [".venv", "build", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+# --------------------------------------------------------------------------
+# pytest — discovery + import mode
+# --------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra"]

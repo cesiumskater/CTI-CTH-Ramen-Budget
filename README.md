@@ -20,48 +20,66 @@ Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** 
 
 ```
 .
-├── ramen_cve.py             # the implementation
+├── ramen.py                 # entry-point shim → src/ramen_cve/__init__.py:main()
 ├── README.md                # this file
 ├── LICENSE                  # MIT
-├── CLAUDE.md                # project rules (for AI-assisted contributors)
-├── pyproject.toml           # ruff config + project metadata
-├── requirements.txt         # runtime deps (requests, feedparser, python-dotenv, questionary)
-├── requirements-dev.txt     # dev deps (pytest, ruff)
-├── .env.example             # copy to .env and fill in optional API keys
+├── pyproject.toml           # project metadata + ruff + pytest config
+├── conftest.py              # tells pytest to import the package from src/
+├── .gitignore
+├── .gitattributes
 │
-├── data/                    # bundled lookup data ramen_cve.py reads at runtime
-│   ├── associations.json    #   CVE → threat-actor / campaign / malware (MITRE Groups)
-│   ├── hunts/               #   one JSON per threat-hunt hypothesis
-│   └── pirs/                #   one JSON per Priority Intelligence Requirement
+├── src/
+│   └── ramen_cve/           # the installable package (src layout)
+│       ├── __init__.py      # ~5,900-line implementation
+│       ├── __main__.py      # python -m ramen_cve entry
+│       └── data/            # bundled lookup data, loaded at runtime
+│           ├── associations.json
+│           ├── hunts/
+│           └── pirs/
 │
-├── docs/                    # design notes and gap analyses
-├── examples/                # sample OPML feed list, sample CSV / Markdown outputs,
+├── config/                  # configuration & dependency manifests
+│   ├── env.example          # copy to .env at the repo root and fill in API keys
+│   ├── requirements.txt
+│   └── requirements-dev.txt
+│
+├── docs/                    # contributor docs + gap analyses
+│   ├── CLAUDE.md            # AI-contributor project rules
+│   ├── REFACTOR_PLAN.md
+│   ├── cti-capability-gap-analysis*.md
+│   └── tasks/               # lessons.md + todo.md
+│
+├── examples/                # sample OPML, sample CSV / MD outputs,
 │                            #   GitHub-Actions scheduled-triage workflow
-├── scripts/                 # one-line venv-and-install bootstrap for both shells
-│   ├── setup.sh             #   Linux / macOS
-│   └── setup.ps1            #   Windows PowerShell
-├── tasks/                   # in-flight engineering plan + lessons.md
-└── tests/                   # 400+ pytest cases + fixtures
+├── scripts/
+│   ├── setup.sh             # bootstrap on Linux / macOS
+│   └── setup.ps1            # bootstrap on Windows PowerShell
+├── tests/                   # 420+ pytest cases + fixtures
+└── .claude/                 # Claude Code project settings (gitkept)
 ```
 
 ---
 
 ## Install
 
+The fast path is the bundled bootstrap; it builds a virtualenv, does an
+editable install of the package (so the `ramen-cve` console script is on
+your `PATH`), and copies `config/env.example` to `.env` on first run.
+
+```bash
+./scripts/setup.sh                 # Linux / macOS
+.\scripts\setup.ps1                # Windows PowerShell
+```
+
+Manual install:
+
 ```bash
 git clone https://github.com/cesiumskater/cti-cth-ramen-budget
 cd cti-cth-ramen-budget
 python -m venv .venv
 source .venv/bin/activate          # Linux / macOS
-# .venv\Scripts\activate           # Windows PowerShell
-pip install -r requirements.txt
-```
-
-Or run the bundled bootstrap:
-
-```bash
-./scripts/setup.sh                 # Linux / macOS
-.\scripts\setup.ps1                # Windows PowerShell
+# .venv\Scripts\Activate.ps1       # Windows PowerShell
+pip install -e ".[dev]"            # installs `ramen-cve` console script
+cp config/env.example .env         # then fill in the keys you want
 ```
 
 ---
@@ -82,7 +100,7 @@ The tool runs without any keys, but every key you set unlocks a feature.
 | `RAMEN_SMTP_HOST` + `..._FROM` + (`..._USER`, `..._PASS`, `..._USE_TLS`) | `--digest` | Daily-digest email |
 | `RAMEN_DIGEST_TO` | `--digest` | Catch-all recipient for un-owned hosts |
 
-1. Copy `.env.example` to `.env`.
+1. Copy `config/env.example` to `.env` at the repo root.
 2. Paste each key after its `=`.
 3. The `.env` file is gitignored. Keys are redacted from logs and never serialized.
 
@@ -90,15 +108,15 @@ The tool runs without any keys, but every key you set unlocks a feature.
 
 ## Usage
 
-The fastest way to try it is the interactive wizard — just run `python ramen_cve.py` with no
+The fastest way to try it is the interactive wizard — just run `python ramen.py` with no
 arguments. It walks you through every prompt, lets you paste Windows or POSIX paths with quotes
 or `~`, and lets you choose the output basename before files are written.
 
 ### Process an OPML feed list (or a directory of them)
 
 ```bash
-python ramen_cve.py opml examples/sample.opml
-python ramen_cve.py opml ~/feeds          # a directory of *.opml files
+python ramen.py opml examples/sample.opml
+python ramen.py opml ~/feeds          # a directory of *.opml files
 ```
 
 The OPML mode fetches every RSS/Atom feed listed in the file (or all `.opml` files in the
@@ -109,46 +127,46 @@ with `--out-dir` and `--basename`).
 ### Scan a single URL
 
 ```bash
-python ramen_cve.py url https://krebsonsecurity.com/2024/04/some-article/
+python ramen.py url https://krebsonsecurity.com/2024/04/some-article/
 ```
 
 ### Enrich named CVEs directly
 
 ```bash
-python ramen_cve.py cve CVE-2021-44228 CVE-2021-26855
-python ramen_cve.py cve --from-file my-cves.txt
+python ramen.py cve CVE-2021-44228 CVE-2021-26855
+python ramen.py cve --from-file my-cves.txt
 ```
 
 ### Ingest a STIX 2.1 bundle or TAXII collection
 
 ```bash
-python ramen_cve.py stix bundle.json
-python ramen_cve.py stix --taxii-url https://taxii.example/api1 \
+python ramen.py stix bundle.json
+python ramen.py stix --taxii-url https://taxii.example/api1 \
                          --taxii-collection 00000000-0000-4000-8000-000000000001
 ```
 
 ### Threat-hunt workflow (PEAK / F3EAD style)
 
 ```bash
-python ramen_cve.py hunt list
-python ramen_cve.py hunt show log4shell-evidence
-python ramen_cve.py hunt link log4shell-evidence CVE-2021-45046
-python ramen_cve.py hunt log  log4shell-evidence "Saw nothing in proxy logs."
-python ramen_cve.py hunt status log4shell-evidence closed_true_positive
+python ramen.py hunt list
+python ramen.py hunt show log4shell-evidence
+python ramen.py hunt link log4shell-evidence CVE-2021-45046
+python ramen.py hunt log  log4shell-evidence "Saw nothing in proxy logs."
+python ramen.py hunt status log4shell-evidence closed_true_positive
 ```
 
 ### Priority Intelligence Requirements
 
 ```bash
-python ramen_cve.py pir list
-python ramen_cve.py pir coverage
-python ramen_cve.py pir link log4j-exposure CVE-2021-44228
+python ramen.py pir list
+python ramen.py pir coverage
+python ramen.py pir link log4j-exposure CVE-2021-44228
 ```
 
 ### Historical trend for a single CVE
 
 ```bash
-python ramen_cve.py trend CVE-2021-44228
+python ramen.py trend CVE-2021-44228
 ```
 
 Renders a Unicode sparkline of CVSS / EPSS over every cached run plus a Markdown table of
@@ -157,8 +175,8 @@ bucket-by-date.
 ### Audit log
 
 ```bash
-python ramen_cve.py audit
-python ramen_cve.py audit --tail 100
+python ramen.py audit
+python ramen.py audit --tail 100
 ```
 
 Every invocation of an analysis or workflow subcommand is recorded with the actor (from
@@ -233,16 +251,16 @@ right one, so you never end up with `my-report.csv.csv`.
 
 ## What's bundled
 
-The repository ships with a working set of lookup data under `data/`. None of it is required —
-every default path can be overridden — but the bundled values let `python ramen_cve.py` work
-out of the box.
+The repository ships with a working set of lookup data under
+`src/ramen_cve/data/`. None of it is required — every default path can be overridden — but
+the bundled values let `python ramen.py` work out of the box.
 
-- `data/associations.json` — 12 well-known CVEs (Log4Shell, ProxyLogon, PrintNightmare,
-  ZeroLogon, EternalBlue, Follina, Pulse Secure, Fortinet, Sandworm PowerPoint, Outlook NTLM,
-  Barracuda ESG) mapped to MITRE-Groups threat actors, ransomware operators, malware
-  families, named campaigns, and per-actor sector targeting.
-- `data/hunts/log4shell-evidence.json` — sample threat-hunt hypothesis.
-- `data/pirs/log4j-exposure.json` — sample Priority Intelligence Requirement.
+- `src/ramen_cve/data/associations.json` — 12 well-known CVEs (Log4Shell, ProxyLogon,
+  PrintNightmare, ZeroLogon, EternalBlue, Follina, Pulse Secure, Fortinet, Sandworm
+  PowerPoint, Outlook NTLM, Barracuda ESG) mapped to MITRE-Groups threat actors,
+  ransomware operators, malware families, named campaigns, and per-actor sector targeting.
+- `src/ramen_cve/data/hunts/log4shell-evidence.json` — sample threat-hunt hypothesis.
+- `src/ramen_cve/data/pirs/log4j-exposure.json` — sample Priority Intelligence Requirement.
 
 Add or correct entries directly in those JSON files; `ramen_cve.py` reads them on every run.
 
