@@ -1267,7 +1267,7 @@ def test_cli_invalid_date_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen_cve.py", "opml", "x.opml", "--start", "not-a-date"],
+        [".venv/bin/python", "ramen.py", "opml", "x.opml", "--start", "not-a-date"],
         capture_output=True,
         text=True,
     )
@@ -1281,7 +1281,7 @@ def test_cli_start_after_end_rejected():
 
     result = subprocess.run(
         [
-            ".venv/bin/python", "ramen_cve.py", "opml", "x.opml",
+            ".venv/bin/python", "ramen.py", "opml", "x.opml",
             "--start", "2024-12-31", "--end", "2024-01-01",
         ],
         capture_output=True,
@@ -1296,7 +1296,7 @@ def test_cli_invalid_cve_id_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen_cve.py", "cve", "NOT-A-CVE"],
+        [".venv/bin/python", "ramen.py", "cve", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
@@ -1309,7 +1309,7 @@ def test_cli_from_file_missing_returns_friendly_error(tmp_path):
 
     missing = tmp_path / "does-not-exist.txt"
     result = subprocess.run(
-        [".venv/bin/python", "ramen_cve.py", "cve", "--from-file", str(missing), "--no-cache"],
+        [".venv/bin/python", "ramen.py", "cve", "--from-file", str(missing), "--no-cache"],
         capture_output=True,
         text=True,
     )
@@ -4805,7 +4805,7 @@ def test_run_trend_invalid_cve_id_exits_1(tmp_path, caplog):
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen_cve.py", "trend", "NOT-A-CVE"],
+        [".venv/bin/python", "ramen.py", "trend", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
