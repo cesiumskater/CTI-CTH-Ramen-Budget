@@ -6603,3 +6603,348 @@ def test_output_returns_paths_dict(tmp_path):
     assert paths["csv"].name == "run42.csv"
     assert paths["md"].name == "run42.md"
     assert paths["stix"] is None  # not requested
+
+
+# ---------------------------------------------------------------------------
+# Slice 28 — Phase 1 housekeeping: dir-OPML, path normalization, CVE validator,
+# basename extension stripping, pre-write log confirmation
+# ---------------------------------------------------------------------------
+
+
+def test_path_arg_expands_tilde(monkeypatch):
+    """_path_arg expands a leading ~ to the user's home directory."""
+    import os
+
+    import ramen_cve
+
+    monkeypatch.setenv("HOME", "/tmp/fake-home")
+    out = ramen_cve._path_arg("~/feeds")
+    assert str(out) == os.path.join("/tmp/fake-home", "feeds")
+
+
+def test_path_arg_strips_quotes_and_expands_tilde_together(monkeypatch):
+    """A quoted ~-path round-trips cleanly through _path_arg."""
+    import os
+
+    import ramen_cve
+
+    monkeypatch.setenv("HOME", "/tmp/fake-home")
+    out = ramen_cve._path_arg('"~/Reports"')
+    assert str(out) == os.path.join("/tmp/fake-home", "Reports")
+
+
+def test_resolve_out_dir_handles_none_and_dot(tmp_path, monkeypatch):
+    """_resolve_out_dir collapses None / '' / '.' to Path.cwd(); honors a real path."""
+    import ramen_cve
+
+    monkeypatch.chdir(tmp_path)
+    assert ramen_cve._resolve_out_dir(None) == tmp_path
+    from pathlib import Path
+
+    assert ramen_cve._resolve_out_dir(Path("")) == tmp_path
+    assert ramen_cve._resolve_out_dir(Path(".")) == tmp_path
+    real = tmp_path / "reports"
+    assert ramen_cve._resolve_out_dir(real) == real
+
+
+def test_validate_opml_input_file(tmp_path):
+    """A real .opml file passes the wizard validator."""
+    import ramen_cve
+
+    p = tmp_path / "feeds.opml"
+    p.write_text('<?xml version="1.0"?><opml version="2.0"><body></body></opml>')
+    assert ramen_cve._validate_opml_input(str(p)) is True
+
+
+def test_validate_opml_input_directory_with_files(tmp_path):
+    """A directory containing at least one .opml file passes."""
+    import ramen_cve
+
+    (tmp_path / "a.opml").write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body></body></opml>'
+    )
+    assert ramen_cve._validate_opml_input(str(tmp_path)) is True
+
+
+def test_validate_opml_input_directory_empty_returns_error(tmp_path):
+    """An empty directory fails validation with a helpful message."""
+    import ramen_cve
+
+    msg = ramen_cve._validate_opml_input(str(tmp_path))
+    assert isinstance(msg, str)
+    assert "no .opml files" in msg
+
+
+def test_validate_opml_input_missing_path():
+    """A non-existent path fails validation with a 'not found' message."""
+    import ramen_cve
+
+    msg = ramen_cve._validate_opml_input("/tmp/this-does-not-exist-ramen-test/x.opml")
+    assert isinstance(msg, str)
+    assert "not found" in msg.lower()
+
+
+def test_validate_opml_input_empty_string():
+    """Blank input fails the validator (no placeholder example in the message)."""
+    import ramen_cve
+
+    msg = ramen_cve._validate_opml_input("")
+    assert isinstance(msg, str)
+    # Critically, the error message must NOT contain a sample placeholder path.
+    assert "examples/sample.opml" not in msg
+
+
+def test_validate_opml_input_strips_quotes(tmp_path):
+    """A quoted path (Windows Explorer paste) is accepted."""
+    import ramen_cve
+
+    (tmp_path / "feed.opml").write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body></body></opml>'
+    )
+    assert ramen_cve._validate_opml_input(f'"{tmp_path}"') is True
+
+
+def test_collect_opml_files_single_file(tmp_path):
+    """_collect_opml_files returns [path] when given a single .opml."""
+    import ramen_cve
+
+    p = tmp_path / "feeds.opml"
+    p.write_text('<?xml version="1.0"?><opml version="2.0"><body></body></opml>')
+    assert ramen_cve._collect_opml_files(p) == [p]
+
+
+def test_collect_opml_files_directory(tmp_path):
+    """A directory yields every top-level *.opml, sorted."""
+    import ramen_cve
+
+    body = '<?xml version="1.0"?><opml version="2.0"><body></body></opml>'
+    (tmp_path / "z.opml").write_text(body)
+    (tmp_path / "a.opml").write_text(body)
+    (tmp_path / "ignored.txt").write_text("not opml")
+    files = ramen_cve._collect_opml_files(tmp_path)
+    assert [f.name for f in files] == ["a.opml", "z.opml"]
+
+
+def test_collect_opml_files_empty_directory_raises(tmp_path):
+    """An empty directory raises OpmlError with a clear message."""
+    import ramen_cve
+    from ramen_cve import OpmlError
+
+    with pytest.raises(OpmlError, match="no .opml"):
+        ramen_cve._collect_opml_files(tmp_path)
+
+
+def test_collect_opml_files_missing_path_raises(tmp_path):
+    """A non-existent path raises OpmlError."""
+    import ramen_cve
+    from ramen_cve import OpmlError
+
+    with pytest.raises(OpmlError, match="not found"):
+        ramen_cve._collect_opml_files(tmp_path / "no-such-file.opml")
+
+
+def test_run_opml_handles_directory(tmp_path, monkeypatch):
+    """End-to-end: `opml <dir>` loads every .opml file in the directory."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    opml_dir = tmp_path / "feeds"
+    opml_dir.mkdir()
+    (opml_dir / "a.opml").write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body>'
+        '<outline type="rss" text="A" xmlUrl="https://a.example/feed"/>'
+        "</body></opml>"
+    )
+    (opml_dir / "b.opml").write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body>'
+        '<outline type="rss" text="B" xmlUrl="https://b.example/feed"/>'
+        "</body></opml>"
+    )
+
+    parse_calls: list = []
+
+    class _FakeFeed:
+        bozo = 0
+        entries: list = []
+
+    def _fake_parse(url):
+        parse_calls.append(url)
+        return _FakeFeed()
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        if "epss" in url:
+            resp.json.return_value = {"data": []}
+        elif "known_exploited_vulnerabilities" in url:
+            resp.json.return_value = {"vulnerabilities": []}
+        else:
+            resp.json.return_value = {"vulnerabilities": []}
+        return resp
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.requests.post", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        patch("feedparser.parse", side_effect=_fake_parse),
+    ):
+        rc = ramen_cve.main([
+            "opml", str(opml_dir),
+            "--no-cache", "--no-exploit-lookup", "--no-enrich-iocs",
+            "--format", "csv", "--out-dir", str(tmp_path),
+        ])
+    assert rc == 0
+    # Both feed URLs were processed
+    assert "https://a.example/feed" in parse_calls
+    assert "https://b.example/feed" in parse_calls
+
+
+def test_run_opml_empty_directory_exits_nonzero(tmp_path):
+    """`opml <empty-dir>` exits with code 1 and a clear log message."""
+    import ramen_cve
+
+    empty = tmp_path / "feeds"
+    empty.mkdir()
+    rc = ramen_cve.main([
+        "opml", str(empty),
+        "--no-cache", "--no-exploit-lookup", "--no-enrich-iocs",
+        "--format", "csv", "--out-dir", str(tmp_path),
+    ])
+    assert rc == 1
+
+
+def test_safe_basename_strips_known_extensions():
+    """_safe_basename trims one trailing known output extension."""
+    import ramen_cve
+
+    assert ramen_cve._safe_basename("my-report.csv") == "my-report"
+    assert ramen_cve._safe_basename("my-report.md") == "my-report"
+    assert ramen_cve._safe_basename("findings.json") == "findings"
+    assert ramen_cve._safe_basename("rule.yar") == "rule"
+    assert ramen_cve._safe_basename("rule.YAR") == "rule"  # case-insensitive
+    # Only ONE extension is stripped (so a doubled .tar.gz is left intact)
+    assert ramen_cve._safe_basename("my-report") == "my-report"
+
+
+def test_output_smart_extension_no_double_csv(tmp_path):
+    """_output('--basename my-report.csv') writes my-report.csv, NOT my-report.csv.csv."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+    )
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, basename="my-report.csv",
+        allow_tlp_red=False,
+    )
+    paths = ramen_cve._output([rec], args, {"version": "0.1"})
+    assert paths["csv"].name == "my-report.csv"
+    assert not (tmp_path / "my-report.csv.csv").exists()
+
+
+def test_output_smart_extension_md_basename(tmp_path):
+    """`--basename report.md` with --format md produces report.md, not report.md.md."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2024-0001", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=9.0, epss_score=0.5, bucket="patch_now",
+    )
+    args = argparse.Namespace(
+        format="md", out_dir=tmp_path, basename="report.md",
+        allow_tlp_red=False,
+    )
+    paths = ramen_cve._output([rec], args, {"version": "0.1"})
+    assert paths["md"].name == "report.md"
+
+
+def test_output_logs_writing_before_each_write(tmp_path, caplog):
+    """Each output write is announced via an INFO 'Writing X → /path/...' log."""
+    import argparse
+    import logging
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+    )
+    args = argparse.Namespace(
+        format="both", out_dir=tmp_path, basename="confirmation-test",
+        allow_tlp_red=False,
+    )
+    with caplog.at_level(logging.INFO, logger="ramen_cve"):
+        ramen_cve._output([rec], args, {"version": "0.1"})
+    msgs = [r.message for r in caplog.records]
+    assert any("Writing CVE CSV report" in m for m in msgs)
+    assert any("Writing Markdown report" in m for m in msgs)
+
+
+def test_output_default_out_dir_resolves_to_cwd(tmp_path, monkeypatch):
+    """A None --out-dir resolves to Path.cwd() (no leading-period surprise)."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+    from ramen_cve import EnrichedCve
+
+    monkeypatch.chdir(tmp_path)
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228", source="x",
+        first_seen=date(2024, 1, 1), first_seen_type="feed_pub",
+        cvss_score=10.0, epss_score=0.97, bucket="kev_override",
+    )
+    args = argparse.Namespace(
+        format="csv", out_dir=None, basename="run-x", allow_tlp_red=False,
+    )
+    paths = ramen_cve._output([rec], args, {"version": "0.1"})
+    # File landed under cwd, not under "./"
+    assert paths["csv"].parent == tmp_path
+
+
+def test_wizard_validate_cve_list_accepts_valid_input():
+    """Valid CVE IDs (comma- or whitespace-separated) pass the validator."""
+    import ramen_cve
+
+    assert ramen_cve._wizard_validate_cve_list("CVE-2021-44228, CVE-2021-26855") is True
+    assert ramen_cve._wizard_validate_cve_list("CVE-2021-44228 CVE-2021-26855") is True
+    # Case-insensitive
+    assert ramen_cve._wizard_validate_cve_list("cve-2021-44228") is True
+
+
+def test_wizard_validate_cve_list_rejects_empty():
+    """Blank input gets a clear error (no echoed placeholder)."""
+    import ramen_cve
+
+    msg = ramen_cve._wizard_validate_cve_list("")
+    assert isinstance(msg, str)
+    # The error must not contain a literal CVE-YYYY-NNNNN sample placeholder.
+    assert "CVE-2021-44228" not in msg
+
+
+def test_wizard_validate_cve_list_rejects_invalid_tokens():
+    """An invalid token surfaces a format-shape error message."""
+    import ramen_cve
+
+    msg = ramen_cve._wizard_validate_cve_list("CVE-2021-44228, not-a-cve, foo")
+    assert isinstance(msg, str)
+    assert "Expected CVE-YYYY-NNNN" in msg
+    # The error references the OFFENDING tokens, but does not include extra
+    # placeholder examples — the abstract format string is the only sample.
+    assert "not-a-cve" in msg
