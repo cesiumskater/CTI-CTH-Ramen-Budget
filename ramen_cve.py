@@ -3587,8 +3587,71 @@ def _strip_path_quotes(value: str) -> str:
 
 
 def _path_arg(value: str) -> Path:
-    """Argparse type for user-supplied paths: strip wrapping quotes, return Path."""
-    return Path(_strip_path_quotes(value))
+    """Argparse type for user-supplied paths.
+
+    Performs the full normalization pipeline:
+      1. Strip surrounding ASCII or curly quotes (common when copying from
+         Windows Explorer's "Copy as path").
+      2. Strip surrounding whitespace.
+      3. Expand a leading ``~`` to the user's home directory (POSIX + Windows).
+
+    Returns a ``pathlib.Path`` — the rest of the code never sees a raw string.
+    """
+    return Path(_strip_path_quotes(value)).expanduser()
+
+
+def _resolve_out_dir(value: Path | None) -> Path:
+    """Resolve a `--out-dir` argument to a concrete directory.
+
+    A None / empty value (``--out-dir`` omitted, or wizard answered blank)
+    resolves to the current working directory rather than the literal ``.``
+    so the help text and prompt placeholder stay clean.
+    """
+    if value is None or str(value) in ("", "."):
+        return Path.cwd()
+    return value.expanduser()
+
+
+def _validate_opml_input(value: str) -> bool | str:
+    """Wizard validator for the OPML path prompt.
+
+    Accepts either:
+      - a path to a single ``.opml`` file, or
+      - a directory containing at least one ``*.opml`` file.
+
+    Quote-stripping and ``~`` expansion are applied before the on-disk check.
+    Returns True on success or a user-facing error string for questionary.
+    """
+    if not value or not value.strip():
+        return "Enter the path to an OPML file or a directory of .opml files."
+    cleaned = Path(_strip_path_quotes(value)).expanduser()
+    if cleaned.is_file():
+        return True
+    if cleaned.is_dir():
+        if any(cleaned.glob("*.opml")):
+            return True
+        return f"{cleaned} exists but contains no .opml files."
+    return f"Path not found: {cleaned}"
+
+
+def _collect_opml_files(path: Path) -> list[Path]:
+    """Return the list of OPML files at ``path``.
+
+    If ``path`` is a file we return ``[path]``. If it's a directory we return
+    every ``*.opml`` under it (sorted, top-level only — no recursion to avoid
+    picking up backups or unrelated bundles). An empty directory raises
+    OpmlError with a clear message so the caller can surface it.
+    """
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        files = sorted(path.glob("*.opml"))
+        if not files:
+            raise OpmlError(
+                f"Directory contains no .opml files: {path}"
+            )
+        return files
+    raise OpmlError(f"OPML path not found: {path}")
 
 
 def _shared_flags(parser: argparse.ArgumentParser) -> None:
@@ -3598,7 +3661,18 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--date-mode", choices=["feed", "disclosure", "epss"], default=None)
     parser.add_argument("--cvss-threshold", type=float, default=DEFAULT_CVSS_THRESHOLD)
     parser.add_argument("--epss-threshold", type=float, default=DEFAULT_EPSS_THRESHOLD)
-    parser.add_argument("--out-dir", type=_path_arg, default=Path("."))
+    # Default is None so the help text doesn't show a literal '.'; runtime
+    # resolves None → Path.cwd() via _resolve_out_dir(). Threat hunters
+    # typically pass a quoted Windows path here ("C:\\Users\\me\\Reports");
+    # _path_arg strips the quotes and expands ~.
+    parser.add_argument(
+        "--out-dir",
+        type=_path_arg,
+        default=None,
+        metavar="DIR",
+        help="Directory to write output files into. Defaults to the current "
+             "working directory. Surrounding quotes and a leading ~ are handled.",
+    )
     parser.add_argument(
         "--basename",
         type=str,
@@ -3870,13 +3944,12 @@ def _run_wizard() -> list[str]:
     argv: list[str] = [mode]
 
     if mode == "opml":
+        # Accept EITHER a single .opml file OR a directory containing one or
+        # more *.opml files. The validator handles quote-stripping and ~
+        # expansion so the user can paste Windows paths straight in.
         path = questionary.path(
-            "Path to your OPML file:",
-            validate=lambda p: (
-                True
-                if Path(_strip_path_quotes(p)).expanduser().is_file()
-                else "File not found."
-            ),
+            "Path to an OPML file or a directory containing .opml files:",
+            validate=_validate_opml_input,
         ).unsafe_ask()
         argv.append(str(Path(_strip_path_quotes(path)).expanduser()))
     elif mode == "url":
@@ -3902,13 +3975,17 @@ def _run_wizard() -> list[str]:
             ).unsafe_ask()
             argv.extend(["--from-file", str(Path(_strip_path_quotes(file_path)).expanduser())])
         else:
+            # Free-form list prompt. The prompt text deliberately does NOT
+            # carry a literal example (e.g. "CVE-2021-44228, CVE-2021-26855")
+            # — earlier UX feedback flagged that users had to backspace
+            # placeholders. The expected format is documented in
+            # _wizard_validate_cve_list's docstring instead.
             cves_raw = questionary.text(
-                "CVE IDs (space- or comma-separated):",
-                validate=lambda s: True if s.strip() else "Enter at least one CVE ID.",
+                "CVE IDs (comma- or whitespace-separated):",
+                validate=_wizard_validate_cve_list,
             ).unsafe_ask()
-            for token in re.split(r"[,\s]+", cves_raw.strip()):
-                if token:
-                    argv.append(token)
+            tokens = [t for t in re.split(r"[,\s]+", cves_raw.strip()) if t]
+            argv.extend(tokens)
 
     date_mode = questionary.select(
         "Which date should the start/end window filter on?",
@@ -4012,6 +4089,34 @@ def _wizard_validate_date(value: str) -> bool | str:
         return True
     except ValueError:
         return "Expected YYYY-MM-DD."
+
+
+def _wizard_validate_cve_list(value: str) -> bool | str:
+    """Questionary validator for a free-form list of CVE IDs.
+
+    Accepts one or more CVE IDs separated by commas and/or whitespace. Each
+    token must match the CVE regex ``CVE-YYYY-NNNN`` (with a 4-7 digit
+    suffix). The runtime error message does NOT echo a literal example, so
+    the user never has to backspace placeholder text.
+
+    Example shapes (for maintainers only, in this docstring):
+        "CVE-2021-44228, CVE-2021-26855"
+        "CVE-2021-44228 CVE-2021-26855"
+        "cve-2021-44228"            (case-insensitive; normalized later)
+    """
+    if not value or not value.strip():
+        return "Enter at least one CVE ID."
+    tokens = [t for t in re.split(r"[,\s]+", value.strip()) if t]
+    if not tokens:
+        return "Enter at least one CVE ID."
+    bad = [t for t in tokens if not CVE_REGEX.fullmatch(t.upper())]
+    if bad:
+        sample = ", ".join(bad[:3])
+        return (
+            f"Invalid CVE ID(s): {sample}. "
+            "Expected CVE-YYYY-NNNN format (NNNN may be 4–7 digits)."
+        )
+    return True
 
 
 def _wizard_validate_float(value: str, lo: float, hi: float) -> bool | str:
@@ -4344,20 +4449,43 @@ def _get_github_token() -> str | None:
     return token
 
 
-def _safe_basename(value: str | None) -> str:
-    """Sanitize a user-supplied basename: strip whitespace, drop path separators
-    and other shell-hostile characters. Empty input returns ''.
+# Output-format file extensions that _safe_basename strips off a user-supplied
+# basename so we don't end up with `my-report.csv.csv`. Edit here when adding
+# new --format choices.
+_KNOWN_OUTPUT_EXTENSIONS: tuple[str, ...] = (
+    ".csv", ".md", ".json", ".yar", ".yaml", ".yml",
+)
 
-    The intent is to honor a user choice like 'q2-triage' while rejecting
-    inputs that would create files outside the chosen out-dir or that would
-    confuse common file pickers.
+
+def _safe_basename(value: str | None) -> str:
+    """Sanitize a user-supplied basename for use as an output-file stem.
+
+    Steps applied in order:
+      1. Strip surrounding whitespace.
+      2. Replace path / glob / shell-meta characters ( \\ / : * ? " < > | )
+         with ``_``.
+      3. Strip leading dot / dash / underscore runs so traversal artefacts
+         (``../etc/passwd``) and hidden-file shapes (``.cache``) collapse
+         to a clean stem.
+      4. Strip one trailing recognized output extension (``.csv``, ``.md``,
+         ``.json``, ``.yar``, ``.yaml``, ``.yml``). The writer re-appends
+         the correct extension based on the actual format being written,
+         so a user pasting ``my-report.csv`` ends up with one ``.csv``,
+         not two.
+
+    Empty input returns ``''`` (the caller falls back to a timestamped stem).
     """
     if not value:
         return ""
     cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", value.strip())
-    # Strip leading dots/dashes/underscores so traversal artifacts ("../etc/p")
-    # and hidden-file-style names (".cache") collapse to a clean stem.
-    return cleaned.lstrip(". -_") or ""
+    cleaned = cleaned.lstrip(". -_")
+    # Strip ONE known output extension if present (case-insensitive).
+    lower = cleaned.lower()
+    for ext in _KNOWN_OUTPUT_EXTENSIONS:
+        if lower.endswith(ext):
+            cleaned = cleaned[: -len(ext)]
+            break
+    return cleaned or ""
 
 
 def _unique_output_path(
@@ -4406,7 +4534,9 @@ def _output(
     # cross-process collisions and any clock that lacks sub-second
     # resolution.
     ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
-    out_dir: Path = args.out_dir
+    # Resolve --out-dir = None / '' / '.' to the actual cwd so the on-disk
+    # path is unambiguous (no leading-period surprises on Windows).
+    out_dir: Path = _resolve_out_dir(getattr(args, "out_dir", None))
     out_dir.mkdir(parents=True, exist_ok=True)
     iocs = iocs or []
     basename = _safe_basename(getattr(args, "basename", None))
@@ -4433,6 +4563,7 @@ def _output(
 
     if args.format in ("csv", "both", "all"):
         csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
+        _log.info("Writing CVE CSV report → %s", csv_path)
         write_csv(enriched, csv_path)
         print(str(csv_path))
         paths["csv"] = csv_path
@@ -4447,24 +4578,28 @@ def _output(
                 )
             else:
                 iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            _log.info("Writing IOC CSV report → %s", iocs_path)
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
             paths["iocs_csv"] = iocs_path
 
     if args.format in ("md", "both", "all"):
         md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
+        _log.info("Writing Markdown report → %s", md_path)
         write_markdown(enriched, md_path, metadata, iocs=iocs)
         print(str(md_path))
         paths["md"] = md_path
 
     if args.format in ("stix", "all"):
         stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
+        _log.info("Writing STIX 2.1 bundle → %s", stix_path)
         write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
         print(str(stix_path))
         paths["stix"] = stix_path
 
     if args.format in ("sigma", "all"):
         sigma_dir = out_dir / f"{sigma_stem}-sigma"
+        _log.info("Writing Sigma rule stubs → %s", sigma_dir)
         files = write_sigma_stubs(enriched, sigma_dir)
         if files:
             print(str(sigma_dir))
@@ -4476,6 +4611,7 @@ def _output(
 
     if args.format in ("yara", "all"):
         yara_dir = out_dir / f"{sigma_stem}-yara"
+        _log.info("Writing YARA rule stubs → %s", yara_dir)
         files = write_yara_stubs(enriched, yara_dir)
         if files:
             print(str(yara_dir))
@@ -4489,10 +4625,35 @@ def _output(
 
 
 def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
-    """Execute the opml subcommand."""
+    """Execute the opml subcommand.
+
+    `args.path` may point at:
+      - a single .opml file (the historical behavior), or
+      - a directory containing one or more .opml files (new): every
+        top-level *.opml is loaded and its feeds are merged into a single
+        run.
+
+    Bad paths (missing / empty directory) raise OpmlError, which we surface
+    as a friendly stderr message and a non-zero exit code instead of a
+    traceback.
+    """
     import feedparser
 
-    entries = parse_opml(args.path)
+    try:
+        opml_files = _collect_opml_files(args.path)
+    except OpmlError as exc:
+        _log.error(str(exc))
+        return 1
+
+    entries: list[FeedEntry] = []
+    for opml_file in opml_files:
+        _log.info("Loading OPML file: %s", opml_file)
+        entries.extend(parse_opml(opml_file))
+
+    if not entries:
+        _log.warning("No <outline> entries with xmlUrl found across %d OPML file(s).",
+                     len(opml_files))
+
     records: list[CveRecord] = []
     iocs: list[IocRecord] = []
     sources: list[str] = []
@@ -4683,7 +4844,15 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
                 _log.warning("Skipping invalid CVE ID from file: %s", line)
 
     if not cve_ids:
-        _log.error("No valid CVE IDs provided.")
+        # Expected shape (kept in this comment so the error message doesn't
+        # echo a literal placeholder the user has to delete):
+        #   `ramen_cve cve CVE-2021-44228 CVE-2021-26855 ...`
+        # or a --from-file argument whose lines each match CVE-YYYY-NNNN
+        # (4-7 digit suffix).
+        _log.error(
+            "No valid CVE IDs provided. Pass them as positional arguments "
+            "or via --from-file. Each ID must match CVE-YYYY-NNNN."
+        )
         return 1
 
     # Default for manual CVE input is "disclosure" because there is no feed date.
