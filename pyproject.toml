@@ -38,6 +38,7 @@ dependencies = [
     "feedparser>=6.0,<7",
     "python-dotenv>=1.0,<2",
     "questionary>=2.0,<3",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
@@ -63,7 +64,7 @@ Issues = "https://github.com/cesiumskater/cti-cth-ramen-budget/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"ramen_cve" = ["data/**/*.json"]
+"ramen_cve" = ["data/**/*.json", "config/*.yaml", "config/presets/*.yaml"]
 
 # --------------------------------------------------------------------------
 # Ruff — lint + format

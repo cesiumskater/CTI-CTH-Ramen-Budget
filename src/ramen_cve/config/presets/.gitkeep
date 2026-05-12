@@ -1,0 +1,3 @@
+# Presets directory — saved named configurations land here as <name>.yaml.
+# Populate via:  python threat_intel_hunter.py --save-config <name> ...
+# Load via:     python threat_intel_hunter.py --config <name>

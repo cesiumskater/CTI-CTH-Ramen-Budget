@@ -20,7 +20,7 @@ Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** 
 
 ```
 .
-├── ramen.py                 # entry-point shim → src/ramen_cve/__init__.py:main()
+├── threat_intel_hunter.py   # entry-point shim → src/ramen_cve/__init__.py:main()
 ├── README.md                # this file
 ├── LICENSE                  # MIT
 ├── pyproject.toml           # project metadata + ruff + pytest config
@@ -108,15 +108,15 @@ The tool runs without any keys, but every key you set unlocks a feature.
 
 ## Usage
 
-The fastest way to try it is the interactive wizard — just run `python ramen.py` with no
+The fastest way to try it is the interactive wizard — just run `python threat_intel_hunter.py` with no
 arguments. It walks you through every prompt, lets you paste Windows or POSIX paths with quotes
 or `~`, and lets you choose the output basename before files are written.
 
 ### Process an OPML feed list (or a directory of them)
 
 ```bash
-python ramen.py opml examples/sample.opml
-python ramen.py opml ~/feeds          # a directory of *.opml files
+python threat_intel_hunter.py opml examples/sample.opml
+python threat_intel_hunter.py opml ~/feeds          # a directory of *.opml files
 ```
 
 The OPML mode fetches every RSS/Atom feed listed in the file (or all `.opml` files in the
@@ -127,46 +127,46 @@ with `--out-dir` and `--basename`).
 ### Scan a single URL
 
 ```bash
-python ramen.py url https://krebsonsecurity.com/2024/04/some-article/
+python threat_intel_hunter.py url https://krebsonsecurity.com/2024/04/some-article/
 ```
 
 ### Enrich named CVEs directly
 
 ```bash
-python ramen.py cve CVE-2021-44228 CVE-2021-26855
-python ramen.py cve --from-file my-cves.txt
+python threat_intel_hunter.py cve CVE-2021-44228 CVE-2021-26855
+python threat_intel_hunter.py cve --from-file my-cves.txt
 ```
 
 ### Ingest a STIX 2.1 bundle or TAXII collection
 
 ```bash
-python ramen.py stix bundle.json
-python ramen.py stix --taxii-url https://taxii.example/api1 \
+python threat_intel_hunter.py stix bundle.json
+python threat_intel_hunter.py stix --taxii-url https://taxii.example/api1 \
                          --taxii-collection 00000000-0000-4000-8000-000000000001
 ```
 
 ### Threat-hunt workflow (PEAK / F3EAD style)
 
 ```bash
-python ramen.py hunt list
-python ramen.py hunt show log4shell-evidence
-python ramen.py hunt link log4shell-evidence CVE-2021-45046
-python ramen.py hunt log  log4shell-evidence "Saw nothing in proxy logs."
-python ramen.py hunt status log4shell-evidence closed_true_positive
+python threat_intel_hunter.py hunt list
+python threat_intel_hunter.py hunt show log4shell-evidence
+python threat_intel_hunter.py hunt link log4shell-evidence CVE-2021-45046
+python threat_intel_hunter.py hunt log  log4shell-evidence "Saw nothing in proxy logs."
+python threat_intel_hunter.py hunt status log4shell-evidence closed_true_positive
 ```
 
 ### Priority Intelligence Requirements
 
 ```bash
-python ramen.py pir list
-python ramen.py pir coverage
-python ramen.py pir link log4j-exposure CVE-2021-44228
+python threat_intel_hunter.py pir list
+python threat_intel_hunter.py pir coverage
+python threat_intel_hunter.py pir link log4j-exposure CVE-2021-44228
 ```
 
 ### Historical trend for a single CVE
 
 ```bash
-python ramen.py trend CVE-2021-44228
+python threat_intel_hunter.py trend CVE-2021-44228
 ```
 
 Renders a Unicode sparkline of CVSS / EPSS over every cached run plus a Markdown table of
@@ -175,8 +175,8 @@ bucket-by-date.
 ### Audit log
 
 ```bash
-python ramen.py audit
-python ramen.py audit --tail 100
+python threat_intel_hunter.py audit
+python threat_intel_hunter.py audit --tail 100
 ```
 
 Every invocation of an analysis or workflow subcommand is recorded with the actor (from
@@ -253,7 +253,7 @@ right one, so you never end up with `my-report.csv.csv`.
 
 The repository ships with a working set of lookup data under
 `src/ramen_cve/data/`. None of it is required — every default path can be overridden — but
-the bundled values let `python ramen.py` work out of the box.
+the bundled values let `python threat_intel_hunter.py` work out of the box.
 
 - `src/ramen_cve/data/associations.json` — 12 well-known CVEs (Log4Shell, ProxyLogon,
   PrintNightmare, ZeroLogon, EternalBlue, Follina, Pulse Secure, Fortinet, Sandworm
