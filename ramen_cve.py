@@ -152,9 +152,14 @@ DEFAULT_CACHE_TTL_HOURS = 24
 
 USER_AGENT = "ramen-cve/0.1 (+https://github.com/cesiumskater)"
 
-DEFAULT_ASSOCIATIONS_PATH = Path(__file__).resolve().parent / "associations.json"
-DEFAULT_HUNT_DIR = Path(__file__).resolve().parent / "hunts"
-DEFAULT_PIR_DIR = Path(__file__).resolve().parent / "pirs"
+# Bundled lookup data ships under data/ next to ramen_cve.py so the repo's
+# top level stays tidy. Override any of these with the corresponding CLI flag
+# (--associations-file / --hunt-dir / --pir-dir) when running against a
+# different deployment.
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
+DEFAULT_ASSOCIATIONS_PATH = DEFAULT_DATA_DIR / "associations.json"
+DEFAULT_HUNT_DIR = DEFAULT_DATA_DIR / "hunts"
+DEFAULT_PIR_DIR = DEFAULT_DATA_DIR / "pirs"
 
 HUNT_STATUSES = (
     "open",
