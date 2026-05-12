@@ -1,0 +1,117 @@
+# ---------------------------------------------------------------------------
+# threat_intel_hunter / ramen-cve — default configuration template
+# ---------------------------------------------------------------------------
+#
+# This file documents every YAML key the tool recognises and the runtime
+# defaults each one falls back to when omitted. Copy or move it to a preset
+# slot to create a named configuration:
+#
+#   python threat_intel_hunter.py --save-config daily-hunt opml ~/feeds
+#       └─ writes src/ramen_cve/config/presets/daily-hunt.yaml from the
+#          current invocation's arguments
+#
+#   python threat_intel_hunter.py --config daily-hunt
+#       └─ loads that preset and runs with those settings (CLI args still
+#          win over YAML values, so you can override anything ad-hoc)
+#
+#   python threat_intel_hunter.py --config /abs/path/to/custom.yaml
+#       └─ a path with a path separator is loaded as a file, not a preset
+#
+# Every key below is OPTIONAL. CLI flags always take precedence; YAML values
+# only fill in the gaps. A blank or missing key falls back to the documented
+# CLI default.
+# ---------------------------------------------------------------------------
+
+# ----- Subcommand to run ---------------------------------------------------
+# One of: opml | url | cve | stix | hunt | pir | trend | audit | schedule
+# When loaded via --config, omitting this is fine if you pass a subcommand
+# explicitly on the command line.
+subcommand: opml
+
+# ----- OPML source ---------------------------------------------------------
+# A path to a single .opml file OR a directory containing one or more *.opml
+# files. The tool quote-strips and ~-expands every path key in this file.
+opml_path: ~/feeds
+
+# ----- Other primary inputs (only one applies, matched to `subcommand`) ----
+# url:    https://example.com/article
+# cves:   [CVE-2021-44228, CVE-2021-26855]   # CVE list for the `cve` subcommand
+# stix_path: bundle.json
+# taxii_url: https://taxii.example/api1
+# taxii_collection: 00000000-0000-4000-8000-000000000001
+
+# ----- Output destination --------------------------------------------------
+output:
+  # Where to write artefacts. Quote-stripped + ~-expanded; '' or '.' → cwd.
+  out_dir: ~/Reports/threat-intel
+  # Filename stem (no extension). The writer adds .csv / .md / .json / etc.
+  # Blank → "ramen-cve-<UTC timestamp>".
+  basename: ""
+  # One of: csv | md | both | stix | sigma | yara | all
+  format: both
+  # Set true to keep TLP:RED records in the output. Default strips them.
+  allow_tlp_red: false
+
+# ----- Scoring & filtering -------------------------------------------------
+filters:
+  # Drop CVEs whose CVSS is below this (high-severity bucket cutoff).
+  cvss_threshold: 7.0
+  # Drop CVEs whose EPSS is below this (likely-exploited bucket cutoff).
+  epss_threshold: 0.10
+  # Drop IOCs whose decay-weighted confidence is below this floor (0.0..1.0).
+  ioc_confidence_floor: 0.0
+  # Inclusive date window. Omit start or end to leave it open.
+  start: ""   # YYYY-MM-DD
+  end: ""     # YYYY-MM-DD
+  # One of: feed | disclosure | epss — which date the window is checked against.
+  date_mode: feed
+  # Optional sector filter — drops CVEs whose only attribution targets a
+  # different sector. Lowercase tag (financial / energy / government / ...).
+  sector: ""
+
+# ----- Enrichment toggles --------------------------------------------------
+enrichment:
+  # Skip Exploit-DB / Nuclei / GitHub PoC lookups (offline mode).
+  no_exploit_lookup: false
+  # Skip VirusTotal / AbuseIPDB / OTX / MalwareBazaar IOC enrichment.
+  no_enrich_iocs: false
+
+# ----- Asset inventory -----------------------------------------------------
+# Optional CSV with columns host, product, version, [cpe], [owner]. When set,
+# every CVE in the report carries the list of affected inventory hosts, and
+# the --digest email dispatcher routes per-host findings to each `owner`.
+inventory_path: ""
+
+# ----- Persistence ---------------------------------------------------------
+# When true, this preset will overwrite itself with the current run's
+# arguments at the end of a successful run. Useful for "remember last OPML".
+remember_opml: false
+
+# ----- Cache ---------------------------------------------------------------
+cache:
+  # Skip SQLite cache; always re-fetch NVD / EPSS / KEV / etc.
+  no_cache: false
+
+# ----- Dispatchers ---------------------------------------------------------
+# Per-finding alerts (Slack / generic webhook). Off by default.
+dispatch:
+  enabled: false
+
+# Batched daily-digest email. When `enabled: true`, the run populates the
+# RAMEN_SMTP_* env-var equivalents from this block before invoking the
+# EmailDispatcher. Recipients without per-host inventory ownership fall
+# through to `fallback_recipient`.
+email:
+  enabled: false
+  smtp_host: ""
+  smtp_port: 587
+  smtp_user: ""
+  smtp_pass: ""           # NOTE: prefer env / keyring; YAML stores plaintext
+  smtp_from: ""
+  smtp_use_tls: true
+  fallback_recipient: ""
+
+# ----- Logging -------------------------------------------------------------
+logging:
+  # One of: quiet | normal | verbose
+  level: normal

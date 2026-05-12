@@ -161,6 +161,13 @@ DEFAULT_ASSOCIATIONS_PATH = DEFAULT_DATA_DIR / "associations.json"
 DEFAULT_HUNT_DIR = DEFAULT_DATA_DIR / "hunts"
 DEFAULT_PIR_DIR = DEFAULT_DATA_DIR / "pirs"
 
+# YAML configuration presets ship alongside the package. The documented
+# template at src/ramen_cve/config/config.yaml records every key the tool
+# recognizes; named presets land in src/ramen_cve/config/presets/<name>.yaml.
+DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "config"
+DEFAULT_CONFIG_TEMPLATE = DEFAULT_CONFIG_DIR / "config.yaml"
+DEFAULT_PRESETS_DIR = DEFAULT_CONFIG_DIR / "presets"
+
 HUNT_STATUSES = (
     "open",
     "in_progress",
@@ -3659,6 +3666,264 @@ def _collect_opml_files(path: Path) -> list[Path]:
     raise OpmlError(f"OPML path not found: {path}")
 
 
+# ---------------------------------------------------------------------------
+# YAML configuration system
+# ---------------------------------------------------------------------------
+#
+# Saved configurations live as YAML files under DEFAULT_PRESETS_DIR. The
+# documented template at DEFAULT_CONFIG_TEMPLATE shows every key the tool
+# understands. CLI args ALWAYS win over YAML values — the YAML only fills
+# the gaps. See src/ramen_cve/config/config.yaml for the full schema.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_config_path(name_or_path: str) -> Path:
+    """Resolve ``--config`` argument to a concrete YAML file.
+
+    Plain names like ``daily-hunt`` are looked up under DEFAULT_PRESETS_DIR
+    with a ``.yaml`` extension. Anything containing a path separator (``/`` or
+    ``\\``) or an explicit ``.yaml`` / ``.yml`` extension is treated as a
+    file path (quote-stripped + ~-expanded).
+    """
+    raw = (name_or_path or "").strip()
+    if not raw:
+        raise FileNotFoundError("No config name or path supplied.")
+    looks_like_path = (
+        "/" in raw or "\\" in raw
+        or raw.endswith((".yaml", ".yml"))
+        or raw.startswith("~")
+    )
+    if looks_like_path:
+        return Path(_strip_path_quotes(raw)).expanduser()
+    return DEFAULT_PRESETS_DIR / f"{raw}.yaml"
+
+
+def load_yaml_config(name_or_path: str) -> dict:
+    """Load a YAML config (preset name or explicit path) into a dict.
+
+    Returns ``{}`` for an empty file. Raises FileNotFoundError when the
+    file doesn't exist and ValueError when the file isn't YAML-parseable
+    so callers can surface clean error messages.
+    """
+    import yaml
+
+    path = _resolve_config_path(name_or_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Could not parse YAML config {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Config file {path} must contain a YAML mapping at the top level."
+        )
+    return data
+
+
+def list_yaml_presets() -> list[Path]:
+    """Return every *.yaml preset under DEFAULT_PRESETS_DIR (sorted)."""
+    if not DEFAULT_PRESETS_DIR.exists():
+        return []
+    return sorted(DEFAULT_PRESETS_DIR.glob("*.yaml"))
+
+
+def save_yaml_config(name_or_path: str, payload: dict) -> Path:
+    """Persist ``payload`` as a YAML preset. Returns the path written to.
+
+    A bare name maps to ``DEFAULT_PRESETS_DIR/<name>.yaml``; anything with a
+    path separator or ``.yaml`` / ``.yml`` extension is treated as an
+    explicit file path. The presets directory is created on demand.
+    """
+    import yaml
+
+    target = _resolve_config_path(name_or_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(payload, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    return target
+
+
+# Mapping from YAML key → argparse.Namespace attribute name. Nested YAML
+# blocks (output, filters, enrichment, cache, dispatch, email, logging) are
+# expanded into flat attributes that mirror the CLI flag names. CLI args
+# present in args.* with a non-None value override any YAML setting.
+_YAML_FLAT_KEY_MAP: dict[tuple[str, ...], str] = {
+    ("subcommand",): "subcommand",
+    ("opml_path",): "path",
+    ("url",): "url",
+    ("cves",): "cves",
+    ("stix_path",): "path",
+    ("taxii_url",): "taxii_url",
+    ("taxii_collection",): "taxii_collection",
+    ("inventory_path",): "inventory",
+    ("output", "out_dir"): "out_dir",
+    ("output", "basename"): "basename",
+    ("output", "format"): "format",
+    ("output", "allow_tlp_red"): "allow_tlp_red",
+    ("filters", "cvss_threshold"): "cvss_threshold",
+    ("filters", "epss_threshold"): "epss_threshold",
+    ("filters", "ioc_confidence_floor"): "ioc_confidence_floor",
+    ("filters", "start"): "start",
+    ("filters", "end"): "end",
+    ("filters", "date_mode"): "date_mode",
+    ("filters", "sector"): "sector",
+    ("enrichment", "no_exploit_lookup"): "no_exploit_lookup",
+    ("enrichment", "no_enrich_iocs"): "no_enrich_iocs",
+    ("cache", "no_cache"): "no_cache",
+    ("dispatch", "enabled"): "dispatch",
+}
+
+
+def _coerce_yaml_value(attr: str, value):
+    """Convert a YAML value into the type argparse would have produced.
+
+    Handles the four argparse types this tool uses: dates (from ISO strings),
+    floats, Paths, and lists (passed through). Empty strings collapse to None
+    so they don't override a real CLI argument by accident.
+    """
+    if value in ("", None):
+        return None
+    if attr in ("start", "end") and isinstance(value, str):
+        try:
+            return _parse_iso_date(value)
+        except (argparse.ArgumentTypeError, ValueError):
+            return None
+    if attr in (
+        "out_dir", "path", "inventory", "associations_file",
+        "hunt_dir", "pir_dir",
+    ) and isinstance(value, str):
+        return Path(_strip_path_quotes(value)).expanduser()
+    if attr in ("cvss_threshold", "epss_threshold", "ioc_confidence_floor"):
+        return float(value)
+    return value
+
+
+def apply_yaml_config(args: argparse.Namespace, config: dict) -> None:
+    """Fold a loaded YAML config into ``args`` IN PLACE.
+
+    Walks _YAML_FLAT_KEY_MAP, pulling each nested-or-flat YAML key out of
+    the loaded mapping and stamping it onto the corresponding args attribute
+    only when the user did NOT pass that flag on the CLI (i.e. when the
+    attribute is currently None / False / its argparse default).
+    """
+    def _get_nested(d: dict, path: tuple[str, ...]):
+        cur = d
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return None
+            cur = cur[key]
+        return cur
+
+    for key_path, attr in _YAML_FLAT_KEY_MAP.items():
+        raw = _get_nested(config, key_path)
+        if raw is None:
+            continue
+        coerced = _coerce_yaml_value(attr, raw)
+        if coerced is None:
+            continue
+        current = getattr(args, attr, None)
+        # "Current is unset" heuristic: argparse defaults for our flags are
+        # either None, False (for store_true), or the documented numeric
+        # default. We override None/False; we leave non-default values alone.
+        if current in (None, False, "", []):
+            setattr(args, attr, coerced)
+
+    # Logging level: YAML's logging.level maps to args.quiet / args.verbose
+    # only when neither flag was passed.
+    log_level = (config.get("logging") or {}).get("level")
+    if isinstance(log_level, str) and not getattr(args, "quiet", False) \
+            and not getattr(args, "verbose", False):
+        if log_level == "quiet":
+            args.quiet = True
+        elif log_level == "verbose":
+            args.verbose = True
+
+    # Email section → RAMEN_SMTP_* env vars so EmailDispatcher.from_env()
+    # picks them up. Plaintext SMTP passwords in YAML are flagged in the
+    # template; production users should prefer .env / keyring.
+    email = config.get("email") or {}
+    if isinstance(email, dict) and email.get("enabled"):
+        import os
+
+        def _set_env_if_blank(key: str, value) -> None:
+            """Set `key` to `str(value)` only if `value` is truthy AND the env
+            var is not already set (so a real `.env` always wins over YAML)."""
+            if value:
+                os.environ.setdefault(key, str(value))
+
+        _set_env_if_blank("RAMEN_SMTP_HOST", email.get("smtp_host"))
+        if email.get("smtp_port"):
+            _set_env_if_blank("RAMEN_SMTP_PORT", email.get("smtp_port"))
+        _set_env_if_blank("RAMEN_SMTP_USER", email.get("smtp_user"))
+        _set_env_if_blank("RAMEN_SMTP_PASS", email.get("smtp_pass"))
+        _set_env_if_blank("RAMEN_SMTP_FROM", email.get("smtp_from"))
+        if email.get("smtp_use_tls") is False:
+            _set_env_if_blank("RAMEN_SMTP_USE_TLS", "0")
+        _set_env_if_blank("RAMEN_DIGEST_TO", email.get("fallback_recipient"))
+        # Implicit: enabling email turns on --digest unless explicitly opted out.
+        if not getattr(args, "digest", False):
+            args.digest = True
+
+
+def args_to_yaml_payload(args: argparse.Namespace) -> dict:
+    """Snapshot the current invocation as a YAML-compatible mapping.
+
+    Used by ``--save-config NAME``. Mirrors the schema in
+    src/ramen_cve/config/config.yaml so a round-trip
+    save → load → run reproduces the same behavior.
+    """
+    def _stringify(v):
+        if isinstance(v, Path):
+            return str(v)
+        if isinstance(v, date):
+            return v.isoformat()
+        return v
+
+    payload: dict = {"subcommand": getattr(args, "subcommand", None)}
+    payload["opml_path"] = _stringify(getattr(args, "path", None)) \
+        if getattr(args, "subcommand", "") == "opml" else None
+    payload["url"] = getattr(args, "url", None)
+    payload["cves"] = list(getattr(args, "cves", None) or []) or None
+    payload["stix_path"] = _stringify(getattr(args, "path", None)) \
+        if getattr(args, "subcommand", "") == "stix" else None
+    payload["taxii_url"] = getattr(args, "taxii_url", None)
+    payload["taxii_collection"] = getattr(args, "taxii_collection", None)
+    payload["inventory_path"] = _stringify(getattr(args, "inventory", None))
+    payload["output"] = {
+        "out_dir": _stringify(getattr(args, "out_dir", None)),
+        "basename": getattr(args, "basename", None) or "",
+        "format": getattr(args, "format", None),
+        "allow_tlp_red": bool(getattr(args, "allow_tlp_red", False)),
+    }
+    payload["filters"] = {
+        "cvss_threshold": getattr(args, "cvss_threshold", None),
+        "epss_threshold": getattr(args, "epss_threshold", None),
+        "ioc_confidence_floor": getattr(args, "ioc_confidence_floor", None),
+        "start": _stringify(getattr(args, "start", None)) or "",
+        "end": _stringify(getattr(args, "end", None)) or "",
+        "date_mode": getattr(args, "date_mode", None),
+        "sector": getattr(args, "sector", None) or "",
+    }
+    payload["enrichment"] = {
+        "no_exploit_lookup": bool(getattr(args, "no_exploit_lookup", False)),
+        "no_enrich_iocs": bool(getattr(args, "no_enrich_iocs", False)),
+    }
+    payload["cache"] = {"no_cache": bool(getattr(args, "no_cache", False))}
+    payload["dispatch"] = {"enabled": bool(getattr(args, "dispatch", False))}
+    payload["logging"] = {
+        "level": "quiet" if getattr(args, "quiet", False)
+        else "verbose" if getattr(args, "verbose", False)
+        else "normal",
+    }
+    # Drop any key with a None value so the saved file stays tidy.
+    return {k: v for k, v in payload.items() if v not in (None, {}, [])}
+
+
 def _shared_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the flags shared by all three subcommands."""
     parser.add_argument("--start", type=_parse_iso_date, metavar="YYYY-MM-DD")
@@ -3791,7 +4056,34 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ramen_cve",
         description="Threat intel triage on a ramen budget.",
     )
-    sub = parser.add_subparsers(dest="subcommand", required=True)
+    # YAML configuration plumbing — top-level (works before any subcommand).
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "Load a saved YAML preset by name "
+            "(under src/ramen_cve/config/presets/<NAME>.yaml) "
+            "or an explicit YAML file path. CLI flags override YAML values."
+        ),
+    )
+    parser.add_argument(
+        "--save-config",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help=(
+            "After this run, persist the current invocation's arguments as a "
+            "YAML preset under that NAME (or write to the explicit YAML path)."
+        ),
+    )
+    parser.add_argument(
+        "--list-configs",
+        action="store_true",
+        help="List every saved YAML preset and exit.",
+    )
+    sub = parser.add_subparsers(dest="subcommand", required=False)
 
     # opml subcommand
     opml_p = sub.add_parser("opml", help="Process an OPML feed list.")
@@ -4154,7 +4446,53 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --list-configs: dump every saved preset name + path and exit.
+    if getattr(args, "list_configs", False):
+        presets = list_yaml_presets()
+        if not presets:
+            print(f"(no saved presets under {DEFAULT_PRESETS_DIR})")
+        else:
+            for p in presets:
+                print(f"{p.stem}\t{p}")
+        return 0
+
+    # --config NAME / --config path/to.yaml: load YAML and overlay onto args
+    # BEFORE _configure_logging so logging.level keys take effect.
+    if getattr(args, "config", None):
+        try:
+            yaml_cfg = load_yaml_config(args.config)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        apply_yaml_config(args, yaml_cfg)
+        # The YAML may have supplied the subcommand. If the parser couldn't
+        # bind one, reparse the args namespace into the chosen subcommand
+        # context now. The pragmatic shortcut: pass attributes through as-is
+        # and let the existing dispatch logic below pick the runner.
+        if not getattr(args, "subcommand", None):
+            print(
+                "error: no subcommand was provided and the config did not "
+                "supply one (set `subcommand:` in the YAML).",
+                file=sys.stderr,
+            )
+            return 1
+
+    # Subcommand is required after --config / --list-configs handling.
+    if not getattr(args, "subcommand", None):
+        parser.error("a subcommand is required (or use --config / --list-configs).")
+
     _configure_logging(args)
+
+    # If --save-config was passed, persist the (post-YAML-overlay) namespace
+    # before running so the preset captures the actual run shape even on
+    # later failure. The save happens regardless of run outcome.
+    if getattr(args, "save_config", None):
+        try:
+            written = save_yaml_config(args.save_config, args_to_yaml_payload(args))
+            _log.info("Saved YAML preset → %s", written)
+        except Exception as exc:
+            _log.warning("Could not save YAML preset %r: %s", args.save_config, exc)
 
     # The hunt subcommand is a pure local-file workflow but we still open
     # the cache so audit logging can persist. trend / pir / audit are similar

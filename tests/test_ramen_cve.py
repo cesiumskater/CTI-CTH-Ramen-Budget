@@ -1267,7 +1267,7 @@ def test_cli_invalid_date_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen.py", "opml", "x.opml", "--start", "not-a-date"],
+        [".venv/bin/python", "threat_intel_hunter.py", "opml", "x.opml", "--start", "not-a-date"],
         capture_output=True,
         text=True,
     )
@@ -1281,7 +1281,7 @@ def test_cli_start_after_end_rejected():
 
     result = subprocess.run(
         [
-            ".venv/bin/python", "ramen.py", "opml", "x.opml",
+            ".venv/bin/python", "threat_intel_hunter.py", "opml", "x.opml",
             "--start", "2024-12-31", "--end", "2024-01-01",
         ],
         capture_output=True,
@@ -1296,7 +1296,7 @@ def test_cli_invalid_cve_id_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen.py", "cve", "NOT-A-CVE"],
+        [".venv/bin/python", "threat_intel_hunter.py", "cve", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
@@ -1309,7 +1309,10 @@ def test_cli_from_file_missing_returns_friendly_error(tmp_path):
 
     missing = tmp_path / "does-not-exist.txt"
     result = subprocess.run(
-        [".venv/bin/python", "ramen.py", "cve", "--from-file", str(missing), "--no-cache"],
+        [
+            ".venv/bin/python", "threat_intel_hunter.py",
+            "cve", "--from-file", str(missing), "--no-cache",
+        ],
         capture_output=True,
         text=True,
     )
@@ -4805,7 +4808,7 @@ def test_run_trend_invalid_cve_id_exits_1(tmp_path, caplog):
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "ramen.py", "trend", "NOT-A-CVE"],
+        [".venv/bin/python", "threat_intel_hunter.py", "trend", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
@@ -6948,3 +6951,253 @@ def test_wizard_validate_cve_list_rejects_invalid_tokens():
     # The error references the OFFENDING tokens, but does not include extra
     # placeholder examples — the abstract format string is the only sample.
     assert "not-a-cve" in msg
+
+
+# ---------------------------------------------------------------------------
+# Slice 29 — YAML configuration presets
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_template_ships_and_parses():
+    """The bundled template at src/ramen_cve/config/config.yaml loads as a dict."""
+    import ramen_cve
+
+    assert ramen_cve.DEFAULT_CONFIG_TEMPLATE.exists()
+    data = ramen_cve.load_yaml_config(str(ramen_cve.DEFAULT_CONFIG_TEMPLATE))
+    assert isinstance(data, dict)
+    # Sanity checks against the documented shape
+    assert "output" in data
+    assert "filters" in data
+
+
+def test_resolve_config_path_bare_name(monkeypatch, tmp_path):
+    """A bare name resolves under DEFAULT_PRESETS_DIR with .yaml appended."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    out = ramen_cve._resolve_config_path("daily-hunt")
+    assert out == tmp_path / "daily-hunt.yaml"
+
+
+def test_resolve_config_path_explicit_file(tmp_path):
+    """A path containing a separator or .yaml is treated as a file path."""
+    import ramen_cve
+
+    p = tmp_path / "custom.yaml"
+    assert ramen_cve._resolve_config_path(str(p)) == p
+    # With path separator
+    assert ramen_cve._resolve_config_path(f"./{p}") == Path(f"./{p}").expanduser()
+
+
+def test_save_then_load_yaml_round_trip(tmp_path, monkeypatch):
+    """save_yaml_config -> load_yaml_config preserves the payload structure."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    payload = {"subcommand": "opml", "opml_path": "/feeds",
+               "output": {"format": "csv", "basename": "q2"}}
+    written = ramen_cve.save_yaml_config("test", payload)
+    assert written == tmp_path / "test.yaml"
+    loaded = ramen_cve.load_yaml_config("test")
+    assert loaded == payload
+
+
+def test_load_yaml_config_missing_file(tmp_path, monkeypatch):
+    """A missing preset raises FileNotFoundError so the CLI can return rc=1."""
+    import pytest
+
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError):
+        ramen_cve.load_yaml_config("nope")
+
+
+def test_load_yaml_config_invalid_yaml_raises_value_error(tmp_path):
+    """Malformed YAML surfaces a ValueError (not a YAMLError leak)."""
+    import pytest
+
+    import ramen_cve
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(":\n  - this: [is\nbroken")
+    with pytest.raises(ValueError):
+        ramen_cve.load_yaml_config(str(bad))
+
+
+def test_list_yaml_presets_returns_sorted(tmp_path, monkeypatch):
+    """list_yaml_presets returns sorted *.yaml files (and nothing else)."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    (tmp_path / "zebra.yaml").write_text("subcommand: opml")
+    (tmp_path / "alpha.yaml").write_text("subcommand: cve")
+    (tmp_path / "ignored.txt").write_text("nope")
+    out = ramen_cve.list_yaml_presets()
+    assert [p.name for p in out] == ["alpha.yaml", "zebra.yaml"]
+
+
+def test_apply_yaml_config_overlays_values():
+    """YAML values fill argparse defaults; CLI-set values are not overwritten."""
+    import argparse
+
+    import ramen_cve
+
+    args = argparse.Namespace(
+        subcommand=None,        # unset → take YAML
+        out_dir=None,           # unset → take YAML
+        basename="cli-wins",    # already set → preserved
+        format=None,
+        cvss_threshold=None,
+        epss_threshold=None,
+        no_cache=False,
+        quiet=False, verbose=False,
+        dispatch=False, digest=False,
+        no_exploit_lookup=False, no_enrich_iocs=False,
+        sector=None, ioc_confidence_floor=None,
+        start=None, end=None, date_mode=None,
+        path=None, url=None, cves=None,
+        taxii_url=None, taxii_collection=None,
+        inventory=None, allow_tlp_red=False,
+    )
+    cfg = {
+        "subcommand": "opml",
+        "opml_path": "/tmp/feeds",
+        "output": {"out_dir": "/tmp/reports", "basename": "yaml-loses",
+                   "format": "csv"},
+        "filters": {"cvss_threshold": 8.5, "epss_threshold": 0.25},
+        "cache": {"no_cache": True},
+        "logging": {"level": "verbose"},
+    }
+    ramen_cve.apply_yaml_config(args, cfg)
+    assert args.subcommand == "opml"
+    assert str(args.path) == "/tmp/feeds"
+    assert str(args.out_dir) == "/tmp/reports"
+    assert args.basename == "cli-wins"        # CLI preserved
+    assert args.format == "csv"
+    assert args.cvss_threshold == 8.5
+    assert args.epss_threshold == 0.25
+    assert args.no_cache is True
+    assert args.verbose is True
+
+
+def test_apply_yaml_config_email_block_populates_env(monkeypatch):
+    """A YAML email block with enabled=true populates RAMEN_SMTP_* env vars."""
+    import argparse
+
+    import ramen_cve
+
+    for k in ("RAMEN_SMTP_HOST", "RAMEN_SMTP_FROM", "RAMEN_SMTP_USER",
+              "RAMEN_SMTP_PASS", "RAMEN_DIGEST_TO"):
+        monkeypatch.delenv(k, raising=False)
+    args = argparse.Namespace(digest=False, quiet=False, verbose=False)
+    cfg = {
+        "email": {
+            "enabled": True,
+            "smtp_host": "smtp.example",
+            "smtp_from": "alice@example",
+            "smtp_user": "alice",
+            "smtp_pass": "hunter2",
+            "fallback_recipient": "team@example",
+        }
+    }
+    ramen_cve.apply_yaml_config(args, cfg)
+    import os
+    assert os.environ.get("RAMEN_SMTP_HOST") == "smtp.example"
+    assert os.environ.get("RAMEN_SMTP_FROM") == "alice@example"
+    assert os.environ.get("RAMEN_DIGEST_TO") == "team@example"
+    # Email enabled implicitly turns on --digest mode
+    assert args.digest is True
+
+
+def test_args_to_yaml_payload_round_trip_through_apply():
+    """A round-trip args → payload → apply_yaml_config reproduces the same args."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+
+    original = argparse.Namespace(
+        subcommand="opml",
+        path=Path("/feeds"),
+        url=None, cves=None,
+        taxii_url=None, taxii_collection=None,
+        inventory=Path("/inv.csv"),
+        out_dir=Path("/reports"),
+        basename="q2",
+        format="csv",
+        allow_tlp_red=False,
+        cvss_threshold=7.0,
+        epss_threshold=0.10,
+        ioc_confidence_floor=0.0,
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        date_mode="feed",
+        sector="financial",
+        no_exploit_lookup=True,
+        no_enrich_iocs=False,
+        no_cache=False,
+        dispatch=False,
+        quiet=False, verbose=True,
+    )
+    payload = ramen_cve.args_to_yaml_payload(original)
+    # Sanity: subcommand survives
+    assert payload["subcommand"] == "opml"
+    assert payload["output"]["basename"] == "q2"
+
+    # Build a blank args and apply
+    target = argparse.Namespace(
+        subcommand=None,
+        path=None, url=None, cves=None,
+        taxii_url=None, taxii_collection=None,
+        inventory=None,
+        out_dir=None, basename=None, format=None, allow_tlp_red=False,
+        cvss_threshold=None, epss_threshold=None, ioc_confidence_floor=None,
+        start=None, end=None, date_mode=None, sector=None,
+        no_exploit_lookup=False, no_enrich_iocs=False,
+        no_cache=False, dispatch=False,
+        quiet=False, verbose=False,
+    )
+    ramen_cve.apply_yaml_config(target, payload)
+    assert target.subcommand == "opml"
+    assert str(target.path) == "/feeds"
+    assert target.basename == "q2"
+    assert target.format == "csv"
+    assert target.cvss_threshold == 7.0
+    assert target.epss_threshold == 0.10
+    assert target.no_exploit_lookup is True
+    assert target.verbose is True
+
+
+def test_cli_list_configs_subcommand_prints_empty(tmp_path, monkeypatch, capsys):
+    """`python threat_intel_hunter.py --list-configs` with no presets is a no-op rc=0."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    rc = ramen_cve.main(["--list-configs"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "no saved presets" in out
+
+
+def test_cli_list_configs_shows_existing_presets(tmp_path, monkeypatch, capsys):
+    """`--list-configs` prints `<stem>\\t<path>` per preset."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    (tmp_path / "daily-hunt.yaml").write_text("subcommand: opml")
+    rc = ramen_cve.main(["--list-configs"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "daily-hunt" in out
+
+
+def test_cli_config_missing_returns_friendly_error(tmp_path, monkeypatch, capsys):
+    """`--config noname` exits rc=1 with a "Config file not found" message on stderr."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    rc = ramen_cve.main(["--config", "noname"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Config file not found" in err
