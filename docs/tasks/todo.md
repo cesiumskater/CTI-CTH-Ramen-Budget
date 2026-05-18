@@ -81,5 +81,9 @@ full `[project]` metadata + `ramen-cve` console script · bundled data
 
 ## Process
 
-- PR #6 is a draft. Mark ready for review when the maintainer is
-  satisfied with the branch.
+- This branch ships through an automated per-push PR-and-merge workflow:
+  every push to `claude/cti-capability-gap-analysis-fPqgm` opens a PR
+  against `main` and squash-merges it. PR #6 (the original gap-analysis
+  doc) and #14/#15/#16 (src/ layout, YAML config, whitepaper+SBOM) are
+  all merged; `main` is current as of the last push. No PR is left in a
+  draft "awaiting review" state — review happens on `main`'s history.
