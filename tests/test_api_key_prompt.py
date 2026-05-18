@@ -255,9 +255,14 @@ def test_enrich_cves_reprompts_on_auth_error(tmp_path):
 
     new_key = "11111111-2222-3333-4444-555555555555"
     with (
-        patch("ramen_cve.requests.get", side_effect=_fake_get),
-        patch("ramen_cve.time.sleep"),
-        patch("ramen_cve._prompt_for_api_key", return_value=new_key) as prompt_mock,
+        patch("ramen_cve.enrich.nvd.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.enrich.epss.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.enrich.kev.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.enrich.nvd.time.sleep"),
+        patch(
+            "ramen_cve.enrich.orchestrator._prompt_for_api_key",
+            return_value=new_key,
+        ) as prompt_mock,
     ):
         result = enrich_cves(records, cache, api_key="bogus-key")
 

@@ -376,3 +376,13 @@ growth and is optimistic for the zero-behavior-change rigor required.
   via the `ramen_cve.associations` child → repointed the logger name
   (behavior-preserving). Only 1 such test in the suite. `__init__`
   4535→4473. 463 passed, ruff clean. ✅
+- **Step 10/26 — `enrich/orchestrator.py`:** `enrich_cves` → L2
+  orchestrator (deps: analyze/associations/keyring/cache/models +
+  enrich.nvd/epss/kev). Two stop-the-lines, both expected: (1) grep
+  missed analyze `_worst_tlp`/`_best_admiralty` → 15 NameError, fixed by
+  import (F821 sweep caught pre-suite); (2) `test_enrich_cves_reprompts_
+  on_auth_error` — the per-fetcher fan-out foreseen in Step 7: repointed
+  `ramen_cve.requests.get`→`enrich.{nvd,epss,kev}.requests.get`,
+  `time.sleep`→`enrich.nvd.time.sleep`, `_prompt_for_api_key`→
+  `enrich.orchestrator._prompt_for_api_key` (behavior-preserving).
+  `__init__` 4473→4344. 463 passed, ruff clean. ✅
