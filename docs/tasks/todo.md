@@ -69,15 +69,19 @@ full `[project]` metadata + `ramen-cve` console script · bundled data
 7. Risk-weighted prioritization (CVE × asset criticality × exploit).
 8. Backtesting / replay mode for safe model-change evaluation.
 
-## Deferred by design (documented, not a regression)
+## In progress — monolith → ~30-module package split
 
-- The fine-grained `src/core/ parsers/ utils/ outputs/` module split.
-  Rationale, exact execution plan, and the test-rewrite cost are recorded
-  in `docs/REFACTOR_PLAN.md`. The src/ layout is in place; the deeper
-  split is deferred because a blind one-pass move would break the
-  patch-target semantics of ~150 `patch("ramen_cve.X")` call sites
-  across the test suite and must be its own dedicated, test-rewriting
-  cycle.
+- Active on dedicated branch `claude/refactor-monolith-split`. The full
+  26-step strangler-fig plan, the corrected risk analysis, the facade
+  contract, and the live execution ledger are in `docs/REFACTOR_PLAN.md`.
+- **Correction:** the prior "deferred — would break ~150
+  `patch("ramen_cve.X")` sites" rationale was wrong. Measured: the suite
+  has only **4** unique `ramen_cve.*` patch targets (`requests.get/post`,
+  `time.sleep`, `DEFAULT_CACHE_PATH`), **0** first-party functions patched
+  by name, and **0** deep-path imports. A re-export facade preserves the
+  flat contract with no test edits. Real risk is low; the only genuine
+  process risk is the no-CI auto-merge path, mitigated by running this on
+  a separate non-auto-merged branch with a CI workflow added.
 
 ## Process
 
