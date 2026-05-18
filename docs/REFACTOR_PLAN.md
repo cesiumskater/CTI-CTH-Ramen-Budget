@@ -326,3 +326,14 @@ growth and is optimistic for the zero-behavior-change rigor required.
   constants in → 33 failures; reverted (`git checkout --`) and redid with
   end anchor `CSV_COLUMNS = [` + a slice-purity assertion (lesson logged).
   `__init__` 5301→5138. 463 passed, ruff clean. ✅
+- **Step 5/26 — `extract.py`:** 2 regions (banner+`parse_opml`+
+  `extract_cves`+`_defang_text`; `_is_public_ip`+`_is_likely_filename`+
+  `extract_iocs`) → `extract.py` (250 LOC, L1; deps: constants/models +
+  `analyze._normalize_tlp`; no `_log`). Decay funcs + `IOC_HALF_LIFE_DAYS`
+  stay (Step 6). **Near-miss (same class as Step 4):** E1 first anchored on
+  `def _ioc_confidence` swept the decay constant `IOC_HALF_LIFE_DAYS` in →
+  12 failures; reverted + redid with `IOC_HALF_LIFE_DAYS` end anchor.
+  Hand-pruned now-unused `ipaddress`/`ET` from `__init__` (ruff won't
+  autofix F401 in package `__init__`). `__init__` 5136→4925. 463 passed,
+  ruff clean. Pre-extraction interstitial-constant checklist added to
+  lessons.md (now mandatory). ✅
