@@ -1,165 +1,286 @@
-# Refactor Plan — `ramen_cve.py` → `ramen_cve/` Package
+# Refactor Plan — `ramen_cve` Monolith → ~30-Module Package
 
-**Status:** Documented but **NOT executed in this branch.** The current single-file design exceeds the CLAUDE.md 500-line refactor threshold (~5,800 lines as of commit `f95e67b`); the split below is the recommended next step but is intentionally deferred to its own dedicated cycle because it touches every test import and every `unittest.mock.patch("ramen_cve.X")` call.
+**Status:** APPROVED, IN PROGRESS.
+**Branch:** `claude/refactor-monolith-split` (off `claude/cti-capability-gap-analysis-fPqgm` @ `8d048f2`).
+**Goal:** split `src/ramen_cve/__init__.py` (6,020 LOC, 164 top-level defs)
+into ~30 focused modules behind a re-export facade, with **zero behavior
+change**. CLAUDE.md says >500 LOC is the split signal; this is 12× over.
 
----
-
-## Why this is deferred
-
-The literal spec — keep `ramen_cve.py` at the repo root as a 5-line shim *and* add a `ramen_cve/` package directory next to it — is **not constructible in CPython**. When both names exist in the same directory, the package (`ramen_cve/__init__.py`) shadows the module (`ramen_cve.py`) on import. Resolving this requires picking exactly one of:
-
-1. **Drop the root `ramen_cve.py`.** Users invoke via `python -m ramen_cve …`. The `ramen_cve/` package is the only thing on disk under that name. Existing tests (`import ramen_cve`, `from ramen_cve import …`, `patch("ramen_cve.X")`) all keep working because `ramen_cve` is now the package. Disadvantage: every existing README example and `setup.sh / setup.ps1` line that runs `python ramen_cve.py …` needs an update.
-
-2. **Rename the implementation package.** Keep `ramen_cve.py` at the root as the public entry, move the code into `_ramen_cve_impl/` (or similar) — but then every `import ramen_cve` and `patch("ramen_cve.X")` line in the test suite breaks because `ramen_cve` is now just a thin shim with no submodule structure.
-
-Option (1) is the right answer; the test suite already works because `import ramen_cve` doesn't care whether `ramen_cve` is a module or a package. The cost is documentation churn, not test churn — but it's still a focused cycle and must be done all at once, atomically, with the test suite re-run end-to-end.
+This document is authoritative and self-contained: a fresh session can
+execute it without re-deriving anything. The **Execution Log** at the
+bottom is the live progress ledger — update it as each step lands.
 
 ---
 
-## Target Layout (option 1)
+## 0. Correction of prior claims (read first)
+
+Earlier revisions of this file, `docs/tasks/todo.md`, and session notes
+asserted the blocker was *"~150 `patch("ramen_cve.X")` call sites whose
+patch-target semantics break."* **That was measured and is false.** The
+real external contract (grepped from `tests/test_ramen_cve.py`):
+
+| Metric | Stale claim | Measured |
+|---|---|---|
+| Unique `patch()` targets into `ramen_cve` | "~150" | **4** |
+| Total `patch()` calls | ~150 | **71** (all → those 4) |
+| First-party functions patched by name | many | **0** |
+| Deep-path imports `from ramen_cve.sub import` | implied | **0** |
+| `from ramen_cve import …` | — | flat only, fully re-exportable |
+
+The 4 targets: `ramen_cve.requests.get`, `ramen_cve.requests.post`,
+`ramen_cve.time.sleep`, `ramen_cve.DEFAULT_CACHE_PATH`. Tests mock the
+**network/time boundary** then call the **real** first-party code; they
+never `patch("ramen_cve.fetch_nvd")`. The "move a function, mock silently
+misses" pitfall therefore **does not apply here**. The refactor is
+**low-risk**, conditional on the CI gate in §5.4.
+
+Second correction: there are **no `# region:` markers** in the monolith
+(a prior claim). The authoritative in-code map is the module docstring
+navigation index at `src/ramen_cve/__init__.py:9-43`, which the target
+structure below intentionally matches.
+
+Open questions from the plan are resolved: the 5 subprocess tests invoke
+the stable `threat_intel_hunter.py` entry (facade-safe); there is no
+traceback/module-path assertion coupling; the lone `ramen_cve.py` literal
+in tests is only the test module's docstring (behaviorally inert).
+
+---
+
+## 1. Current state (measured line ranges)
+
+| Lines | Responsibility | Target module |
+|---|---|---|
+| 1–268 | imports, ~40 constants, regexes, CWE/ATT&CK tables | `constants.py` |
+| 270–393 | CWE→ATT&CK / kill-chain, `_utcnow`, TLP/Admiralty | `analyze.py` |
+| 395–671 | `OpmlError` + 10 dataclasses | `models.py` |
+| 673–941 | `Cache` (sqlite, *_cache, runs, audit_log) | `cache.py` |
+| 943–1209 | opml/cve/ioc extraction + defang | `extract.py` |
+| 1067–1109 | IOC confidence decay | `decay.py` |
+| 1211–1340 | API-key bootstrap / redaction | `keyring.py` |
+| 1342–1564 | nvd / epss / kev fetchers | `enrich/{nvd,epss,kev}.py` |
+| 1567–1635 | associations + `_parse_kev_due_date` | `associations.py` |
+| 1637–1765 | `enrich_cves` | `enrich/orchestrator.py` |
+| 1767–1902 | exploit/PoC tracker | `enrich/exploits.py` |
+| 1904–2128 | IOC enrichers (VT/AbuseIPDB/OTX/MB) | `enrich/iocs.py` |
+| 2130–2217 | inventory / CPE correlation | `enrich/inventory.py` |
+| 2219–2530 | dispatcher base + slack/webhook/email | `dispatch/*.py` |
+| 2532–2661 | `bucket_and_suggest`, `filter_by_date` | `analyze.py` |
+| 2663–3196 | IOC-CSV, STIX, sigma, yara writers | `output/*.py` |
+| 3197–3567 | `write_csv`, `write_markdown` | `output/{csv_writer,markdown}.py` |
+| 3569–3982 | CLI validators + YAML config + remembered-OPML | `cliutil.py`, `config.py` |
+| 3983–4552 | `build_parser`, logging/validate, wizard | `cli.py`, `wizard.py` |
+| 4553–4696 | `main()` | `cli.py` |
+| 4697–5118 | `_maybe_*`, digest, `_output` | `pipeline.py` |
+| 5119–5401 | `_run_opml/_url/_cve` + `_dedupe_iocs` | `cli.py` |
+| 5403–5651 | hunt/pir I/O + runners | `hunt.py`, `pir.py` |
+| 5652–5707 | sparkline / record_runs / trend | `trend.py` |
+| 5708–5803 | audit | `audit.py` |
+| 5804–5953 | schedule (Task XML / cron) | `schedule.py` |
+| 5954–6020 | `_run_stix` | `cli.py` |
+
+**Coupling:** `models.py` + `constants.py` are zero-first-party-dep
+leaves (verified: dataclasses use only stdlib). `Cache` depends on
+nothing first-party. `enrich/orchestrator` → analyze + enrich/* +
+associations + models + cache (one-directional). No cycles **iff** every
+shared constant lives in the `constants.py` leaf and arrows point down
+the §4 layering.
+
+---
+
+## 2. Target structure (~30 units, ≤~350 LOC each)
 
 ```
-ramen_cve/
-├── __init__.py              # public re-exports (every name today's tests import)
-├── __main__.py              # `python -m ramen_cve` entry point — calls cli.main()
-├── models.py                # dataclasses
-├── cache.py                 # Cache class + SQL schema
-├── extract.py               # regexes + parse_opml + extract_cves + extract_iocs + defang
-├── associations.py          # ThreatActor/Campaign/Malware + load_associations
-├── hunt.py                  # Hunt dataclass + load/save + _run_hunt
-├── pir.py                   # Pir dataclass + load/save + _run_pir
-├── analyze.py               # bucketing, kill chain, ATT&CK mapping, TLP, Diamond
-├── decay.py                 # IOC confidence decay + sector filter
-├── enrich/
-│   ├── __init__.py
-│   ├── nvd.py               # fetch_nvd + _parse_nvd_response
-│   ├── epss.py              # fetch_epss
-│   ├── kev.py               # fetch_kev_catalog
-│   ├── exploits.py          # exploit/PoC tracker
-│   ├── inventory.py         # load_inventory + CPE correlation
-│   ├── iocs.py              # _EnricherBase + VT / AbuseIPDB / OTX / MalwareBazaar
-│   └── orchestrator.py      # enrich_cves + enrich_with_exploit_status + enrich_iocs
-├── output/
-│   ├── __init__.py
-│   ├── csv_writer.py        # CSV_COLUMNS + write_csv + IOC_CSV_COLUMNS + write_iocs_csv
-│   ├── markdown.py          # write_markdown + _md_safe + _summarize_enrichment
-│   ├── stix.py              # write_stix + parse_stix_bundle + pull_taxii
-│   ├── sigma.py             # write_sigma_stubs
-│   └── yara.py              # write_yara_stubs
-├── dispatch/
-│   ├── __init__.py
-│   ├── base.py              # _DispatcherBase
-│   ├── slack.py             # SlackWebhookDispatcher
-│   ├── webhook.py           # GenericWebhookDispatcher
-│   ├── email.py             # EmailDispatcher
-│   └── digest.py            # _maybe_dispatch + _maybe_digest + _group_records_by_owner
-├── audit.py                 # _audit_actor + _redact_audit_args + _audit_dispatch + _run_audit
-├── trend.py                 # _sparkline + _record_runs + _run_trend
-├── wizard.py                # _run_wizard + _strip_path_quotes + validators
-└── cli.py                   # build_parser + _shared_flags + _path_arg + _safe_basename
-                             # + main() + every _run_* dispatcher
+src/ramen_cve/
+├── __init__.py    facade: re-exports only (§3)
+├── __main__.py    unchanged (`from . import main`)
+├── constants.py   regexes, thresholds, CWE_TO_ATTACK, *_STATUSES, DEFAULT_*
+├── models.py      OpmlError + 10 dataclasses  (ZERO first-party deps)
+├── cache.py       Cache
+├── extract.py     parse_opml, extract_cves, extract_iocs, _defang_text
+├── decay.py       _ioc_confidence, apply_ioc_decay, filter_iocs_by_confidence
+├── analyze.py     CWE maps, _utcnow, TLP/Admiralty, bucket_and_suggest, filter_by_date
+├── associations.py load_associations, _build_*, _parse_kev_due_date
+├── keyring.py     api-key bootstrap, _redact_key, _safe_url_for_log
+├── enrich/{__init__,nvd,epss,kev,exploits,iocs,inventory,orchestrator}.py
+├── output/{__init__,csv_writer,markdown,stix,sigma,yara}.py
+├── dispatch/{__init__,base,slack,webhook,email,digest}.py
+├── config.py      yaml presets + remembered-OPML
+├── cliutil.py     path/date/cve validators, _safe_basename, _coerce_yaml_value
+├── pipeline.py    _maybe_*, _output, digest grouping
+├── wizard.py      _run_wizard + _wizard_validate_*
+├── hunt.py / pir.py / trend.py / audit.py / schedule.py
+└── cli.py         _shared_flags, build_parser, main, _run_opml/_url/_cve/_stix
 ```
 
-The root `ramen_cve.py` and `ramen-budget-bundle.zip` cease to exist. `setup.sh` / `setup.ps1` / `README.md` need every `python ramen_cve.py` → `python -m ramen_cve` change.
+Accepted exceptions to the ≤350 rule (document, don't fight): `cli.py`
+(~430 — `build_parser` is one cohesive argparse tree) and `stix.py`
+(~290). Splitting them adds indirection without reducing complexity
+(CLAUDE.md §6).
 
-`ramen_cve/__init__.py` must re-export every name the test suite currently patches at the `ramen_cve.X` level. The minimum is something like:
+---
+
+## 3. Facade contract (`__init__.py`)
+
+Pure re-export. Because the measured contract is flat with zero deep
+imports and zero first-party patch targets, re-exporting every public +
+test-referenced name preserves the contract with **no test edits**.
 
 ```python
-# Re-export public + test-patched surface
-from . import requests, time  # so patch("ramen_cve.requests.get") still works
-from .cli import main, build_parser
-from .models import (
-    FeedEntry, CveRecord, Hunt, Pir, IocRecord, EnrichedCve,
-    ThreatActor, Campaign, Malware,
+"""ramen_cve — public facade. Implementation lives in submodules; this
+module preserves the flat `from ramen_cve import X` / `ramen_cve.X`
+contract tests and users depend on. See docs/REFACTOR_PLAN.md."""
+from __future__ import annotations
+
+import time       # keep ramen_cve.time resolvable for patch("ramen_cve.time.sleep")
+import requests   # keep ramen_cve.requests resolvable for patch("ramen_cve.requests.get")
+
+from .constants import *          # noqa: F401,F403  (constants only)
+from .models import (             # noqa: F401
+    OpmlError, FeedEntry, CveRecord, ThreatActor, Campaign, Malware,
+    Hunt, Pir, IocRecord, EnrichedCve,
 )
-from .cache import Cache
-from .extract import extract_cves, extract_iocs, parse_opml, _defang_text, ...
-from .enrich.nvd import fetch_nvd, _parse_nvd_response, _empty_nvd
-from .enrich.epss import fetch_epss
-from .enrich.kev import fetch_kev_catalog, _parse_kev_due_date
-from .enrich.exploits import (
-    fetch_exploitdb_cve_set, fetch_nuclei_cve_set,
-    search_github_for_cve, enrich_with_exploit_status,
+from .cache import Cache          # noqa: F401
+# … extract, decay, analyze, associations, keyring,
+#   enrich.*, output.*, dispatch.*, config, cliutil,
+#   pipeline, wizard, hunt, pir, trend, audit, schedule, cli …
+from .cli import (                # noqa: F401
+    build_parser, _shared_flags, _configure_logging, _validate_args,
+    main, _run_opml, _run_url, _run_cve, _run_stix, _get_github_token,
 )
-from .enrich.inventory import load_inventory, correlate_inventory, _cpe_matches_inventory
-from .enrich.iocs import (
-    _EnricherBase, VirusTotalEnricher, AbuseIPDBEnricher,
-    OtxEnricher, MalwareBazaarEnricher, enrich_iocs,
-)
-from .enrich.orchestrator import enrich_cves
-from .associations import load_associations, _build_actor, _build_campaign, _build_malware
-from .hunt import load_hunt, load_all_hunts, save_hunt
-from .pir import load_pir, load_all_pirs, save_pir
-from .analyze import (
-    bucket_and_suggest, filter_by_date,
-    map_cwes_to_attack_techniques, map_cwes_to_kill_chain,
-    _worst_tlp, _admiralty_score, _best_admiralty, _normalize_tlp,
-)
-from .decay import (
-    apply_ioc_decay, filter_iocs_by_confidence, _ioc_confidence,
-    IOC_HALF_LIFE_DAYS,
-)
-from .output.csv_writer import (
-    CSV_COLUMNS, IOC_CSV_COLUMNS, write_csv, write_iocs_csv,
-)
-from .output.markdown import write_markdown
-from .output.stix import (
-    write_stix, parse_stix_bundle, pull_taxii,
-    _stix_uuid, _ioc_to_stix_pattern, _extract_iocs_from_pattern,
-)
-from .output.sigma import write_sigma_stubs, _build_sigma_stub, _sigma_level_for
-from .output.yara import (
-    write_yara_stubs, _build_yara_stub, _yara_safe_name, _yara_string_escape,
-)
-from .dispatch.base import _DispatcherBase
-from .dispatch.slack import SlackWebhookDispatcher
-from .dispatch.webhook import GenericWebhookDispatcher
-from .dispatch.email import EmailDispatcher
-from .dispatch.digest import (
-    dispatch_records, _group_records_by_owner, _build_digest_body,
-    _maybe_dispatch, _maybe_digest,
-)
-from .audit import _audit_actor, _redact_audit_args, _audit_dispatch
-from .trend import _sparkline, _record_runs
-from .wizard import _run_wizard, _strip_path_quotes, _path_arg, _safe_basename
-from .cli import (
-    _shared_flags, _validate_cve_id, _parse_iso_date, _configure_logging,
-    _validate_args, DEFAULT_CACHE_PATH, DEFAULT_ASSOCIATIONS_PATH,
-    DEFAULT_HUNT_DIR, DEFAULT_PIR_DIR,
-)
+
+__all__ = [...]  # generated mechanically; locked by tests/test_facade.py
 ```
 
-After the split, `python -m ramen_cve` runs `ramen_cve/__main__.py`, which is two lines:
+The complete required name set is enumerated in `tests/test_facade.py`
+(the contract lock — derived empirically from every `from ramen_cve
+import` token and every `ramen_cve.<name>` token in the suite).
 
-```python
-from .cli import main
-import sys; sys.exit(main())
-```
+**Patch-target handling:**
+
+| Target | Why it keeps working | Action |
+|---|---|---|
+| `ramen_cve.requests.get/post` | `import requests` in facade ⇒ `ramen_cve.requests` *is* the shared `sys.modules['requests']`; patching its `.get` mutates the one object every submodule resolves at call time. | None — **invariant**: submodules use `import requests` + qualified calls, never `from requests import get`. CI grep-guards this. |
+| `ramen_cve.time.sleep` | Same via `import time`. | Same invariant. |
+| `ramen_cve.DEFAULT_CACHE_PATH` | **Fragile.** Defined in `constants.py`, consumed only in `main()` (6 sites). `from .constants import DEFAULT_CACHE_PATH` binds at import → `patch("ramen_cve.DEFAULT_CACHE_PATH")` (sets attr on facade) misses. | In `cli.main`, read late-bound via the facade: `import ramen_cve; … ramen_cve.DEFAULT_CACHE_PATH`. Guarded by a dedicated patch-contract test. |
 
 ---
 
-## Execution plan (when ready)
+## 4. Dependency layers (arrows point down only ⇒ acyclic by construction)
 
-1. Create the directory skeleton above with empty `__init__.py` files. Verify `python -c "import ramen_cve"` still finds the *old* monolithic `ramen_cve.py` because the package is empty.
-2. **Atomic single commit per submodule, in dependency order**, each followed by `pytest tests/ -q`. Order: `models` → `cache` → `extract` → `associations` → `analyze` → `decay` → `enrich/*` (nvd, epss, kev, exploits, inventory, iocs, then orchestrator) → `output/*` (csv_writer, markdown, sigma, yara, stix) → `dispatch/*` → `audit` → `trend` → `hunt`/`pir` → `wizard` → `cli` → root deletion.
-3. Each commit MOVES the relevant section out of `ramen_cve.py` and into the target module, then ADDS the corresponding re-export to `ramen_cve/__init__.py`. The tests keep importing `from ramen_cve import …` and never notice.
-4. The final commit deletes the now-empty `ramen_cve.py` and updates `setup.sh` / `setup.ps1` / `README.md` to invoke `python -m ramen_cve`.
-5. Add a top-level `pyproject.toml` `[project.scripts]` entry — `ramen-cve = "ramen_cve.cli:main"` — so `pip install -e .` provides a `ramen-cve` console entry point and tests can use `subprocess.run(["ramen-cve", ...])` instead of the current `[".venv/bin/python", "ramen_cve.py", ...]` pattern.
+```
+L0  constants  models  cache                     (zero first-party deps)
+L1  analyze  extract  decay  associations  keyring
+L2  enrich/{nvd,epss,kev,exploits,iocs,inventory}
+L3  enrich/orchestrator  output/*  dispatch/*
+L4  config  cliutil  pipeline  wizard  hunt  pir  trend  audit  schedule
+L5  cli  →  __init__ (facade)  →  __main__
+```
 
-Estimated effort: 6–10 hours for an engineer familiar with the codebase. Test suite must remain green at every intermediate step.
+Escape hatch if a late up-arrow appears: a **function-local** deferred
+import (never module-level), logged in the Execution Log as a wart.
 
 ---
 
-## What was done in *this* branch
+## 5. Migration sequence — strangler-fig, one green commit per step
 
-The current `ramen_cve.py` has been annotated with `# region: <name>` comment markers at every conceptual section boundary listed above. A future automated split can use those markers to drive a `sed`/`tree-sitter` extraction pipeline without re-reading the file by hand. See the line index inside `ramen_cve.py` itself.
+Each step *moves* code out of `__init__.py` into its target module **and**
+adds the matching re-export, so `from ramen_cve import …` works at every
+step. Suite stays green (currently **458**) at every commit.
 
-The duplicate / non-essential files identified in the QA cycle were removed:
+| # | Moves | New module | Verify |
+|---|---|---|---|
+| 0 | prep | CI, contract tests, doc fix, empty subpkg dirs | suite + CI green |
+| 1 | 66–268 | `constants.py` | suite; assert DEFAULT_DATA_DIR path unchanged |
+| 2 | 395–671 | `models.py` | suite |
+| 3 | 673–941 | `cache.py` | suite + cache tests |
+| 4 | 270–393, 2532–2661 | `analyze.py` | analyze/bucket/date tests |
+| 5 | 943–1209 | `extract.py` | extract tests |
+| 6 | 1067–1109 | `decay.py` | decay tests |
+| 7 | 1567–1635 | `associations.py` | assoc tests |
+| 8 | 1211–1340 | `keyring.py` | redaction tests |
+| 9 | 1342–1564 | `enrich/{nvd,epss,kev}.py` | requests-mock tests |
+| 10 | 1767–1902 | `enrich/exploits.py` | exploit tests |
+| 11 | 1904–2128 | `enrich/iocs.py` | enricher tests |
+| 12 | 2130–2217 | `enrich/inventory.py` | cpe tests |
+| 13 | 1637–1765 | `enrich/orchestrator.py` | enrich_cves tests |
+| 14 | 2663–2979 | `output/stix.py` (+iocs-csv) | stix/taxii tests |
+| 15 | 2981–3196 | `output/{sigma,yara}.py` | sigma/yara tests |
+| 16 | 3197–3567 | `output/{csv_writer,markdown}.py` | **golden CSV/MD diff** |
+| 17 | 2219–2530 | `dispatch/{base,slack,webhook,email}.py` | dispatcher tests |
+| 18 | 4766–4904 | `dispatch/digest.py` | digest tests |
+| 19 | 3569–3982 | `cliutil.py` + `config.py` | yaml/config/path tests |
+| 20 | 4697–5118 | `pipeline.py` | _output/sector tests |
+| 21 | 4343–4552 | `wizard.py` | wizard tests |
+| 22 | 5403–5651 | `hunt.py`,`pir.py`,`trend.py` | hunt/pir/trend tests |
+| 23 | 5708–5953 | `audit.py`,`schedule.py` | audit/schedule tests |
+| 24 | 3983–4696, 5119–5401, 5954–6020 | `cli.py` (+ DEFAULT_CACHE_PATH mitigation) | full suite + CLI/subprocess tests |
+| 25 | — | finalize facade, delete dead code, lock `__all__` | suite + golden + manual smoke |
+| 26 | — | doc/script audit (`ramen_cve.py` literals) | grep clean; suite green |
 
-- `claude.md` (duplicate of `CLAUDE.md`)
-- `lessons.md` (root copy, duplicate of `tasks/lessons.md`)
-- `todo.md` (stale root copy; `tasks/todo.md` is the canonical version)
-- `ramen-budget-bundle.zip` (old pre-feature bundle)
-- `.ramen-cache.db` (runtime artefact that should never have been committed; matches existing `.gitignore`)
+26 commits, each independently revertable & green. Message format:
+`refactor(split N/26): <section> → <module>`.
 
-These removals deliver the "clean repo for students" half of the spec without the test-breakage risk of the full package split.
+---
+
+## 6. Risk analysis & mitigation
+
+- **5.1 Mock/patch (LOW):** invariant — all submodules `import requests` /
+  `import time`, qualified calls only. CI fails on `from requests import`
+  / `from time import` anywhere in `src/ramen_cve/`.
+- **5.2 `DEFAULT_CACHE_PATH` late-bind (MED, 1 symbol):** mitigation in
+  §3; red→green regression test added in prep.
+- **5.3 Circular imports (MED, preventable):** L0 constants leaf +
+  downward arrows; after every step `python -c "import ramen_cve"` and
+  `python -X importtime` must not raise.
+- **5.4 No-CI auto-merge (HIGH — top risk):** the
+  `claude/cti-capability-gap-analysis-fPqgm` branch auto-PRs+merges to
+  `main` in ~15s with zero checks. **Mitigation / hard prerequisite:**
+  this refactor runs on the dedicated `claude/refactor-monolith-split`
+  branch (not auto-merged) as a reviewable draft PR, and Step 0 adds a
+  GitHub Actions workflow so checks at least *run and are visible*. NB:
+  branch protection / required-checks enforcement is server-side and not
+  settable from here — the workflow provides signal, the dedicated
+  non-auto-merge branch provides the actual containment.
+- **5.5 Import-time side effects:** `DEFAULT_DATA_DIR` etc. use
+  `Path(__file__)`; moving into `constants.py` keeps `__file__` at the
+  same `src/ramen_cve/` depth ⇒ paths unchanged. Asserted in Step 1.
+- **Entry points:** `threat_intel_hunter.py` shim, `python -m ramen_cve`,
+  `ramen-cve` console script all route through `ramen_cve.main`, which
+  the facade preserves. **No entry-point transition needed.**
+
+---
+
+## 7. Verification (per step + final)
+
+1. `.venv/bin/pytest tests/ -q` → identical pass count (**458**) every step.
+2. `.venv/bin/ruff check threat_intel_hunter.py conftest.py src/ tests/` clean.
+3. `python -c "import ramen_cve; import ramen_cve.__main__"` exits 0.
+4. Golden oracle: snapshot `examples/sample-output.csv` +
+   `sample-report.md`; regenerate + byte-diff at Steps 16 & 25.
+5. `tests/test_facade.py` locks the public surface (every name importable
+   two ways) + patch-contract (requests/time/DEFAULT_CACHE_PATH still
+   bite). Added in prep; green now (monolith) and at every step.
+6. Step 25 manual smoke: `threat_intel_hunter.py --list-configs`,
+   `… opml examples/sample.opml --no-cache` (offline), `python -m
+   ramen_cve --help`, `ramen-cve --help` vs. a pre-refactor capture.
+7. Final reviewer grep: diff shows only moves + facade + the 6-line §5.2
+   change + new tests — no logic edits inside moved functions.
+
+Stop-the-line: any red step ⇒ revert that commit, re-plan, never stack.
+
+---
+
+## 8. Effort
+
+~21–26h (≈3–3.5 focused days) incl. prep + contingency. The old "6–10h"
+estimate predates the 458-test suite and the YAML/schedule/remember-OPML
+growth and is optimistic for the zero-behavior-change rigor required.
+
+---
+
+## Execution Log (live ledger — append per step)
+
+- **Step 0 (prep):** branch `claude/refactor-monolith-split` cut @
+  `8d048f2`. This plan rewritten (false claims corrected). CI workflow,
+  `tests/test_facade.py` (surface + patch-contract), and `todo.md`
+  correction added. _Pending: commit + push + draft PR, then Step 1._

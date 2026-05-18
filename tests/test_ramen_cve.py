@@ -7357,3 +7357,211 @@ def test_cli_schedule_subcommand_parses():
     assert args.for_config == "weekly"
     assert args.time == "23:30"
     assert args.task_name == "tih-weekly"
+
+
+# ---------------------------------------------------------------------------
+# Slice 31 — OPML persistence + preset/opml reset
+# ---------------------------------------------------------------------------
+
+
+def test_save_and_load_remembered_opml_round_trip(tmp_path, monkeypatch):
+    """_save_remembered_opml then _load_remembered_opml returns the same path."""
+    import ramen_cve
+
+    state = tmp_path / "last_opml.json"
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    src = tmp_path / "feeds"
+    ramen_cve._save_remembered_opml(src)
+    assert state.is_file()
+    assert ramen_cve._load_remembered_opml() == src
+
+
+def test_load_remembered_opml_missing_returns_none(tmp_path, monkeypatch):
+    """No state file → None (no exception)."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", tmp_path / "nope.json")
+    assert ramen_cve._load_remembered_opml() is None
+
+
+def test_load_remembered_opml_corrupt_returns_none(tmp_path, monkeypatch):
+    """A corrupt state file is treated as 'nothing remembered'."""
+    import ramen_cve
+
+    state = tmp_path / "last_opml.json"
+    state.write_text("{not valid json")
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    assert ramen_cve._load_remembered_opml() is None
+
+
+def test_reset_remembered_opml(tmp_path, monkeypatch):
+    """_reset_remembered_opml deletes the state file and reports it."""
+    import ramen_cve
+
+    state = tmp_path / "last_opml.json"
+    state.write_text('{"opml_path": "/x"}')
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    assert ramen_cve._reset_remembered_opml() is True
+    assert not state.exists()
+    assert ramen_cve._reset_remembered_opml() is False  # already gone
+
+
+def test_cli_opml_path_now_optional():
+    """`opml` parses with no positional path (path defaults to None)."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args(["opml"])
+    assert args.subcommand == "opml"
+    assert args.path is None
+    assert args.remember_opml is False
+    args2 = ramen_cve.build_parser().parse_args(["opml", "x.opml", "--remember-opml"])
+    assert str(args2.path) == "x.opml"
+    assert args2.remember_opml is True
+
+
+def test_run_opml_no_path_no_memory_errors(tmp_path, monkeypatch, caplog):
+    """`opml` with no path and nothing remembered exits rc=1 with guidance."""
+    import argparse
+    import logging
+
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", tmp_path / "none.json")
+    args = argparse.Namespace(
+        subcommand="opml", path=None, remember_opml=False,
+        no_exploit_lookup=True, no_enrich_iocs=True, no_cache=True,
+        date_mode=None, start=None, end=None,
+        cvss_threshold=7.0, epss_threshold=0.10,
+        format="csv", out_dir=tmp_path, basename=None, allow_tlp_red=False,
+        associations_file=None, inventory=None, sector=None,
+        ioc_confidence_floor=0.0, dispatch=False, digest=False,
+    )
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve._run_opml(args, cache=ramen_cve.Cache(":memory:"), api_key=None)
+    assert rc == 1
+    assert any("nothing remembered" in r.message for r in caplog.records)
+
+
+def test_run_opml_remembers_and_reuses(tmp_path, monkeypatch):
+    """A run with --remember-opml persists the source; a later bare run reuses it."""
+    from unittest.mock import MagicMock, patch
+
+    import ramen_cve
+
+    state = tmp_path / "last_opml.json"
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    opml = tmp_path / "feeds.opml"
+    opml.write_text(
+        '<?xml version="1.0"?><opml version="2.0"><body>'
+        '<outline type="rss" text="A" xmlUrl="https://a.example/feed"/>'
+        "</body></opml>"
+    )
+
+    class _Feed:
+        bozo = 0
+        entries: list = []
+
+    def _fake_get(url, params=None, headers=None, timeout=None, auth=None):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.text = ""
+        resp.json.return_value = {"vulnerabilities": []}
+        return resp
+
+    common = dict(
+        no_exploit_lookup=True, no_enrich_iocs=True, no_cache=True,
+        date_mode=None, start=None, end=None,
+        cvss_threshold=7.0, epss_threshold=0.10,
+        format="csv", out_dir=tmp_path, basename=None, allow_tlp_red=False,
+        associations_file=None, inventory=None, sector=None,
+        ioc_confidence_floor=0.0, dispatch=False, digest=False,
+    )
+    import argparse
+
+    with (
+        patch("ramen_cve.requests.get", side_effect=_fake_get),
+        patch("ramen_cve.requests.post", side_effect=_fake_get),
+        patch("ramen_cve.time.sleep"),
+        patch("feedparser.parse", return_value=_Feed()),
+    ):
+        # First run: explicit path + --remember-opml
+        a1 = argparse.Namespace(subcommand="opml", path=opml,
+                                remember_opml=True, **common)
+        assert ramen_cve._run_opml(a1, ramen_cve.Cache(":memory:"), None) == 0
+        assert state.is_file()
+        # Second run: NO path — must reuse the remembered source
+        a2 = argparse.Namespace(subcommand="opml", path=None,
+                                remember_opml=False, **common)
+        assert ramen_cve._run_opml(a2, ramen_cve.Cache(":memory:"), None) == 0
+
+
+def test_delete_yaml_preset(tmp_path, monkeypatch):
+    """delete_yaml_preset removes an existing preset and returns its path."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    (tmp_path / "gone.yaml").write_text("subcommand: opml")
+    removed = ramen_cve.delete_yaml_preset("gone")
+    assert removed == tmp_path / "gone.yaml"
+    assert not (tmp_path / "gone.yaml").exists()
+    assert ramen_cve.delete_yaml_preset("gone") is None  # already absent
+
+
+def test_cli_reset_config(tmp_path, monkeypatch, capsys):
+    """`--reset-config NAME` deletes the preset (rc=0) or errors rc=1 if absent."""
+    import ramen_cve
+
+    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    (tmp_path / "daily.yaml").write_text("subcommand: opml")
+    rc = ramen_cve.main(["--reset-config", "daily"])
+    assert rc == 0
+    assert "Deleted preset" in capsys.readouterr().out
+    rc2 = ramen_cve.main(["--reset-config", "daily"])
+    assert rc2 == 1
+    assert "no such preset" in capsys.readouterr().err
+
+
+def test_cli_reset_opml(tmp_path, monkeypatch, capsys):
+    """`--reset-opml` clears the remembered source (rc=0 either way)."""
+    import ramen_cve
+
+    state = tmp_path / "last_opml.json"
+    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    state.write_text('{"opml_path": "/x"}')
+    rc = ramen_cve.main(["--reset-opml"])
+    assert rc == 0
+    assert "Forgot the remembered OPML" in capsys.readouterr().out
+    assert not state.exists()
+    rc2 = ramen_cve.main(["--reset-opml"])
+    assert rc2 == 0
+    assert "No remembered OPML" in capsys.readouterr().out
+
+
+def test_apply_yaml_config_maps_remember_opml():
+    """remember_opml: true in YAML flips args.remember_opml when CLI didn't."""
+    import argparse
+
+    import ramen_cve
+
+    args = argparse.Namespace(remember_opml=False, quiet=False, verbose=False)
+    ramen_cve.apply_yaml_config(args, {"remember_opml": True})
+    assert args.remember_opml is True
+
+
+def test_args_to_yaml_payload_includes_remember_opml():
+    """The saved payload records remember_opml so a preset round-trips it."""
+    import argparse
+
+    import ramen_cve
+
+    args = argparse.Namespace(
+        subcommand="opml", path=Path("/feeds"), url=None, cves=None,
+        taxii_url=None, taxii_collection=None, inventory=None,
+        out_dir=None, basename=None, format="csv", allow_tlp_red=False,
+        cvss_threshold=7.0, epss_threshold=0.10, ioc_confidence_floor=0.0,
+        start=None, end=None, date_mode=None, sector=None,
+        no_exploit_lookup=False, no_enrich_iocs=False, no_cache=False,
+        dispatch=False, quiet=False, verbose=False, remember_opml=True,
+    )
+    payload = ramen_cve.args_to_yaml_payload(args)
+    assert payload["remember_opml"] is True

@@ -83,8 +83,11 @@ enrichment:
 inventory_path: ""
 
 # ----- Persistence ---------------------------------------------------------
-# When true, this preset will overwrite itself with the current run's
-# arguments at the end of a successful run. Useful for "remember last OPML".
+# When true, a successful `opml` run saves the OPML source it used to a small
+# state file (src/ramen_cve/config/last_opml.json). A later `opml` run with
+# NO path argument then reuses that source automatically. Equivalent to
+# passing --remember-opml on the command line. Clear it any time with
+# `threat_intel_hunter.py --reset-opml`.
 remember_opml: false
 
 # ----- Cache ---------------------------------------------------------------

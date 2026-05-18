@@ -70,6 +70,9 @@ htmlcov/
 ramen-cve-*.csv
 ramen-cve-*.md
 
+# Remembered-OPML state (written by --remember-opml; user/run state)
+src/ramen_cve/config/last_opml.json
+
 # ---------------------------------------------------------------------------
 # OS / editor cruft
 # ---------------------------------------------------------------------------

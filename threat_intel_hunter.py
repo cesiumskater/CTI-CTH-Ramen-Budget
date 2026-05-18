@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""ramen-cve CLI bootstrap.
+"""threat-intel-hunter / ramen-cve CLI bootstrap.
 
 This file is the user-facing executable. Its only job is to make the
 ``ramen_cve`` package importable when the repo hasn't been pip-installed,
-then hand off to :func:`ramen_cve.main`. Two ways to invoke the tool:
+then hand off to :func:`ramen_cve.main`. Three equivalent invocations:
 
-    python ramen.py opml feeds.opml          # uses this shim
-    python -m ramen_cve opml feeds.opml      # uses src/ramen_cve/__main__.py
-    ramen-cve opml feeds.opml                # after `pip install -e .`
+    python threat_intel_hunter.py opml feeds.opml   # uses this shim
+    python -m ramen_cve opml feeds.opml             # src/ramen_cve/__main__.py
+    ramen-cve opml feeds.opml                       # after `pip install -e .`
 
 All three paths reach the same :func:`ramen_cve.main` entry point.
 """
