@@ -30,20 +30,25 @@ Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** 
 │
 ├── src/
 │   └── ramen_cve/           # the installable package (src layout)
-│       ├── __init__.py      # ~5,900-line implementation
+│       ├── __init__.py      # the implementation
 │       ├── __main__.py      # python -m ramen_cve entry
+│       ├── config/          # YAML config system
+│       │   ├── config.yaml  #   fully-commented schema / template
+│       │   └── presets/     #   saved named presets (--save-config)
 │       └── data/            # bundled lookup data, loaded at runtime
 │           ├── associations.json
 │           ├── hunts/
 │           └── pirs/
 │
-├── config/                  # configuration & dependency manifests
+├── config/                  # dependency manifests + env template
 │   ├── env.example          # copy to .env at the repo root and fill in API keys
 │   ├── requirements.txt
 │   └── requirements-dev.txt
 │
-├── docs/                    # contributor docs + gap analyses
+├── docs/                    # contributor docs, gap analyses, whitepaper
 │   ├── CLAUDE.md            # AI-contributor project rules
+│   ├── whitepaper.md        # full technical whitepaper
+│   ├── SBOM.md              # software bill of materials
 │   ├── REFACTOR_PLAN.md
 │   ├── cti-capability-gap-analysis*.md
 │   └── tasks/               # lessons.md + todo.md
@@ -210,6 +215,105 @@ These apply to the analysis subcommands (`opml`, `url`, `cve`, `stix`):
 | `--quiet` | false | Suppress INFO logs |
 | `--verbose` | false | Show DEBUG logs |
 
+Three top-level flags (valid before any subcommand): `--config NAME`,
+`--save-config NAME`, `--list-configs` (see below).
+
+---
+
+## YAML configuration & presets
+
+Every flag above can be captured in a YAML file so a complex invocation
+becomes a one-word command. The fully-commented schema lives at
+`src/ramen_cve/config/config.yaml`; named presets live in
+`src/ramen_cve/config/presets/<name>.yaml`.
+
+**Save the current invocation as a preset:**
+
+```bash
+python threat_intel_hunter.py --save-config daily-hunt \
+    opml ~/feeds --format all --cvss-threshold 8.0 --sector financial
+# → writes src/ramen_cve/config/presets/daily-hunt.yaml
+```
+
+**Replay it later — CLI flags still override individual YAML values:**
+
+```bash
+python threat_intel_hunter.py --config daily-hunt
+python threat_intel_hunter.py --config daily-hunt --format csv   # override one key
+python threat_intel_hunter.py --config /abs/path/to/custom.yaml   # explicit file
+```
+
+**List every saved preset:**
+
+```bash
+python threat_intel_hunter.py --list-configs
+```
+
+Precedence is always **CLI flag > YAML value > built-in default**. A YAML
+key left blank is ignored (it never clobbers a real CLI argument). The
+config carries the subcommand too, so `--config daily-hunt` with no
+positional subcommand runs exactly what was saved. See the template's
+inline comments for every recognized key (`output`, `filters`,
+`enrichment`, `cache`, `dispatch`, `email`, `logging`, `inventory_path`,
+`remember_opml`, …).
+
+### Email reports via YAML
+
+Set the `email:` block in a preset to mail the day's findings as
+attachments. When `email.enabled: true`, the preset's SMTP settings
+populate the `RAMEN_SMTP_*` environment variables that the digest
+dispatcher reads, and `--digest` is implicitly enabled:
+
+```yaml
+email:
+  enabled: true
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  smtp_user: alerts@example.com
+  smtp_pass: ""                 # PREFER .env / keyring over plaintext YAML
+  smtp_from: alerts@example.com
+  smtp_use_tls: true
+  fallback_recipient: soc@example.com
+```
+
+A real `.env` always wins over the YAML value (the loader uses
+`os.environ.setdefault`), so production deployments keep secrets out of
+the preset file.
+
+---
+
+## Scheduled / recurring runs
+
+The `schedule` subcommand turns a saved preset into a recurring daily run.
+It generates the **OS-native scheduler artefact** rather than running a
+fragile long-lived daemon.
+
+**Windows Task Scheduler:**
+
+```bash
+python threat_intel_hunter.py schedule windows-task \
+    --for-config daily-hunt --time 06:15 \
+    --task-name ramen-cve-daily --output task.xml
+# then, in an elevated prompt:
+schtasks /Create /TN ramen-cve-daily /XML task.xml
+```
+
+The emitted XML is a valid Task Scheduler 2.0 document with a daily
+`CalendarTrigger` at `--time` and an `Exec` action that runs
+`python threat_intel_hunter.py --config daily-hunt`.
+
+**Linux / macOS cron:**
+
+```bash
+python threat_intel_hunter.py schedule cron --for-config daily-hunt --time 06:15
+# → 15 6 * * * /path/to/python /path/to/threat_intel_hunter.py --config daily-hunt
+crontab -e   # paste the line
+```
+
+Both forms accept `--python PATH` to pin the interpreter and `--output
+FILE` to write to disk instead of stdout. A bundled GitHub-Actions
+equivalent lives in `examples/github-actions-daily-triage.yml`.
+
 ---
 
 ## Bucket logic
@@ -266,18 +370,10 @@ Add or correct entries directly in those JSON files; `ramen_cve.py` reads them o
 
 ---
 
-## Scheduled / batched usage
-
-`examples/github-actions-daily-triage.yml` is a copy-and-paste-ready GitHub Actions workflow
-that runs the OPML pipeline on a cron schedule and uploads the resulting artefacts. Same
-shape works for cron / systemd timers / Azure DevOps / Jenkins / Bamboo.
-
----
-
 ## What this is not (yet)
 
-These would all fit cleanly but aren't shipped in this branch — see `docs/REFACTOR_PLAN.md`
-and the two gap-analysis documents for the prioritized backlog:
+These would all fit cleanly but aren't shipped yet — see `docs/whitepaper.md` §8,
+`docs/REFACTOR_PLAN.md`, and the two gap-analysis documents for the prioritized backlog:
 
 - SSVC (Stakeholder-Specific Vulnerability Categorization) decision tree
 - Native SIEM query generation (KQL / SPL / Elastic EQL)

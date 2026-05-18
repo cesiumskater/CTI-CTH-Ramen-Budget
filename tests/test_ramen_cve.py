@@ -7201,3 +7201,159 @@ def test_cli_config_missing_returns_friendly_error(tmp_path, monkeypatch, capsys
     assert rc == 1
     err = capsys.readouterr().err
     assert "Config file not found" in err
+
+
+# ---------------------------------------------------------------------------
+# Slice 30 — Scheduled-task generation (Windows Task Scheduler XML / cron)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_schedule_time_valid_and_invalid():
+    """_parse_schedule_time accepts HH:MM in range and rejects bad shapes."""
+    import pytest
+
+    import ramen_cve
+
+    assert ramen_cve._parse_schedule_time("06:15") == (6, 15)
+    assert ramen_cve._parse_schedule_time("23:59") == (23, 59)
+    assert ramen_cve._parse_schedule_time("0:0") == (0, 0)
+    for bad in ("6", "6:15:00", "ab:cd", "24:00", "12:60", ""):
+        with pytest.raises(ValueError):
+            ramen_cve._parse_schedule_time(bad)
+
+
+def test_quote_for_task_scheduler():
+    """Tokens with whitespace/quotes get wrapped; clean tokens are untouched."""
+    import ramen_cve
+
+    assert ramen_cve._quote_for_task_scheduler("--config") == "--config"
+    assert ramen_cve._quote_for_task_scheduler("daily-hunt") == "daily-hunt"
+    assert ramen_cve._quote_for_task_scheduler("C:\\Program Files\\x.py") == (
+        '"C:\\Program Files\\x.py"'
+    )
+    assert ramen_cve._quote_for_task_scheduler("") == '""'
+
+
+def test_emit_windows_task_xml_is_wellformed_and_has_trigger():
+    """The generated XML parses, carries a daily trigger and the Exec action."""
+    import argparse
+    import xml.etree.ElementTree as ET
+
+    import ramen_cve
+
+    args = argparse.Namespace(
+        action="windows-task", for_config="daily-hunt", time="06:15",
+        task_name="ramen-cve-daily", python="/usr/bin/python3", output=None,
+    )
+    xml = ramen_cve._emit_windows_task_xml(args)
+    # Must parse as valid XML
+    root = ET.fromstring(xml)
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    assert root.find(".//t:CalendarTrigger", ns) is not None
+    assert root.find(".//t:ScheduleByDay/t:DaysInterval", ns).text == "1"
+    cmd = root.find(".//t:Exec/t:Command", ns).text
+    arguments = root.find(".//t:Exec/t:Arguments", ns).text
+    assert cmd == "/usr/bin/python3"
+    assert "--config" in arguments and "daily-hunt" in arguments
+    # Trigger start time reflects --time
+    sb = root.find(".//t:CalendarTrigger/t:StartBoundary", ns).text
+    assert sb.endswith("T06:15:00")
+
+
+def test_emit_cron_line_format():
+    """The cron line is `MM HH * * * <python> <script> --config <name>`."""
+    import argparse
+
+    import ramen_cve
+
+    args = argparse.Namespace(
+        action="cron", for_config="daily-hunt", time="06:15",
+        task_name="x", python="/usr/bin/python3", output=None,
+    )
+    line = ramen_cve._emit_cron_line(args)
+    assert line.startswith("15 6 * * * /usr/bin/python3 ")
+    assert "--config daily-hunt" in line
+    assert line.endswith("\n")
+
+
+def test_emit_cron_line_without_config():
+    """Omitting --for-config produces a valid line with no --config token."""
+    import argparse
+
+    import ramen_cve
+
+    args = argparse.Namespace(
+        action="cron", for_config=None, time="09:30",
+        task_name="x", python="/usr/bin/python3", output=None,
+    )
+    line = ramen_cve._emit_cron_line(args)
+    assert line.startswith("30 9 * * * ")
+    assert "--config" not in line
+
+
+def test_run_schedule_writes_to_output_file(tmp_path):
+    """`schedule windows-task --output FILE` writes the XML to the file, rc=0."""
+    import argparse
+
+    import ramen_cve
+
+    out = tmp_path / "task.xml"
+    args = argparse.Namespace(
+        subcommand="schedule", action="windows-task", for_config="daily-hunt",
+        time="06:15", task_name="ramen-cve-daily", python="/usr/bin/python3",
+        output=out, quiet=False, verbose=False,
+    )
+    rc = ramen_cve._run_schedule(args, cache=None, api_key=None)
+    assert rc == 0
+    assert out.is_file()
+    assert "<Task" in out.read_text()
+
+
+def test_run_schedule_bad_time_returns_1(tmp_path, caplog):
+    """An out-of-range --time exits rc=1 with a clear error, no file written."""
+    import argparse
+    import logging
+
+    import ramen_cve
+
+    out = tmp_path / "task.xml"
+    args = argparse.Namespace(
+        subcommand="schedule", action="cron", for_config=None,
+        time="99:99", task_name="x", python=None, output=out,
+        quiet=False, verbose=False,
+    )
+    with caplog.at_level(logging.ERROR, logger="ramen_cve"):
+        rc = ramen_cve._run_schedule(args, cache=None, api_key=None)
+    assert rc == 1
+    assert not out.exists()
+    assert any("out of range" in r.message for r in caplog.records)
+
+
+def test_cli_schedule_cron_stdout(capsys):
+    """End-to-end: `schedule cron --for-config x` prints a crontab line, rc=0."""
+    import ramen_cve
+
+    rc = ramen_cve.main([
+        "schedule", "cron", "--for-config", "daily-hunt",
+        "--time", "07:45", "--python", "/usr/bin/python3",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("45 7 * * * /usr/bin/python3 ")
+    assert "--config daily-hunt" in out
+
+
+def test_cli_schedule_subcommand_parses():
+    """The schedule subcommand + its flags round-trip through build_parser."""
+    import ramen_cve
+
+    args = ramen_cve.build_parser().parse_args([
+        "schedule", "windows-task",
+        "--for-config", "weekly", "--time", "23:30",
+        "--task-name", "tih-weekly",
+    ])
+    assert args.subcommand == "schedule"
+    assert args.action == "windows-task"
+    assert args.for_config == "weekly"
+    assert args.time == "23:30"
+    assert args.task_name == "tih-weekly"
