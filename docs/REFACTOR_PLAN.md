@@ -241,6 +241,16 @@ step. Suite stays green (currently **458**) at every commit.
   branch protection / required-checks enforcement is server-side and not
   settable from here — the workflow provides signal, the dedicated
   non-auto-merge branch provides the actual containment.
+- **5.6 Per-module logger (LOW, recurring):** the monolith has one
+  `_log = logging.getLogger(__name__)`. Any extracted module that calls
+  `_log.*` must declare its own `_log = logging.getLogger(__name__)`
+  (idiomatic; logger name differs cosmetically but no test asserts it and
+  it is not in user-facing output). Forgetting it ⇒ `NameError` (caught
+  by the suite — happened & fixed in Step 3). Check every step.
+- **5.7 Now-unused stdlib imports (LOW, recurring):** when a section
+  moves out, imports it solely consumed (`sqlite3`, `datetime`,
+  `timedelta` after Cache) become F401 in `__init__`. Trust ruff F401
+  (it accounts for PEP-563 string annotations) and delete them.
 - **5.5 Import-time side effects:** `DEFAULT_DATA_DIR` etc. use
   `Path(__file__)`; moving into `constants.py` keeps `__file__` at the
   same `src/ramen_cve/` depth ⇒ paths unchanged. Asserted in Step 1.
@@ -300,3 +310,10 @@ growth and is optimistic for the zero-behavior-change rigor required.
   re-exports relocated to the top import group (avoids E402); dropped
   now-unused `dataclasses`/`timezone` imports from `__init__`. `__init__`
   5858→5566. 463 passed, ruff clean, EnrichedCve build verified. ✅
+- **Step 3/26 — `cache.py`:** `class Cache` (217–479) → `cache.py`
+  (282 LOC; stdlib + `DEFAULT_CACHE_TTL_HOURS`/`_utcnow` leaves).
+  Stop-the-line caught 1 regression: Cache used the module `_log`; fixed
+  by giving `cache.py` its own `logging.getLogger(__name__)` (→ new
+  invariant §5.6). Removed now-unused `sqlite3`/`datetime`/`timedelta`
+  from `__init__` (§5.7). `__init__` 5566→5301. 463 passed, ruff
+  clean, Cache round-trip + corrupt-timestamp path verified. ✅
