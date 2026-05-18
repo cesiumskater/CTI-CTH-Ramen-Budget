@@ -1413,7 +1413,7 @@ def test_parse_kev_due_date_handles_malformed():
     assert _parse_kev_due_date("") is None
     assert _parse_kev_due_date("2024-06-01") == date(2024, 6, 1)
 
-    logger = logging.getLogger("ramen_cve")
+    logger = logging.getLogger("ramen_cve.associations")
     with pytest.MonkeyPatch.context() as mp:
         warnings: list[str] = []
         original = logger.warning

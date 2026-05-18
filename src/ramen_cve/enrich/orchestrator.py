@@ -1,0 +1,156 @@
+"""ramen_cve.enrich.orchestrator — per-CVE enrichment pipeline (L2).
+
+Joins NVD/EPSS/KEV fetch + associations + ATT&CK/kill-chain mapping
+into EnrichedCve. See docs/REFACTOR_PLAN.md.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import date
+
+from ..analyze import (
+    _best_admiralty,
+    _worst_tlp,
+    map_cwes_to_attack_techniques,
+    map_cwes_to_kill_chain,
+)
+from ..associations import _parse_kev_due_date
+from ..cache import Cache
+from ..keyring import _prompt_for_api_key
+from ..models import CveRecord, EnrichedCve
+from .epss import fetch_epss
+from .kev import fetch_kev_catalog
+from .nvd import fetch_nvd
+
+_log = logging.getLogger(__name__)
+
+
+def enrich_cves(
+    records: list[CveRecord],
+    cache: Cache,
+    api_key: str | None,
+    associations: dict[str, dict[str, list]] | None = None,
+) -> list[EnrichedCve]:
+    """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
+
+    Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
+    multiple records, only the earliest first_seen date is kept.
+
+    If `associations` is provided, each enriched record is also annotated with
+    the linked actors, campaigns, and malware for that CVE.
+    """
+    # Deduplicate: keep earliest first_seen per CVE, but merge TLP / Admiralty
+    # across every input record so the most-restrictive sharing tag and the
+    # highest-confidence source rating both reach the EnrichedCve.
+    earliest: dict[str, CveRecord] = {}
+    merged_tlp: dict[str, str] = {}
+    merged_adm: dict[str, str] = {}
+    for rec in records:
+        if rec.cve_id not in earliest or rec.first_seen < earliest[rec.cve_id].first_seen:
+            earliest[rec.cve_id] = rec
+        merged_tlp[rec.cve_id] = _worst_tlp(merged_tlp.get(rec.cve_id), rec.tlp)
+        merged_adm[rec.cve_id] = _best_admiralty(merged_adm.get(rec.cve_id), rec.admiralty)
+
+    unique_ids = list(earliest.keys())
+
+    # Fetch NVD data for each unique CVE. If the server rejects the API key
+    # (401/403), prompt for a new one ONCE and retry the failed CVE plus all
+    # remaining ones with the fresh key.
+    nvd_data: dict[str, dict] = {}
+    reprompted = False
+    for cve_id in unique_ids:
+        result = fetch_nvd(cve_id, cache, api_key)
+        if result.get("nvd_status") == "auth_error" and not reprompted and api_key:
+            reprompted = True
+            new_key = _prompt_for_api_key(reason="expired")
+            if new_key:
+                api_key = new_key
+                result = fetch_nvd(cve_id, cache, api_key)
+        nvd_data[cve_id] = result
+
+    # Fetch EPSS data in one batched call
+    epss_data = fetch_epss(unique_ids, cache)
+
+    # Fetch the authoritative CISA KEV catalog (one HTTP call, cached).
+    kev_catalog = fetch_kev_catalog(cache)
+
+    enriched: list[EnrichedCve] = []
+    for cve_id, rec in earliest.items():
+        nvd = nvd_data.get(cve_id, {})
+        epss = epss_data.get(cve_id, {})
+        kev = kev_catalog.get(cve_id, {})
+
+        nvd_pub_str = nvd.get("nvd_published")
+        nvd_published: date | None = None
+        if nvd_pub_str:
+            try:
+                nvd_published = date.fromisoformat(nvd_pub_str)
+            except (TypeError, ValueError):
+                _log.warning(
+                    "NVD returned an unparseable published date %r for %s; ignoring.",
+                    nvd_pub_str,
+                    cve_id,
+                )
+
+        # CISA's catalog is the authoritative source for KEV membership; if it
+        # answers, prefer it over NVD's cisaExploitAdd flag. Either signal alone
+        # is enough to treat the CVE as KEV-listed.
+        kev_listed = bool(kev) or nvd.get("kev_listed", False)
+
+        enriched.append(
+            EnrichedCve(
+                cve_id=cve_id,
+                source=rec.source,
+                first_seen=rec.first_seen,
+                first_seen_type=rec.first_seen_type,
+                cvss_score=nvd.get("cvss_score"),
+                cvss_severity=nvd.get("cvss_severity"),
+                cvss_vector=nvd.get("cvss_vector"),
+                cvss_version=nvd.get("cvss_version"),
+                kev_listed=kev_listed,
+                cwe=nvd.get("cwe", []),
+                nvd_published=nvd_published,
+                nvd_status=nvd.get("nvd_status", "ok"),
+                epss_score=epss.get("epss"),
+                epss_percentile=epss.get("percentile"),
+                epss_date=epss.get("date"),
+                kev_due_date=_parse_kev_due_date(kev.get("dueDate")) if kev else None,
+                kev_required_action=kev.get("requiredAction") if kev else None,
+                kev_known_ransomware_use=(
+                    (kev.get("knownRansomwareCampaignUse") or "").strip().lower() == "known"
+                ),
+                kev_vendor_project=kev.get("vendorProject") if kev else None,
+                kev_product=kev.get("product") if kev else None,
+                kev_short_description=kev.get("shortDescription") if kev else None,
+                attack_techniques=map_cwes_to_attack_techniques(nvd.get("cwe", [])),
+                tlp=merged_tlp.get(cve_id, "CLEAR"),
+                admiralty=merged_adm.get(cve_id, ""),
+                cpes=list(nvd.get("cpes") or []),
+                kill_chain_phase=map_cwes_to_kill_chain(nvd.get("cwe", [])),
+            )
+        )
+
+    if associations:
+        for rec in enriched:
+            assoc = associations.get(rec.cve_id)
+            if assoc:
+                rec.linked_actors = list(assoc.get("actors") or [])
+                rec.linked_campaigns = list(assoc.get("campaigns") or [])
+                rec.linked_malware = list(assoc.get("malware") or [])
+
+    # Diamond Model adversary defaults to the first linked actor; capability
+    # adds the primary CWE/technique label so the Diamond line in Markdown is
+    # actually informative rather than just the literal word "capability".
+    for rec in enriched:
+        if rec.linked_actors and not rec.diamond_adversary:
+            rec.diamond_adversary = rec.linked_actors[0].name
+        cap_bits: list[str] = []
+        if rec.cwe:
+            cap_bits.append(rec.cwe[0])
+        if rec.attack_techniques:
+            cap_bits.append(rec.attack_techniques[0])
+        if cap_bits:
+            rec.diamond_capability = "exploit (" + ", ".join(cap_bits) + ")"
+
+    return enriched
+

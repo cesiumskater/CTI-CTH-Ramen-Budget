@@ -39,6 +39,17 @@ Second correction: there are **no `# region:` markers** in the monolith
 navigation index at `src/ramen_cve/__init__.py:9-43`, which the target
 structure below intentionally matches.
 
+**Amendment (2026-05-18, after Step 7 stop-the-line):** facade re-export
+preserves attribute *access* but NOT monkeypatch *observability* — moved
+code binds its own module globals. Per user decision, tests that
+`patch("ramen_cve.<collaborator>")` / `monkeypatch.setattr(ramen_cve,
+"<x>", …)` for a symbol whose function moved are **repointed to the new
+module path** (`ramen_cve.<newmod>.<x>`). Behavior-preserving: only the
+patch location string changes; inputs/assertions/expected values are
+never touched. Submodules therefore `import requests`/`time` normally
+(no facade back-reference) — acyclic layering is preserved. Per-step
+procedure in tasks/lessons.md (2026-05-18 RE-PLAN entry).
+
 Open questions from the plan are resolved: the 5 subprocess tests invoke
 the stable `threat_intel_hunter.py` entry (facade-safe); there is no
 traceback/module-path assertion coupling; the lone `ramen_cve.py` literal
@@ -241,6 +252,16 @@ step. Suite stays green (currently **458**) at every commit.
   branch protection / required-checks enforcement is server-side and not
   settable from here — the workflow provides signal, the dedicated
   non-auto-merge branch provides the actual containment.
+- **5.6 Per-module logger (LOW, recurring):** the monolith has one
+  `_log = logging.getLogger(__name__)`. Any extracted module that calls
+  `_log.*` must declare its own `_log = logging.getLogger(__name__)`
+  (idiomatic; logger name differs cosmetically but no test asserts it and
+  it is not in user-facing output). Forgetting it ⇒ `NameError` (caught
+  by the suite — happened & fixed in Step 3). Check every step.
+- **5.7 Now-unused stdlib imports (LOW, recurring):** when a section
+  moves out, imports it solely consumed (`sqlite3`, `datetime`,
+  `timedelta` after Cache) become F401 in `__init__`. Trust ruff F401
+  (it accounts for PEP-563 string annotations) and delete them.
 - **5.5 Import-time side effects:** `DEFAULT_DATA_DIR` etc. use
   `Path(__file__)`; moving into `constants.py` keeps `__file__` at the
   same `src/ramen_cve/` depth ⇒ paths unchanged. Asserted in Step 1.
@@ -281,6 +302,93 @@ growth and is optimistic for the zero-behavior-change rigor required.
 ## Execution Log (live ledger — append per step)
 
 - **Step 0 (prep):** branch `claude/refactor-monolith-split` cut @
-  `8d048f2`. This plan rewritten (false claims corrected). CI workflow,
-  `tests/test_facade.py` (surface + patch-contract), and `todo.md`
-  correction added. _Pending: commit + push + draft PR, then Step 1._
+  `8d048f2`. Plan rewritten (false claims corrected). CI workflow,
+  `tests/test_facade.py` (surface + patch-contract), `todo.md`
+  correction. Draft PR #18. 463 passed, ruff clean. ✅
+- **Step 1/26 — `constants.py`:** moved `__init__.py:66-267` (regexes,
+  CWE/ATT&CK tables, all `DEFAULT_*`, `*_STATUSES`, defang map) verbatim
+  into the Layer-0 `constants.py` leaf (214 LOC); `__init__` 6020→5858,
+  explicit `from .constants import (…)` re-export of all 36 names incl.
+  the 3 private (`_DEFANG_MAP/_DEFANG_DETECT/_FILE_EXT_TLDS`). Verified:
+  `import ramen_cve` ok; `DEFAULT_DATA_DIR` byte-identical (Risk 5.5
+  confirmed); 463 passed; ruff clean (isort autofix on new block). ✅
+- **Step 2/26 — `models.py`:** `OpmlError` + 10 dataclasses →
+  `models.py` (308 LOC). **Plan refinement** (logged per §4): `_utcnow`
+  moved into `models.py` (its lowest consumer — `EnrichedCve`
+  default_factory) instead of `analyze.py`; `BUCKET_ACTIONS` moved into
+  `constants.py` (it is a static lookup table, evaluated at
+  `EnrichedCve` class-def time → must be an L0 import). Facade
+  re-exports relocated to the top import group (avoids E402); dropped
+  now-unused `dataclasses`/`timezone` imports from `__init__`. `__init__`
+  5858→5566. 463 passed, ruff clean, EnrichedCve build verified. ✅
+- **Step 3/26 — `cache.py`:** `class Cache` (217–479) → `cache.py`
+  (282 LOC; stdlib + `DEFAULT_CACHE_TTL_HOURS`/`_utcnow` leaves).
+  Stop-the-line caught 1 regression: Cache used the module `_log`; fixed
+  by giving `cache.py` its own `logging.getLogger(__name__)` (→ new
+  invariant §5.6). Removed now-unused `sqlite3`/`datetime`/`timedelta`
+  from `__init__` (§5.7). `__init__` 5566→5301. 463 passed, ruff
+  clean, Cache round-trip + corrupt-timestamp path verified. ✅
+- **Step 4/26 — `analyze.py`:** 3 non-contiguous regions (CWE→ATT&CK /
+  →Kill-Chain mappers incl. their `KILL_CHAIN_PHASES`/`CWE_TO_KILL_CHAIN`
+  constants; TLP/Admiralty math; `bucket_and_suggest`+`filter_by_date`)
+  → `analyze.py` (199 LOC, L1; own `_log`). `_log` global stayed in
+  `__init__`. **Near-miss:** first attempt anchored the slice end on
+  `def write_iocs_csv` and swept the output `CSV_COLUMNS`/`IOC_CSV_COLUMNS`
+  constants in → 33 failures; reverted (`git checkout --`) and redid with
+  end anchor `CSV_COLUMNS = [` + a slice-purity assertion (lesson logged).
+  `__init__` 5301→5138. 463 passed, ruff clean. ✅
+- **Step 5/26 — `extract.py`:** 2 regions (banner+`parse_opml`+
+  `extract_cves`+`_defang_text`; `_is_public_ip`+`_is_likely_filename`+
+  `extract_iocs`) → `extract.py` (250 LOC, L1; deps: constants/models +
+  `analyze._normalize_tlp`; no `_log`). Decay funcs + `IOC_HALF_LIFE_DAYS`
+  stay (Step 6). **Near-miss (same class as Step 4):** E1 first anchored on
+  `def _ioc_confidence` swept the decay constant `IOC_HALF_LIFE_DAYS` in →
+  12 failures; reverted + redid with `IOC_HALF_LIFE_DAYS` end anchor.
+  Hand-pruned now-unused `ipaddress`/`ET` from `__init__` (ruff won't
+  autofix F401 in package `__init__`). `__init__` 5136→4925. 463 passed,
+  ruff clean. Pre-extraction interstitial-constant checklist added to
+  lessons.md (now mandatory). ✅
+- **Step 6/26 — `decay.py`:** clean single contiguous block
+  (`IOC_HALF_LIFE_DAYS` + `_ioc_confidence` + `apply_ioc_decay` +
+  `filter_iocs_by_confidence`) → `decay.py` (66 LOC, L1; deps: `math`,
+  `datetime.date`, `models.IocRecord`; no `_log`). Pre-write purity
+  assertions (`consts==["IOC_HALF_LIFE_DAYS"]`, `defs==[...]`) passed
+  first try — **no near-miss** (checklist working). Hand-pruned now-unused
+  `math` from `__init__`. `__init__` 4925→4876. 463 passed, ruff clean. ✅
+- **Step 7/26 — `keyring.py`:** API-key bootstrap + redaction (stdlib
+  leaf). Triggered the monkeypatch-seam RE-PLAN (Amendment above); 4
+  `test_api_key_prompt.py` tests repointed to `ramen_cve.keyring.*`.
+  `__init__` 4875→4754. 463 passed, ruff clean. ✅
+- **Step 8/26 — `enrich/{nvd,epss,kev}.py`:** HTTP fetchers → new
+  `enrich/` subpackage (L2; own `_log`; `..cache`/`..constants`/
+  `..keyring` rel-imports). User chose plan-literal per-fetcher. **Zero
+  test repoints needed** — NVD/EPSS/KEV tests mock via Cache fixtures /
+  higher-level patches that survive the move (50 fetcher tests, 0.29s,
+  no real network). **Near-miss:** §5.7-pruning `import time` (F401, no
+  `time.` left in `__init__`) deleted the `ramen_cve.time` monkeypatch
+  attribute → 28 failures; restored as `import time  # noqa: F401
+  # monkeypatch seam`. §5.7 amended in lessons.md. `__init__`
+  4754→4535 (nvd 148 / epss 68 / kev 47). 463 passed, ruff clean. ✅
+- **Step 9/26 — `associations.py`:** `_build_actor/_campaign/_malware`,
+  `load_associations`, `_parse_kev_due_date` → `associations.py` (87 LOC,
+  L1.5 local-JSON, own `_log`; deps constants+models). **Near-miss:** one
+  isolated test patched `getLogger("ramen_cve").warning`; moved code logs
+  via the `ramen_cve.associations` child → repointed the logger name
+  (behavior-preserving). Only 1 such test in the suite. `__init__`
+  4535→4473. 463 passed, ruff clean. ✅
+- **Step 10/26 — `enrich/orchestrator.py`:** `enrich_cves` → L2
+  orchestrator (deps: analyze/associations/keyring/cache/models +
+  enrich.nvd/epss/kev). Two stop-the-lines, both expected: (1) grep
+  missed analyze `_worst_tlp`/`_best_admiralty` → 15 NameError, fixed by
+  import (F821 sweep caught pre-suite); (2) `test_enrich_cves_reprompts_
+  on_auth_error` — the per-fetcher fan-out foreseen in Step 7: repointed
+  `ramen_cve.requests.get`→`enrich.{nvd,epss,kev}.requests.get`,
+  `time.sleep`→`enrich.nvd.time.sleep`, `_prompt_for_api_key`→
+  `enrich.orchestrator._prompt_for_api_key` (behavior-preserving).
+  `__init__` 4473→4344. 463 passed, ruff clean. ✅
+- **Step 11/26 — `enrich/exploits.py`:** ExploitDB/Nuclei/GitHub PoC
+  tracker (`fetch_exploitdb_cve_set`, `fetch_nuclei_cve_set`,
+  `search_github_for_cve`, `enrich_with_exploit_status`) → L2. Grep
+  missed `csv` + `EnrichedCve` → 3 NameError, F821-sweep caught,
+  added imports. No test repoints (Cache-fixture mocks survive).
+  `__init__` 4344→4219. 463 passed, ruff clean. ✅
