@@ -127,6 +127,12 @@ from .decay import (  # noqa: F401
     filter_iocs_by_confidence,
 )
 from .enrich.epss import fetch_epss  # noqa: F401
+from .enrich.exploits import (  # noqa: F401
+    enrich_with_exploit_status,
+    fetch_exploitdb_cve_set,
+    fetch_nuclei_cve_set,
+    search_github_for_cve,
+)
 from .enrich.kev import fetch_kev_catalog  # noqa: F401
 from .enrich.nvd import (  # noqa: F401
     _empty_nvd,
@@ -167,137 +173,6 @@ from .models import (  # noqa: F401
 )
 
 _log = logging.getLogger(__name__)
-
-
-def fetch_exploitdb_cve_set(cache: Cache) -> set[str]:
-    """Return the set of CVE IDs that have at least one Exploit-DB entry.
-
-    The Exploit-DB project publishes a CSV mirror of every entry; the `codes`
-    column carries CVE IDs (semicolon-separated, sometimes mixed with OSVDB IDs
-    or other refs). We pull the file once per cache TTL, scan the codes column,
-    and persist the resulting set. On any error returns an empty set.
-    """
-    cached = cache.get_exploit("exploitdb", "index")
-    if cached is not None:
-        return set(cached.get("cve_ids", []))
-
-    cve_ids: set[str] = set()
-    try:
-        resp = requests.get(EXPLOITDB_CSV_URL, headers={"User-Agent": USER_AGENT}, timeout=60)
-        resp.raise_for_status()
-        reader = csv.DictReader(resp.text.splitlines())
-        for row in reader:
-            codes = row.get("codes") or ""
-            for code in codes.split(";"):
-                normalized = code.strip().upper()
-                if CVE_REGEX.fullmatch(normalized):
-                    cve_ids.add(normalized)
-    except Exception as exc:
-        _log.warning("Exploit-DB index fetch failed: %s", exc)
-        return set()
-
-    cache.set_exploit("exploitdb", "index", {"cve_ids": sorted(cve_ids)})
-    _log.info("Loaded Exploit-DB index: %d CVEs.", len(cve_ids))
-    return cve_ids
-
-
-def fetch_nuclei_cve_set(cache: Cache) -> set[str]:
-    """Return the set of CVE IDs that have a Nuclei community template.
-
-    Hits the GitHub Git Trees API once and filters paths under `cves/` ending
-    in `.yaml`. Cached per the cache TTL. On any error returns an empty set.
-    """
-    cached = cache.get_exploit("nuclei", "index")
-    if cached is not None:
-        return set(cached.get("cve_ids", []))
-
-    cve_ids: set[str] = set()
-    try:
-        resp = requests.get(
-            NUCLEI_TEMPLATES_TREE_URL,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        for entry in data.get("tree") or []:
-            path = entry.get("path") or ""
-            if "cves/" in path and path.endswith(".yaml"):
-                for m in CVE_REGEX.finditer(path):
-                    cve_ids.add(m.group(0).upper())
-    except Exception as exc:
-        _log.warning("Nuclei templates index fetch failed: %s", exc)
-        return set()
-
-    cache.set_exploit("nuclei", "index", {"cve_ids": sorted(cve_ids)})
-    _log.info("Loaded Nuclei templates index: %d CVEs.", len(cve_ids))
-    return cve_ids
-
-
-def search_github_for_cve(cve_id: str, cache: Cache, github_token: str | None) -> bool:
-    """Return True if a GitHub repository name or description references this CVE.
-
-    Returns False (without an HTTP call) when no GITHUB_TOKEN is configured —
-    the unauthenticated rate limit (10 req/min) is too low to be useful for a
-    CVE-by-CVE scan. Cached per CVE for the cache TTL.
-    """
-    if not github_token:
-        return False
-
-    cached = cache.get_exploit("github", cve_id)
-    if cached is not None:
-        return bool(cached.get("found", False))
-
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {github_token}",
-    }
-    params = {"q": f"{cve_id} in:name,description", "per_page": "1"}
-    try:
-        resp = requests.get(GITHUB_SEARCH_URL, params=params, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        _log.warning("GitHub search failed for %s: %s", cve_id, exc)
-        return False
-
-    found = (data.get("total_count") or 0) > 0
-    cache.set_exploit("github", cve_id, {"found": found})
-    return found
-
-
-def enrich_with_exploit_status(
-    enriched: list[EnrichedCve],
-    cache: Cache,
-    github_token: str | None = None,
-    *,
-    skip_github: bool = False,
-) -> list[EnrichedCve]:
-    """Set rec.exploit_status on each EnrichedCve in place.
-
-    Resolution order (highest priority wins):
-      1. exploit_db
-      2. nuclei_template
-      3. github_poc (only when github_token is set and skip_github=False)
-      Default: 'none'.
-
-    The bucket assignment is intentionally NOT changed — exploit_status is a
-    parallel signal that consumers can act on directly. Returns the same list
-    for chaining.
-    """
-    edb = fetch_exploitdb_cve_set(cache)
-    nuclei = fetch_nuclei_cve_set(cache)
-    for rec in enriched:
-        if rec.cve_id in edb:
-            rec.exploit_status = "exploit_db"
-        elif rec.cve_id in nuclei:
-            rec.exploit_status = "nuclei_template"
-        elif not skip_github and github_token and search_github_for_cve(
-            rec.cve_id, cache, github_token
-        ):
-            rec.exploit_status = "github_poc"
-    return enriched
 
 
 VIRUSTOTAL_API_BASE = "https://www.virustotal.com/api/v3"

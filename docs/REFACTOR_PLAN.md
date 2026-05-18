@@ -386,3 +386,9 @@ growth and is optimistic for the zero-behavior-change rigor required.
   `time.sleep`→`enrich.nvd.time.sleep`, `_prompt_for_api_key`→
   `enrich.orchestrator._prompt_for_api_key` (behavior-preserving).
   `__init__` 4473→4344. 463 passed, ruff clean. ✅
+- **Step 11/26 — `enrich/exploits.py`:** ExploitDB/Nuclei/GitHub PoC
+  tracker (`fetch_exploitdb_cve_set`, `fetch_nuclei_cve_set`,
+  `search_github_for_cve`, `enrich_with_exploit_status`) → L2. Grep
+  missed `csv` + `EnrichedCve` → 3 NameError, F821-sweep caught,
+  added imports. No test repoints (Cache-fixture mocks survive).
+  `__init__` 4344→4219. 463 passed, ruff clean. ✅
