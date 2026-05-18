@@ -167,6 +167,10 @@ DEFAULT_PIR_DIR = DEFAULT_DATA_DIR / "pirs"
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "config"
 DEFAULT_CONFIG_TEMPLATE = DEFAULT_CONFIG_DIR / "config.yaml"
 DEFAULT_PRESETS_DIR = DEFAULT_CONFIG_DIR / "presets"
+# Tiny state file that "remembers" the last OPML source so a subsequent
+# `opml` run with no path argument can reuse it. Separate from presets so
+# it isn't accidentally shared/committed alongside a named configuration.
+DEFAULT_LAST_OPML_PATH = DEFAULT_CONFIG_DIR / "last_opml.json"
 
 HUNT_STATUSES = (
     "open",
@@ -3730,6 +3734,56 @@ def list_yaml_presets() -> list[Path]:
     return sorted(DEFAULT_PRESETS_DIR.glob("*.yaml"))
 
 
+def delete_yaml_preset(name_or_path: str) -> Path | None:
+    """Delete a saved preset. Returns the removed path, or None if absent."""
+    target = _resolve_config_path(name_or_path)
+    if target.is_file():
+        target.unlink()
+        return target
+    return None
+
+
+def _save_remembered_opml(path: Path) -> Path:
+    """Persist the OPML source so a later `opml` run with no path reuses it.
+
+    Writes a tiny JSON blob (``{opml_path, saved_at}``) to
+    DEFAULT_LAST_OPML_PATH. Returns the state-file path written.
+    """
+    DEFAULT_LAST_OPML_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_LAST_OPML_PATH.write_text(
+        json.dumps(
+            {"opml_path": str(path), "saved_at": _utcnow().isoformat(timespec="seconds")},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return DEFAULT_LAST_OPML_PATH
+
+
+def _load_remembered_opml() -> Path | None:
+    """Return the previously-remembered OPML path, or None if not set / unreadable.
+
+    Never raises: a missing or corrupt state file simply means "nothing
+    remembered" so the caller can fall back to a clean 'path required' error.
+    """
+    if not DEFAULT_LAST_OPML_PATH.is_file():
+        return None
+    try:
+        data = json.loads(DEFAULT_LAST_OPML_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    raw = (data or {}).get("opml_path")
+    return Path(raw).expanduser() if raw else None
+
+
+def _reset_remembered_opml() -> bool:
+    """Forget the remembered OPML. Returns True if a state file was removed."""
+    if DEFAULT_LAST_OPML_PATH.is_file():
+        DEFAULT_LAST_OPML_PATH.unlink()
+        return True
+    return False
+
+
 def save_yaml_config(name_or_path: str, payload: dict) -> Path:
     """Persist ``payload`` as a YAML preset. Returns the path written to.
 
@@ -3776,6 +3830,7 @@ _YAML_FLAT_KEY_MAP: dict[tuple[str, ...], str] = {
     ("enrichment", "no_enrich_iocs"): "no_enrich_iocs",
     ("cache", "no_cache"): "no_cache",
     ("dispatch", "enabled"): "dispatch",
+    ("remember_opml",): "remember_opml",
 }
 
 
@@ -3915,6 +3970,7 @@ def args_to_yaml_payload(args: argparse.Namespace) -> dict:
     }
     payload["cache"] = {"no_cache": bool(getattr(args, "no_cache", False))}
     payload["dispatch"] = {"enabled": bool(getattr(args, "dispatch", False))}
+    payload["remember_opml"] = bool(getattr(args, "remember_opml", False))
     payload["logging"] = {
         "level": "quiet" if getattr(args, "quiet", False)
         else "verbose" if getattr(args, "verbose", False)
@@ -4083,11 +4139,37 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List every saved YAML preset and exit.",
     )
+    parser.add_argument(
+        "--reset-config",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Delete the saved YAML preset with that NAME (or path) and exit.",
+    )
+    parser.add_argument(
+        "--reset-opml",
+        action="store_true",
+        help="Forget the remembered OPML source (clears the last_opml state) "
+             "and exit.",
+    )
     sub = parser.add_subparsers(dest="subcommand", required=False)
 
     # opml subcommand
     opml_p = sub.add_parser("opml", help="Process an OPML feed list.")
-    opml_p.add_argument("path", type=_path_arg, help="Path to the OPML file.")
+    opml_p.add_argument(
+        "path",
+        type=_path_arg,
+        nargs="?",
+        default=None,
+        help="Path to an .opml file OR a directory of *.opml files. "
+             "Optional when a remembered OPML exists (see --remember-opml).",
+    )
+    opml_p.add_argument(
+        "--remember-opml",
+        action="store_true",
+        help="After a successful run, save this OPML source so a later "
+             "`opml` with no path argument reuses it automatically.",
+    )
     _shared_flags(opml_p)
 
     # url subcommand
@@ -4496,6 +4578,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             for p in presets:
                 print(f"{p.stem}\t{p}")
+        return 0
+
+    # --reset-config NAME: delete one preset and exit.
+    if getattr(args, "reset_config", None):
+        removed = delete_yaml_preset(args.reset_config)
+        if removed:
+            print(f"Deleted preset → {removed}")
+            return 0
+        print(f"error: no such preset: {args.reset_config}", file=sys.stderr)
+        return 1
+
+    # --reset-opml: forget the remembered OPML source and exit.
+    if getattr(args, "reset_opml", False):
+        if _reset_remembered_opml():
+            print("Forgot the remembered OPML source.")
+        else:
+            print("No remembered OPML source to clear.")
         return 0
 
     # --config NAME / --config path/to.yaml: load YAML and overlay onto args
@@ -5021,19 +5120,34 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     """Execute the opml subcommand.
 
     `args.path` may point at:
-      - a single .opml file (the historical behavior), or
-      - a directory containing one or more .opml files (new): every
-        top-level *.opml is loaded and its feeds are merged into a single
-        run.
+      - a single .opml file (the historical behavior),
+      - a directory containing one or more .opml files (every top-level
+        *.opml is loaded and merged into a single run), or
+      - nothing, in which case a previously-remembered OPML source
+        (--remember-opml on an earlier run, or a YAML `remember_opml`)
+        is reused.
 
-    Bad paths (missing / empty directory) raise OpmlError, which we surface
-    as a friendly stderr message and a non-zero exit code instead of a
-    traceback.
+    Bad / missing paths raise OpmlError, surfaced as a friendly stderr
+    message + non-zero exit code instead of a traceback. When
+    --remember-opml (or remember_opml: true in YAML) is set, the resolved
+    source is persisted at the end of a successful run.
     """
     import feedparser
 
+    opml_source: Path | None = args.path
+    if opml_source is None:
+        opml_source = _load_remembered_opml()
+        if opml_source is None:
+            _log.error(
+                "No OPML path given and nothing remembered. Provide a path "
+                "(file or directory of *.opml), or run once with "
+                "--remember-opml so a later bare `opml` can reuse it."
+            )
+            return 1
+        _log.info("Reusing remembered OPML source: %s", opml_source)
+
     try:
-        opml_files = _collect_opml_files(args.path)
+        opml_files = _collect_opml_files(opml_source)
     except OpmlError as exc:
         _log.error(str(exc))
         return 1
@@ -5093,7 +5207,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
 
     metadata = {
         "version": VERSION,
-        "args": f"opml {args.path}",
+        "args": f"opml {opml_source}",
         "sources": sources,
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
@@ -5107,6 +5221,15 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     output_paths = _output(enriched, args, metadata, iocs=iocs)
     _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
+
+    # OPML persistence: only after a fully successful run, so a failed
+    # fetch doesn't pin a bad source for next time.
+    if getattr(args, "remember_opml", False):
+        try:
+            state = _save_remembered_opml(opml_source)
+            _log.info("Remembered OPML source for next run → %s", state)
+        except OSError as exc:
+            _log.warning("Could not persist remembered OPML: %s", exc)
     return 0
 
 

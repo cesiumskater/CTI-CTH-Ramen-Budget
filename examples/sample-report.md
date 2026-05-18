@@ -1,181 +1,119 @@
 # Ramen CVE Triage Report
 
-Generated: 2026-05-03 22:47 UTC  
-Total CVEs: **15**  
+Generated: 2026-05-18 13:30 UTC  
+Total CVEs: **3**  
+Total IOCs: **2** (2 defanged in source)  
 CVSS threshold: `7.0`  
 EPSS threshold: `0.1`  
 
 ## Sources
 
+- SANS ISC
 - Krebs on Security
-- CISA Alerts
-- abuse.ch Blog
-- BleepingComputer
+- Vendor Blog
 
 ## Summary
 
 | Bucket | Count | Action |
 | --- | --- | --- |
-| KEV Override (Patch Immediately) | 5 | CISA KEV listed; exploitation confirmed in the wild. |
-| Patch Now | 0 | high CVSS and high EPSS; likely exploitable and high impact. |
+| KEV Override (Patch Immediately) | 1 | CISA KEV listed; exploitation confirmed in the wild. |
+| Patch Now | 1 | high CVSS and high EPSS; likely exploitable and high impact. |
 | Watch Closely | 0 | low CVSS but high EPSS; active exploitation of a lower-impact flaw. |
-| Plan and Patch | 10 | high CVSS but low EPSS; exploit unlikely but impact severe. |
-| Deprioritize | 0 | low severity and low exploitation probability. |
+| Plan and Patch | 0 | high CVSS but low EPSS; exploit unlikely but impact severe. |
+| Deprioritize | 1 | low severity and low exploitation probability. |
 | Unknown / Insufficient Data | 0 | Insufficient data; manual review required. |
+
+## By ATT&CK Technique
+
+| Technique | Name | CVEs |
+| --- | --- | --- |
+| T1059 | Command and Scripting Interpreter | 1 |
+| T1083 | File and Directory Discovery | 1 |
+| T1090 | Proxy | 1 |
+| T1190 | Exploit Public-Facing Application | 2 |
+
+## Affected in Your Environment
+
+| Host | CVEs |
+| --- | --- |
+| mail-01 | 1 |
+| web-prod-03 | 1 |
+| web-prod-04 | 1 |
+
+## Linked Adversaries
+
+| Actor | CVEs | Sectors Targeted |
+| --- | --- | --- |
+| APT41 | 1 | financial, healthcare, technology |
+| HAFNIUM | 2 | defense, government |
 
 ## KEV Override (Patch Immediately)
 
-### CVE-2023-1389
+### CVE-2021-44228
 
 **Action:** Patch immediately — CISA KEV listed; exploitation confirmed in the wild.
 
-- **CVSS:** 8.8 (HIGH)
-- **EPSS:** 0.9347 (0.9983 pct)
-- **CWE:** CWE-77, CWE-77
-- **NVD Published:** 2023-03-15
-- **Source:** Krebs on Security
+- **CVSS:** 10.0 (CRITICAL)
+- **EPSS:** 0.9757 (0.9997 pct)
+- **CWE:** CWE-502
+- **ATT&CK:** T1059 (Command and Scripting Interpreter), T1190 (Exploit Public-Facing Application)
+- **Exploit Status:** `exploit_db`
+- **Linked Actors:** APT41, HAFNIUM
+- **Linked Malware:** Cobalt Strike
+- **Provenance:** TLP:AMBER · Admiralty B2
+- **Affected in your environment:** 2 host(s) — web-prod-03, web-prod-04
+- **Diamond Model:** Adversary=APT41 · Capability=exploit (CWE-502, T1190) · Infrastructure=*unknown infrastructure* · Victim=2 inventory host(s) · Kill Chain=exploitation
+- **NVD Published:** 2021-12-10
+- **CISA KEV — Affected:** Apache Log4j2
+- **CISA KEV — Due Date:** 2021-12-24 (OVERDUE)
+- **CISA KEV — Ransomware Use:** Known
+- **CISA KEV — Description:** Apache Log4j2 deserialization-of-untrusted-data RCE.
+- **Source:** SANS ISC
 
-### CVE-2026-32201
+## Patch Now
 
-**Action:** Patch immediately — CISA KEV listed; exploitation confirmed in the wild.
+### CVE-2021-26855
 
-- **CVSS:** 6.5 (MEDIUM)
-- **EPSS:** 0.0794 (0.9207 pct)
-- **CWE:** CWE-20
-- **NVD Published:** 2026-04-14
-- **Source:** Krebs on Security
-
-### CVE-2026-34621
-
-**Action:** Patch immediately — CISA KEV listed; exploitation confirmed in the wild.
-
-- **CVSS:** 8.6 (HIGH)
-- **EPSS:** 0.0959 (0.9289 pct)
-- **CWE:** CWE-1321
-- **NVD Published:** 2026-04-11
-- **Source:** Krebs on Security
-
-### CVE-2026-5281
-
-**Action:** Patch immediately — CISA KEV listed; exploitation confirmed in the wild.
-
-- **CVSS:** 8.8 (HIGH)
-- **EPSS:** 0.0087 (0.7526 pct)
-- **CWE:** CWE-416
-- **NVD Published:** 2026-04-01
-- **Source:** Krebs on Security
-
-### CVE-2026-41940
-
-**Action:** Patch immediately — CISA KEV listed; exploitation confirmed in the wild.
+**Action:** Patch now — high CVSS and high EPSS; likely exploitable and high impact.
 
 - **CVSS:** 9.8 (CRITICAL)
-- **EPSS:** 0.2836 (0.9653 pct)
-- **CWE:** CWE-306
-- **NVD Published:** 2026-04-29
-- **Source:** BleepingComputer
-
-## Plan and Patch
-
-### CVE-2026-33825
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0395 (0.8839 pct)
-- **CWE:** CWE-1220
-- **NVD Published:** 2026-04-14
+- **EPSS:** 0.9432 (0.9901 pct)
+- **CWE:** CWE-918
+- **ATT&CK:** T1090 (Proxy), T1190 (Exploit Public-Facing Application)
+- **Exploit Status:** `nuclei_template`
+- **Linked Actors:** HAFNIUM
+- **Linked Malware:** China Chopper
+- **Provenance:** TLP:GREEN · Admiralty A2
+- **Affected in your environment:** 1 host(s) — mail-01
+- **Diamond Model:** Adversary=HAFNIUM · Capability=capability · Infrastructure=*unknown infrastructure* · Victim=1 inventory host(s) · Kill Chain=exploitation
+- **NVD Published:** 2021-03-02
+- **CISA KEV — Affected:** Microsoft Exchange Server
+- **CISA KEV — Due Date:** 2021-03-16 (OVERDUE)
+- **CISA KEV — Description:** Microsoft Exchange Server SSRF (ProxyLogon).
 - **Source:** Krebs on Security
 
-### CVE-2026-21262
+## Deprioritize
 
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
+### CVE-2024-0001
 
-- **CVSS:** 8.8 (HIGH)
-- **EPSS:** 0.0010 (0.2755 pct)
-- **CWE:** CWE-284
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
+**Action:** Deprioritize — low severity and low exploitation probability.
 
-### CVE-2026-26127
+- **CVSS:** 4.3 (MEDIUM)
+- **EPSS:** 0.0004 (0.0700 pct)
+- **CWE:** CWE-200
+- **ATT&CK:** T1083 (File and Directory Discovery)
+- **NVD Published:** 2024-01-05
+- **Source:** Vendor Blog
 
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
+## Indicators of Compromise
 
-- **CVSS:** 7.5 (HIGH)
-- **EPSS:** 0.0013 (0.3195 pct)
-- **CWE:** CWE-125
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
+### URLs (1)
 
-### CVE-2026-26113
+- `https://evil.example.com` *(defanged in source)*
 
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
+### SHA-256 Hashes (1)
 
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0003 (0.0749 pct)
-- **CWE:** CWE-822, NVD-CWE-Other
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-26110
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0007 (0.2135 pct)
-- **CWE:** CWE-843
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-24291
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0007 (0.2192 pct)
-- **CWE:** CWE-732
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-24294
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0005 (0.1510 pct)
-- **CWE:** CWE-287
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-24289
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0004 (0.1226 pct)
-- **CWE:** CWE-416
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-25187
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 7.8 (HIGH)
-- **EPSS:** 0.0006 (0.1930 pct)
-- **CWE:** CWE-59
-- **NVD Published:** 2026-03-10
-- **Source:** Krebs on Security
-
-### CVE-2026-21536
-
-**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
-
-- **CVSS:** 9.8 (CRITICAL)
-- **EPSS:** 0.0163 (0.8196 pct)
-- **CWE:** CWE-434
-- **NVD Published:** 2026-03-05
-- **Source:** Krebs on Security
+- `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` *(defanged in source)*
 
 ---
 
