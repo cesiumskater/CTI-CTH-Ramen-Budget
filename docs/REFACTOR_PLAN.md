@@ -291,3 +291,12 @@ growth and is optimistic for the zero-behavior-change rigor required.
   the 3 private (`_DEFANG_MAP/_DEFANG_DETECT/_FILE_EXT_TLDS`). Verified:
   `import ramen_cve` ok; `DEFAULT_DATA_DIR` byte-identical (Risk 5.5
   confirmed); 463 passed; ruff clean (isort autofix on new block). ✅
+- **Step 2/26 — `models.py`:** `OpmlError` + 10 dataclasses →
+  `models.py` (308 LOC). **Plan refinement** (logged per §4): `_utcnow`
+  moved into `models.py` (its lowest consumer — `EnrichedCve`
+  default_factory) instead of `analyze.py`; `BUCKET_ACTIONS` moved into
+  `constants.py` (it is a static lookup table, evaluated at
+  `EnrichedCve` class-def time → must be an L0 import). Facade
+  re-exports relocated to the top import group (avoids E402); dropped
+  now-unused `dataclasses`/`timezone` imports from `__init__`. `__init__`
+  5858→5566. 463 passed, ruff clean, EnrichedCve build verified. ✅

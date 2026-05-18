@@ -212,3 +212,17 @@ ATTACK_TECHNIQUE_NAMES: dict[str, str] = {
     "T1566.002": "Phishing: Spearphishing Link",
     "T1574.001": "Hijack Execution Flow: DLL Search Order Hijacking",
 }
+
+
+BUCKET_ACTIONS: dict[str, str] = {
+    "kev_override": ("Patch immediately — CISA KEV listed; exploitation confirmed in the wild."),
+    "patch_now": "Patch now — high CVSS and high EPSS; likely exploitable and high impact.",
+    "plan_and_patch": (
+        "Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe."
+    ),
+    "watch_closely": (
+        "Watch closely — low CVSS but high EPSS; active exploitation of a lower-impact flaw."
+    ),
+    "deprioritize": "Deprioritize — low severity and low exploitation probability.",
+    "unknown": "Insufficient data; manual review required.",
+}
