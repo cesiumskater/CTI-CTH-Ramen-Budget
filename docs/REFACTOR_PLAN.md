@@ -317,3 +317,12 @@ growth and is optimistic for the zero-behavior-change rigor required.
   invariant §5.6). Removed now-unused `sqlite3`/`datetime`/`timedelta`
   from `__init__` (§5.7). `__init__` 5566→5301. 463 passed, ruff
   clean, Cache round-trip + corrupt-timestamp path verified. ✅
+- **Step 4/26 — `analyze.py`:** 3 non-contiguous regions (CWE→ATT&CK /
+  →Kill-Chain mappers incl. their `KILL_CHAIN_PHASES`/`CWE_TO_KILL_CHAIN`
+  constants; TLP/Admiralty math; `bucket_and_suggest`+`filter_by_date`)
+  → `analyze.py` (199 LOC, L1; own `_log`). `_log` global stayed in
+  `__init__`. **Near-miss:** first attempt anchored the slice end on
+  `def write_iocs_csv` and swept the output `CSV_COLUMNS`/`IOC_CSV_COLUMNS`
+  constants in → 33 failures; reverted (`git checkout --`) and redid with
+  end anchor `CSV_COLUMNS = [` + a slice-purity assertion (lesson logged).
+  `__init__` 5301→5138. 463 passed, ruff clean. ✅

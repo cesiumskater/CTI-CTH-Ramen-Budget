@@ -13,3 +13,16 @@ Format: short failure mode + detection signal + prevention rule.
   `_log = logging.getLogger(__name__)`. After each split step also clear
   ruff `F401` for stdlib imports the moved code solely consumed. Recorded
   as REFACTOR_PLAN §5.6 / §5.7; check at every step.
+
+## 2026-05-18 — split: slice end anchored on "next def" swept a constant
+- **Failure mode:** Step 4's `bucket/filter` slice used `[bucket_and_suggest
+  : write_iocs_csv)`; the `CSV_COLUMNS`/`IOC_CSV_COLUMNS` output constants
+  sit *between* `filter_by_date` and `write_iocs_csv`, so they leaked into
+  analyze.py → 33 failures (`NameError: CSV_COLUMNS`).
+- **Detection:** ruff `F821` + pytest; the pre-write
+  `assert not any(... in slice)` guard now catches it before write.
+- **Prevention:** a slice END must be the first line of the next section
+  that *stays* (constant/banner/def — verify by reading), never blindly
+  "the next def". Always assert the slice contains no foreign top-level
+  names. Revert uncommitted state with `git checkout --` + `rm` and redo
+  rather than surgically un-leaking.
