@@ -281,6 +281,13 @@ growth and is optimistic for the zero-behavior-change rigor required.
 ## Execution Log (live ledger — append per step)
 
 - **Step 0 (prep):** branch `claude/refactor-monolith-split` cut @
-  `8d048f2`. This plan rewritten (false claims corrected). CI workflow,
-  `tests/test_facade.py` (surface + patch-contract), and `todo.md`
-  correction added. _Pending: commit + push + draft PR, then Step 1._
+  `8d048f2`. Plan rewritten (false claims corrected). CI workflow,
+  `tests/test_facade.py` (surface + patch-contract), `todo.md`
+  correction. Draft PR #18. 463 passed, ruff clean. ✅
+- **Step 1/26 — `constants.py`:** moved `__init__.py:66-267` (regexes,
+  CWE/ATT&CK tables, all `DEFAULT_*`, `*_STATUSES`, defang map) verbatim
+  into the Layer-0 `constants.py` leaf (214 LOC); `__init__` 6020→5858,
+  explicit `from .constants import (…)` re-export of all 36 names incl.
+  the 3 private (`_DEFANG_MAP/_DEFANG_DETECT/_FILE_EXT_TLDS`). Verified:
+  `import ramen_cve` ok; `DEFAULT_DATA_DIR` byte-identical (Risk 5.5
+  confirmed); 463 passed; ruff clean (isort autofix on new block). ✅
