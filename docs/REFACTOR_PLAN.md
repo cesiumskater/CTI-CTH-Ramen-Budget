@@ -337,3 +337,10 @@ growth and is optimistic for the zero-behavior-change rigor required.
   autofix F401 in package `__init__`). `__init__` 5136→4925. 463 passed,
   ruff clean. Pre-extraction interstitial-constant checklist added to
   lessons.md (now mandatory). ✅
+- **Step 6/26 — `decay.py`:** clean single contiguous block
+  (`IOC_HALF_LIFE_DAYS` + `_ioc_confidence` + `apply_ioc_decay` +
+  `filter_iocs_by_confidence`) → `decay.py` (66 LOC, L1; deps: `math`,
+  `datetime.date`, `models.IocRecord`; no `_log`). Pre-write purity
+  assertions (`consts==["IOC_HALF_LIFE_DAYS"]`, `defs==[...]`) passed
+  first try — **no near-miss** (checklist working). Hand-pruned now-unused
+  `math` from `__init__`. `__init__` 4925→4876. 463 passed, ruff clean. ✅
