@@ -74,3 +74,27 @@ Format: short failure mode + detection signal + prevention rule.
      import-compat smoke. Commit code+test-path edits together.
 - Also: enumerate real stdlib refs with `\b(\w+)\.` then filter to known
   stdlib (caught the missed `urllib.parse`/`contextlib` in keyring).
+
+## 2026-05-18 — §5.7 pruning broke a monkeypatch SEAM (`import time`)
+- **Failure mode (Step 8):** after moving the NVD fetcher, `import time`
+  had no `time.` use left in `__init__`, so ruff F401 flagged it and I
+  removed it (§5.7). The full suite went 463→**28 failed**: ~26 tests do
+  `patch("ramen_cve.time.sleep")`; deleting `import time` removed the
+  `ramen_cve.time` attribute → every such patch raised AttributeError.
+- **Detection:** stop-the-line — suite was 463 green *before* the prune
+  and broke *only* on the prune.
+- **Root cause:** a re-exported/imported name can be unused by the
+  package's own code yet REQUIRED as a patchable attribute by the test
+  contract. F401 is blind to monkeypatch seams.
+- **Prevention (amends §5.7):** before pruning any "now-unused" import in
+  `__init__`, grep tests for `patch("ramen_cve.<name>"` /
+  `setattr(ramen_cve, "<name>"`. If patched anywhere, KEEP it with
+  `# noqa: F401  # monkeypatch seam` + a one-line why. Known seams:
+  `requests`, `time`. (Steps 5/6 prunes of `math`/`ipaddress`/`ET` were
+  safe — none are patch targets; re-confirmed by green suites.)
+- **Bonus finding:** the feared ~69 requests/time repoints did NOT
+  materialise for Step 8 — the NVD/EPSS/KEV tests mock via Cache fixtures
+  / higher-level patches (e.g. `patch("ramen_cve.fetch_nvd")`), which
+  survive the move. Lesson: don't pre-repoint by gu…ng; extract, run the
+  full suite, repoint ONLY the tests that actually fail (deterministic
+  signal over speculative classification).

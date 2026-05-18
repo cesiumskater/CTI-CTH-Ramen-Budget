@@ -355,3 +355,17 @@ growth and is optimistic for the zero-behavior-change rigor required.
   assertions (`consts==["IOC_HALF_LIFE_DAYS"]`, `defs==[...]`) passed
   first try — **no near-miss** (checklist working). Hand-pruned now-unused
   `math` from `__init__`. `__init__` 4925→4876. 463 passed, ruff clean. ✅
+- **Step 7/26 — `keyring.py`:** API-key bootstrap + redaction (stdlib
+  leaf). Triggered the monkeypatch-seam RE-PLAN (Amendment above); 4
+  `test_api_key_prompt.py` tests repointed to `ramen_cve.keyring.*`.
+  `__init__` 4875→4754. 463 passed, ruff clean. ✅
+- **Step 8/26 — `enrich/{nvd,epss,kev}.py`:** HTTP fetchers → new
+  `enrich/` subpackage (L2; own `_log`; `..cache`/`..constants`/
+  `..keyring` rel-imports). User chose plan-literal per-fetcher. **Zero
+  test repoints needed** — NVD/EPSS/KEV tests mock via Cache fixtures /
+  higher-level patches that survive the move (50 fetcher tests, 0.29s,
+  no real network). **Near-miss:** §5.7-pruning `import time` (F401, no
+  `time.` left in `__init__`) deleted the `ramen_cve.time` monkeypatch
+  attribute → 28 failures; restored as `import time  # noqa: F401
+  # monkeypatch seam`. §5.7 amended in lessons.md. `__init__`
+  4754→4535 (nvd 148 / epss 68 / kev 47). 463 passed, ruff clean. ✅
