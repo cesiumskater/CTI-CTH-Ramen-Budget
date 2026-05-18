@@ -98,3 +98,19 @@ Format: short failure mode + detection signal + prevention rule.
   survive the move. Lesson: don't pre-repoint by gu…ng; extract, run the
   full suite, repoint ONLY the tests that actually fail (deterministic
   signal over speculative classification).
+
+## 2026-05-18 — Step 9: logger-NAME coupling (one isolated test)
+- **Failure mode:** `test_parse_kev_due_date_handles_malformed` patches
+  `logging.getLogger("ramen_cve").warning` and asserts the message is
+  captured. Moved `_parse_kev_due_date` now logs via the
+  `ramen_cve.associations` child logger; monkeypatching the parent's
+  `.warning` does NOT intercept child calls (propagation is handler-level,
+  not method-level) → assertion False.
+- **Detection:** stop-the-line, 462/463.
+- **Fix:** repoint the logger name to `"ramen_cve.associations"` — same
+  repoint principle (only the *locator* string changes; input
+  `"not-a-date"` and expected `"unparseable dueDate"` untouched).
+- **Scope:** grep showed exactly ONE `getLogger("ramen_cve")` test in the
+  whole suite — isolated, not systemic. Add to per-step checklist: after
+  extracting, also grep tests for `getLogger("ramen_cve")` and repoint any
+  that exercise moved logging to `"ramen_cve.<newmod>"`.

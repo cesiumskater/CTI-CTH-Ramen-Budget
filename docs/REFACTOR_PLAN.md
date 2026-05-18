@@ -369,3 +369,10 @@ growth and is optimistic for the zero-behavior-change rigor required.
   attribute → 28 failures; restored as `import time  # noqa: F401
   # monkeypatch seam`. §5.7 amended in lessons.md. `__init__`
   4754→4535 (nvd 148 / epss 68 / kev 47). 463 passed, ruff clean. ✅
+- **Step 9/26 — `associations.py`:** `_build_actor/_campaign/_malware`,
+  `load_associations`, `_parse_kev_due_date` → `associations.py` (87 LOC,
+  L1.5 local-JSON, own `_log`; deps constants+models). **Near-miss:** one
+  isolated test patched `getLogger("ramen_cve").warning`; moved code logs
+  via the `ramen_cve.associations` child → repointed the logger name
+  (behavior-preserving). Only 1 such test in the suite. `__init__`
+  4535→4473. 463 passed, ruff clean. ✅
