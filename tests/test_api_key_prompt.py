@@ -102,7 +102,7 @@ def test_prompt_returns_none_when_non_interactive():
     """In a non-TTY context (CI, piped input), the prompt should return None."""
     import ramen_cve
 
-    with patch("ramen_cve._is_interactive", return_value=False):
+    with patch("ramen_cve.keyring._is_interactive", return_value=False):
         assert ramen_cve._prompt_for_api_key() is None
         assert ramen_cve._prompt_for_api_key(reason="expired") is None
 
@@ -117,7 +117,7 @@ def test_prompt_enter_key_saves_to_env(tmp_path, monkeypatch):
     import ramen_cve
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(ramen_cve, "ENV_FILE_PATH", tmp_path / ".env")
+    monkeypatch.setattr(ramen_cve.keyring, "ENV_FILE_PATH", tmp_path / ".env")
 
     fake_q = MagicMock()
     enter_choice = MagicMock()
@@ -129,7 +129,7 @@ def test_prompt_enter_key_saves_to_env(tmp_path, monkeypatch):
     fake_q.Choice.side_effect = lambda label, value=None: value if value is not None else label
 
     with (
-        patch("ramen_cve._is_interactive", return_value=True),
+        patch("ramen_cve.keyring._is_interactive", return_value=True),
         patch.dict("sys.modules", {"questionary": fake_q}),
     ):
         key = ramen_cve._prompt_for_api_key(reason="missing")
@@ -143,7 +143,7 @@ def test_prompt_skip_returns_none(tmp_path, monkeypatch):
     """User picks 'skip' → no key saved, returns None."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "ENV_FILE_PATH", tmp_path / ".env")
+    monkeypatch.setattr(ramen_cve.keyring, "ENV_FILE_PATH", tmp_path / ".env")
 
     fake_q = MagicMock()
     skip_choice = MagicMock()
@@ -152,7 +152,7 @@ def test_prompt_skip_returns_none(tmp_path, monkeypatch):
     fake_q.Choice.side_effect = lambda label, value=None: value if value is not None else label
 
     with (
-        patch("ramen_cve._is_interactive", return_value=True),
+        patch("ramen_cve.keyring._is_interactive", return_value=True),
         patch.dict("sys.modules", {"questionary": fake_q}),
     ):
         key = ramen_cve._prompt_for_api_key(reason="missing")
@@ -165,14 +165,14 @@ def test_prompt_keyboard_interrupt_returns_none(tmp_path, monkeypatch):
     """Ctrl-C during the prompt returns None instead of bubbling the exception."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "ENV_FILE_PATH", tmp_path / ".env")
+    monkeypatch.setattr(ramen_cve.keyring, "ENV_FILE_PATH", tmp_path / ".env")
 
     fake_q = MagicMock()
     fake_q.select.side_effect = KeyboardInterrupt()
     fake_q.Choice.side_effect = lambda label, value=None: value if value is not None else label
 
     with (
-        patch("ramen_cve._is_interactive", return_value=True),
+        patch("ramen_cve.keyring._is_interactive", return_value=True),
         patch.dict("sys.modules", {"questionary": fake_q}),
     ):
         assert ramen_cve._prompt_for_api_key() is None

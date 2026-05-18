@@ -43,3 +43,34 @@ Format: short failure mode + detection signal + prevention rule.
 - Also: `ruff --fix` does NOT auto-remove F401 in `__init__.py` (treats
   unused imports as intentional re-exports) — prune moved stdlib imports
   there *by hand* (§5.7), then re-run full ruff to confirm.
+
+## 2026-05-18 — RE-PLAN: facade re-export ≠ monkeypatch-observable
+- **Failure mode (Step 7 keyring):** moved code binds its *own* module
+  globals, so `patch("ramen_cve.requests" / ".time" / "._is_interactive")`
+  and `monkeypatch.setattr(ramen_cve, "DEFAULT_*", …)` are NOT observed by
+  the moved function (it calls the submodule-local name). 1 keyring test
+  failed; scope scan showed it is systemic: `ramen_cve.requests` ×52,
+  `ramen_cve.time` ×26, `DEFAULT_PRESETS_DIR`/`_LAST_OPML_PATH`/
+  `_CACHE_PATH` ×21, `_is_interactive` ×5, `ENV_FILE_PATH` ×3, plus
+  `_run_wizard`/`_run_cve`/`_maybe_dispatch`/`_prompt_for_api_key` — ~90
+  sites concentrated in the network/IO steps still ahead.
+- **Detection:** stop-the-line on the first IO-ish move (keyring).
+- **Decision (user):** *repoint patch targets to the new module paths*
+  (e.g. `patch("ramen_cve.net.requests")`, `monkeypatch.setattr(
+  ramen_cve.keyring, "ENV_FILE_PATH", …)`). This is **behavior-preserving**:
+  only the patch *location string* changes — never inputs, assertions, or
+  expected values. Facade still re-exports every symbol so non-patching
+  call sites (`import ramen_cve; ramen_cve.X`) are unaffected.
+- **Prevention / revised per-step procedure (MANDATORY):**
+  1. Extract slice (proven script) + facade re-export, as before.
+  2. A `patch("ramen_cve.X")` is still observed by callers whose code
+     remains in `__init__` (they use the package namespace); only repoint
+     tests whose *function under test* now lives in the submodule.
+  3. For each moved symbol, grep tests for `patch("ramen_cve.<sym>"`,
+     `monkeypatch.setattr(ramen_cve, "<sym>"`, and (if the moved fn does
+     network/sleep) `ramen_cve.requests`/`ramen_cve.time`; repoint the
+     exercising sites to `ramen_cve.<newmod>.<sym>`. Change ONLY the path.
+  4. Verify: ruff clean, F821 sweep on new module, FULL pytest green,
+     import-compat smoke. Commit code+test-path edits together.
+- Also: enumerate real stdlib refs with `\b(\w+)\.` then filter to known
+  stdlib (caught the missed `urllib.parse`/`contextlib` in keyring).

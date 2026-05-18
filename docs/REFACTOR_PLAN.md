@@ -39,6 +39,17 @@ Second correction: there are **no `# region:` markers** in the monolith
 navigation index at `src/ramen_cve/__init__.py:9-43`, which the target
 structure below intentionally matches.
 
+**Amendment (2026-05-18, after Step 7 stop-the-line):** facade re-export
+preserves attribute *access* but NOT monkeypatch *observability* — moved
+code binds its own module globals. Per user decision, tests that
+`patch("ramen_cve.<collaborator>")` / `monkeypatch.setattr(ramen_cve,
+"<x>", …)` for a symbol whose function moved are **repointed to the new
+module path** (`ramen_cve.<newmod>.<x>`). Behavior-preserving: only the
+patch location string changes; inputs/assertions/expected values are
+never touched. Submodules therefore `import requests`/`time` normally
+(no facade back-reference) — acyclic layering is preserved. Per-step
+procedure in tasks/lessons.md (2026-05-18 RE-PLAN entry).
+
 Open questions from the plan are resolved: the 5 subprocess tests invoke
 the stable `threat_intel_hunter.py` entry (facade-safe); there is no
 traceback/module-path assertion coupling; the lone `ramen_cve.py` literal
