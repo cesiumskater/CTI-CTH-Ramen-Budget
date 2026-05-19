@@ -540,3 +540,13 @@ growth and is optimistic for the zero-behavior-change rigor required.
   added contextlib + datetime.date. Full 5-name surface re-exported
   (L3). Clean-room + dual-F821: 463 passed, ruff clean. __init__
   2289→2197. ✅
+- **Step 26/26 — `schedule.py`:** `_parse_schedule_time`/
+  `_entry_script_path`/`_build_schedule_command`/`_emit_windows_task_xml`/
+  `_quote_for_task_scheduler`/`_emit_cron_line`/`_run_schedule` → L4
+  (`[_parse_schedule_time:_run_stix)`, 150 lines), self-contained
+  runner. Deps Cache + argparse/logging/sys/Path; F821-added
+  DEFAULT_CONFIG_DIR←constants + datetime.date. Full 7-name surface
+  re-exported (L3). L5 proactive __init__-F401 check: none. Clean-room
+  + dual-F821: 463 passed, ruff clean. __init__ 2197→2055. ✅
+  (NB: my finer-grained ledger # exceeds the plan's 26-row table;
+  remaining post-26: cliutil/config/wizard/pipeline/cli + finalize.)

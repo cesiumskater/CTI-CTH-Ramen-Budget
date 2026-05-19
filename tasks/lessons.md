@@ -114,3 +114,25 @@ rule. Reviewed at session start and before major refactors (per
   eyeballing a frozen committed sample. On an oracle "drift" alert,
   **localize before reverting** (Triage: Reproduce→Localize→Reduce):
   diff actual content; only a non-volatile delta is real drift.
+
+---
+
+## L5 — Whole-tree ruff (incl. Risk 5.7 dead stdlib import) is a BLOCKING gate; prune in the same commit
+
+- **Failure mode:** Step 25 (`audit.py`) moved the last consumer of
+  `contextlib`; `__init__`'s top-level `import contextlib` went
+  F401-dead (Risk 5.7). The multi-command verify printed local-ruff
+  "All checks passed!" *then* clean-room "Found 1 error", but the
+  commit+push proceeded anyway — a step landed with a red whole-tree
+  ruff, needing a follow-up fix commit.
+- **Detection signal:** `ruff check threat_intel_hunter.py conftest.py
+  src/ tests/` reports `F401 <stdlib> imported but unused` in
+  `__init__.py` after an extraction that was that import's last user.
+- **Prevention rule:** The per-step blocking gate is *every* check
+  green: clean-room `pytest` (463) **and** whole-tree clean-room
+  `ruff` **and** new-module+`__init__` F821 **and** golden oracle.
+  Parse *all* results; never `git commit` until the last one is
+  confirmed green. After each extraction, proactively run
+  `ruff __init__.py --select F401`, and prune any now-dead stdlib
+  import **in the same commit** (verify single occurrence + not a
+  monkeypatch seam: `0 patch("ramen_cve.<mod>")`).
