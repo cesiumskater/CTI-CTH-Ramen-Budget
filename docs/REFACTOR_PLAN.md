@@ -503,3 +503,13 @@ growth and is optimistic for the zero-behavior-change rigor required.
   16–20) is provably **zero behavior change**. 463 passed, ruff/F821
   clean. `__init__` 3007→2697 (**−310; ~55% off the 6020 baseline**).
   `output/` package COMPLETE. ✅
+- **Step 21/26 — `dispatch/digest.py`:** `_group_records_by_owner`/
+  `_build_digest_body`/`_maybe_digest` → L3 (`[_group_records_by_owner:
+  _maybe_correlate_inventory)`, 131 lines). Deps: EnrichedCve←models,
+  sibling `EmailDispatcher`+`DISPATCH_DEFAULT_BUCKETS`←`.sinks`. F821
+  caught grep-missed `DISPATCH_DEFAULT_BUCKETS` + stdlib `argparse`;
+  ruff pruned unused `date`. Full 3-name surface re-exported (L3).
+  Verification = clean-room repro (py3.10) + dual F821 + golden
+  oracle: 463 passed, ruff clean, zero drift (CSV 3fd1ac95, MD
+  e9779ffc), facade resolves. `dispatch/` pkg COMPLETE. `__init__`
+  2697→2571 (−126). ✅
