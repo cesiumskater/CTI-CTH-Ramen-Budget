@@ -488,3 +488,18 @@ growth and is optimistic for the zero-behavior-change rigor required.
   (normalise CSV `enriched_at` ISO-TS + MD `Generated:`): **post-18 ==
   post-19 byte-identical** (CSV `3fd1ac95`, MD `e9779ffc`). 463 passed,
   ruff/F821 clean. `__init__` 3089→3007 (−82). ✅
+- **Step 20/26 — `output/markdown.py`** (golden-diff milestone, pt 2 —
+  **CHECKPOINT PASSED**): `BUCKET_ORDER`/`BUCKET_DISPLAY`/
+  `IOC_TYPE_DISPLAY`/`IOC_TYPE_ORDER` + `_md_safe`/
+  `_summarize_enrichment`/`write_markdown` → L3 (319-line block
+  `[BUCKET_ORDER:VERSION)`). Deps: EnrichedCve/IocRecord/`_utcnow`←
+  models, re/date/Path. F821 caught 4 grep-missed `constants` symbols
+  (`ATTACK_TECHNIQUE_NAMES`, `BUCKET_ACTIONS`, `DEFAULT_CVSS_THRESHOLD`,
+  `DEFAULT_EPSS_THRESHOLD` — report renders thresholds/ATT&CK names) →
+  added. Full 7-name surface re-exported (L3); `__init__` F821 clean.
+  **Golden byte-oracle: post-Step-20 == post-Step-18 byte-identical**
+  (CSV `3fd1ac95`, MD `e9779ffc`, 1069 B / 79 lines) ⇒ the whole
+  `output/` extraction (stix+sigma+yara+csv_writer+markdown, Steps
+  16–20) is provably **zero behavior change**. 463 passed, ruff/F821
+  clean. `__init__` 3007→2697 (**−310; ~55% off the 6020 baseline**).
+  `output/` package COMPLETE. ✅
