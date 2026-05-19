@@ -558,3 +558,16 @@ growth and is optimistic for the zero-behavior-change rigor required.
   — F821 clean first try. Full 7-name surface re-exported (L3). L5
   F401: none. Clean-room + dual-F821: 463 passed, ruff clean.
   __init__ 2055→1949 (**<2000; ~68% off the 6020 baseline**). ✅
+- **Step 28 — `config.py`** (plan-row 19b): 12 YAML/remembered-OPML fns
+  + `_YAML_FLAT_KEY_MAP` → L4 (`[_resolve_config_path:_shared_flags)`,
+  299 lines). Deps: yaml/json/os/argparse/date/Path; F821-added
+  DEFAULT_PRESETS_DIR/DEFAULT_LAST_OPML_PATH←constants, sibling
+  `_parse_iso_date`/`_strip_path_quotes`←cliutil, `_utcnow`←models.
+  **Monkeypatch-repoint (plan Amendment):** 13 failures —
+  `monkeypatch.setattr(ramen_cve,"DEFAULT_PRESETS_DIR"/"DEFAULT_LAST_OPML_PATH")`
+  no longer reached config.py's bound copies; repointed **16 sites**
+  in test_ramen_cve.py → `ramen_cve.config` (behaviour-preserving,
+  only patch-target module changed). L5: pruned now-dead `import json`
+  from __init__ + I001 autofix. Clean-room + dual-F821 + golden:
+  463 passed, ruff clean, CSV/MD byte-identical to anchor. __init__
+  1949→1662. ✅
