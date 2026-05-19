@@ -611,3 +611,28 @@ growth and is optimistic for the zero-behavior-change rigor required.
   smoke (`python -m ramen_cve`, `threat_intel_hunter.py`): 463 passed,
   ruff clean, zero drift. **`__init__` 1181→~250 (pure facade;
   6020→~250 ≈ 96% off baseline).** ✅
+- **Step 32 — finalize façade** (plan-row 25): replaced the now-false
+  41-line "navigation index … when the single-file design is split up"
+  module docstring with an accurate 10-line *pure-façade* docstring
+  (no test asserts `__doc__`). Added a **locked `__all__`** (219 names,
+  generated from the re-export blocks, one-per-line; F822-verified
+  every entry resolves; `from ramen_cve import *` → 219). `_log`
+  retained (preserved façade attribute per L3, not dead code). Manual
+  smoke re-confirmed offline: `python -m ramen_cve --help`,
+  `threat_intel_hunter.py --list-configs`. Clean-room + F821/F822(all)
+  + golden: 463 passed, ruff clean, CSV/MD byte-identical to anchor. ✅
+- **Step 33 — doc/script audit** (plan-row 26): grep for stale
+  `ramen_cve.py` literals → remaining hits are **pre-existing
+  user-facing copy** (`cli.py` argparse help "dirs next to
+  ramen_cve.py", `constants.py` comment, README/PKG-INFO marketing).
+  Rewriting help text changes `--help` output ⇒ a behaviour change,
+  **out of scope** for a zero-behaviour-change refactor (CLAUDE.md
+  scope-creep control); logged here as a deliberate non-change /
+  follow-up rather than touched. No stale *module-path* literal
+  affects imports or correctness (plan §0 confirmed the lone test
+  literal is an inert docstring). Final reviewer-grep invariant holds:
+  the diff is moves + façade + the §5.2 6-line change + Amendment
+  test-repoints + new tests/docs — **no logic edits inside moved
+  functions**. **REFACTOR COMPLETE: `__init__.py` 6020→526 (pure
+  façade: re-exports + locked `__all__` + entry guard); ~30 modules;
+  463 passed; CSV/MD provably byte-identical end-to-end.** ✅

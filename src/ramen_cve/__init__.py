@@ -1,45 +1,13 @@
 #!/usr/bin/env python3
-"""ramen_cve — Threat intel triage on a ramen budget.
+"""ramen_cve — public façade.
 
-Reads an OPML file, a single URL, or a list of CVE IDs; extracts CVE
-identifiers via regex; enriches each with CVSS (NVD) and EPSS (FIRST.org)
-data; buckets by exploitation likelihood and impact (CISA KEV as a hard
-override); and writes a CSV and a Markdown report.
-
-Navigation index — see REFACTOR_PLAN.md for the target ramen_cve/ package
-layout these sections will map to when the single-file design is split up.
-Use the section names with grep / your editor's outline view; line numbers
-will drift.
-
-  Section                                                Future module
-  --------------------------------------------------     -----------------------
-  Imports + module constants                             cli.py (top of)
-  ATT&CK / Kill-Chain mappers                            analyze.py
-  _utcnow + TLP / Admiralty math                         analyze.py
-  Exceptions (OpmlError)                                 models.py
-  Dataclasses (FeedEntry .. EnrichedCve)                 models.py
-  Cache (SQLite + every *_cache + runs + audit_log)      cache.py
-  parse_opml + extract_cves + extract_iocs + defang      extract.py
-  IOC confidence decay (_ioc_confidence, apply_*)        decay.py
-  API-key bootstrap                                      cli.py / wizard.py
-  fetch_nvd / _parse_nvd_response                        enrich/nvd.py
-  fetch_epss                                             enrich/epss.py
-  fetch_kev_catalog                                      enrich/kev.py
-  load_associations + _build_*                           associations.py
-  enrich_cves                                            enrich/orchestrator.py
-  exploit/PoC tracker                                    enrich/exploits.py
-  _EnricherBase + VT/AbuseIPDB/OTX/MalwareBazaar         enrich/iocs.py
-  load_inventory + correlate_inventory                   enrich/inventory.py
-  Dispatchers (Slack / Webhook / Email)                  dispatch/*.py
-  bucket_and_suggest + filter_by_date                    analyze.py
-  CSV / STIX / Sigma / YARA / Markdown writers           output/*.py
-  CLI parser + main + _audit_dispatch + _maybe_* helpers cli.py
-  _run_opml / _run_url / _run_cve / _run_stix            cli.py
-  _run_hunt + Hunt I/O                                   hunt.py
-  _run_pir + PIR I/O                                     pir.py
-  _run_trend + _sparkline + _record_runs                 trend.py
-  _run_audit + _redact_audit_args                        audit.py
-  _run_wizard + path validators                          wizard.py
+Threat-intel triage on a ramen budget. The implementation now lives in
+focused submodules (constants, models, cache, extract, decay, analyze,
+associations, keyring, enrich/*, output/*, dispatch/*, config, cliutil,
+pipeline, wizard, hunt, pir, trend, audit, schedule, cli). This module
+is a pure re-export façade: it preserves the flat
+``from ramen_cve import X`` / ``ramen_cve.X`` contract that tests and
+users depend on, with zero behaviour change. See docs/REFACTOR_PLAN.md.
 """
 
 from __future__ import annotations
@@ -326,6 +294,230 @@ from .wizard import (  # noqa: F401
     _wizard_validate_date,
     _wizard_validate_float,
 )
+
+# Locked public surface (plan §7.5). Generated from the re-export
+# blocks above; mirrors tests/test_facade.py's contract list.
+__all__ = [
+    "ABUSEIPDB_API_BASE",
+    "ATTACK_TECHNIQUE_NAMES",
+    "AbuseIPDBEnricher",
+    "BUCKET_ACTIONS",
+    "BUCKET_DISPLAY",
+    "BUCKET_ORDER",
+    "CISA_KEV_URL",
+    "CSV_COLUMNS",
+    "CVE_REGEX",
+    "CWE_TO_ATTACK",
+    "CWE_TO_KILL_CHAIN",
+    "Cache",
+    "Campaign",
+    "CveRecord",
+    "DEFAULT_ASSOCIATIONS_PATH",
+    "DEFAULT_CACHE_PATH",
+    "DEFAULT_CACHE_TTL_HOURS",
+    "DEFAULT_CONFIG_DIR",
+    "DEFAULT_CONFIG_TEMPLATE",
+    "DEFAULT_CVSS_THRESHOLD",
+    "DEFAULT_DATA_DIR",
+    "DEFAULT_EPSS_THRESHOLD",
+    "DEFAULT_HUNT_DIR",
+    "DEFAULT_LAST_OPML_PATH",
+    "DEFAULT_PIR_DIR",
+    "DEFAULT_PRESETS_DIR",
+    "DISPATCH_DEFAULT_BUCKETS",
+    "DOMAIN_REGEX",
+    "EMAIL_REGEX",
+    "ENV_FILE_PATH",
+    "EPSS_API_BASE",
+    "EXPLOITDB_CSV_URL",
+    "EXPLOIT_STATUS_VALUES",
+    "EmailDispatcher",
+    "EnrichedCve",
+    "FeedEntry",
+    "GITHUB_SEARCH_URL",
+    "GenericWebhookDispatcher",
+    "HUNT_STATUSES",
+    "Hunt",
+    "IOC_CSV_COLUMNS",
+    "IOC_HALF_LIFE_DAYS",
+    "IOC_TYPE_DISPLAY",
+    "IOC_TYPE_ORDER",
+    "IPV4_REGEX",
+    "IocRecord",
+    "KILL_CHAIN_PHASES",
+    "MALWAREBAZAAR_API",
+    "MD5_REGEX",
+    "Malware",
+    "MalwareBazaarEnricher",
+    "NUCLEI_TEMPLATES_TREE_URL",
+    "NVD_API_BASE",
+    "NVD_API_KEY_REGEX",
+    "NVD_KEY_REQUEST_URL",
+    "OTX_API_BASE",
+    "OpmlError",
+    "OtxEnricher",
+    "PIR_STATUSES",
+    "Pir",
+    "SHA1_REGEX",
+    "SHA256_REGEX",
+    "SIGMA_ELIGIBLE_BUCKETS",
+    "SlackWebhookDispatcher",
+    "TLP_LEVELS",
+    "ThreatActor",
+    "URL_REGEX",
+    "USER_AGENT",
+    "VERSION",
+    "VIRUSTOTAL_API_BASE",
+    "VirusTotalEnricher",
+    "YARA_ELIGIBLE_BUCKETS",
+    "_AUDIT_SENSITIVE_KEYS",
+    "_DEFANG_DETECT",
+    "_DEFANG_MAP",
+    "_DispatcherBase",
+    "_EnricherBase",
+    "_FILE_EXT_TLDS",
+    "_KNOWN_OUTPUT_EXTENSIONS",
+    "_SPARKLINE_CHARS",
+    "_STIX_PATTERN_RE",
+    "_YAML_FLAT_KEY_MAP",
+    "_admiralty_score",
+    "_audit_actor",
+    "_audit_dispatch",
+    "_best_admiralty",
+    "_build_actor",
+    "_build_campaign",
+    "_build_default_dispatchers",
+    "_build_default_enrichers",
+    "_build_digest_body",
+    "_build_malware",
+    "_build_schedule_command",
+    "_build_sigma_stub",
+    "_build_yara_stub",
+    "_coerce_yaml_value",
+    "_collect_opml_files",
+    "_configure_logging",
+    "_cpe_matches_inventory",
+    "_decay_and_filter_iocs",
+    "_dedupe_iocs",
+    "_defang_text",
+    "_emit_cron_line",
+    "_emit_windows_task_xml",
+    "_empty_nvd",
+    "_entry_script_path",
+    "_extract_cve_id_from_vuln",
+    "_extract_iocs_from_pattern",
+    "_get_github_token",
+    "_group_records_by_owner",
+    "_hunt_path",
+    "_ioc_confidence",
+    "_ioc_to_stix_pattern",
+    "_is_interactive",
+    "_is_likely_filename",
+    "_is_public_ip",
+    "_load_remembered_opml",
+    "_maybe_correlate_inventory",
+    "_maybe_digest",
+    "_maybe_dispatch",
+    "_maybe_enrich_iocs",
+    "_maybe_filter_by_sector",
+    "_md_safe",
+    "_normalize_tlp",
+    "_output",
+    "_parse_iso_date",
+    "_parse_kev_due_date",
+    "_parse_nvd_response",
+    "_parse_schedule_time",
+    "_path_arg",
+    "_pir_path",
+    "_prompt_for_api_key",
+    "_quote_for_task_scheduler",
+    "_record_runs",
+    "_redact_audit_args",
+    "_redact_key",
+    "_reset_remembered_opml",
+    "_resolve_associations",
+    "_resolve_config_path",
+    "_resolve_out_dir",
+    "_run_audit",
+    "_run_cve",
+    "_run_hunt",
+    "_run_opml",
+    "_run_pir",
+    "_run_schedule",
+    "_run_stix",
+    "_run_trend",
+    "_run_url",
+    "_run_wizard",
+    "_safe_basename",
+    "_safe_url_for_log",
+    "_save_api_key_to_env",
+    "_save_remembered_opml",
+    "_shared_flags",
+    "_sigma_level_for",
+    "_sigma_yaml_escape",
+    "_sparkline",
+    "_stix_objects_to_records",
+    "_stix_uuid",
+    "_strip_path_quotes",
+    "_summarize_enrichment",
+    "_unique_output_path",
+    "_utcnow",
+    "_validate_args",
+    "_validate_cve_id",
+    "_validate_opml_input",
+    "_wizard_validate_cve_list",
+    "_wizard_validate_date",
+    "_wizard_validate_float",
+    "_worst_tlp",
+    "_yara_safe_name",
+    "_yara_string_escape",
+    "apply_ioc_decay",
+    "apply_yaml_config",
+    "args_to_yaml_payload",
+    "bucket_and_suggest",
+    "build_parser",
+    "correlate_inventory",
+    "delete_yaml_preset",
+    "dispatch_records",
+    "enrich_cves",
+    "enrich_iocs",
+    "enrich_with_exploit_status",
+    "extract_cves",
+    "extract_iocs",
+    "fetch_epss",
+    "fetch_exploitdb_cve_set",
+    "fetch_kev_catalog",
+    "fetch_nuclei_cve_set",
+    "fetch_nvd",
+    "filter_by_date",
+    "filter_iocs_by_confidence",
+    "list_yaml_presets",
+    "load_all_hunts",
+    "load_all_pirs",
+    "load_associations",
+    "load_hunt",
+    "load_inventory",
+    "load_pir",
+    "load_yaml_config",
+    "main",
+    "map_cwes_to_attack_techniques",
+    "map_cwes_to_kill_chain",
+    "parse_opml",
+    "parse_stix_bundle",
+    "pull_taxii",
+    "requests",
+    "save_hunt",
+    "save_pir",
+    "save_yaml_config",
+    "search_github_for_cve",
+    "time",
+    "write_csv",
+    "write_iocs_csv",
+    "write_markdown",
+    "write_sigma_stubs",
+    "write_stix",
+    "write_yara_stubs",
+]
 
 _log = logging.getLogger(__name__)
 
