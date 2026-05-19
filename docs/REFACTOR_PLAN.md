@@ -400,3 +400,8 @@ growth and is optimistic for the zero-behavior-change rigor required.
   now-dead `import urllib.parse` from `__init__` (verified not a
   monkeypatch seam). No test repoints. `__init__` 4219→3999
   (**<4000, 34% off the 6020 baseline**). 463 passed, ruff clean. ✅
+- **Step 13/26 — `enrich/inventory.py`:** `load_inventory`,
+  `_cpe_matches_inventory`, `correlate_inventory` → L1.5 (101 LOC,
+  csv/Path/models only, no net/log). F821-sweep caught grep-missed
+  `OpmlError` (friendly missing-file error) → 2 NameError, added. No
+  test repoints. `__init__` 3999→3915. 463 passed, ruff clean. ✅
