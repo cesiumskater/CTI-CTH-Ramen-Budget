@@ -527,3 +527,8 @@ growth and is optimistic for the zero-behavior-change rigor required.
   (Cache/CVE_REGEX/OpmlError/Pir) — F821 clean first try. Full 5-name
   surface re-exported (L3). Clean-room + dual-F821: 463 passed, ruff
   clean. __init__ 2454→2339. ✅
+- **Step 24/26 — `trend.py`:** `_SPARKLINE_CHARS` + `_sparkline`/
+  `_record_runs`/`_run_trend` → L4 (`[_SPARKLINE_CHARS:_audit_actor)`,
+  56 lines). Deps Cache/EnrichedCve; F821-added CVE_REGEX←constants.
+  Full 4-name surface re-exported (L3). Clean-room + dual-F821: 463
+  passed, ruff clean. __init__ 2339→2289. ✅
