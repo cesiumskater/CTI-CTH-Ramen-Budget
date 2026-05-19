@@ -550,3 +550,11 @@ growth and is optimistic for the zero-behavior-change rigor required.
   + dual-F821: 463 passed, ruff clean. __init__ 2197→2055. ✅
   (NB: my finer-grained ledger # exceeds the plan's 26-row table;
   remaining post-26: cliutil/config/wizard/pipeline/cli + finalize.)
+- **Step 27 — `cliutil.py`** (plan-row 19a): `_parse_iso_date`/
+  `_validate_cve_id`/`_strip_path_quotes`/`_path_arg`/`_resolve_out_dir`/
+  `_validate_opml_input`/`_collect_opml_files` → L4 leaf (no logging),
+  `[_parse_iso_date:_resolve_config_path)`, 115 lines. Deps pinned
+  upfront (argparse/date/Path + CVE_REGEX←constants + OpmlError←models)
+  — F821 clean first try. Full 7-name surface re-exported (L3). L5
+  F401: none. Clean-room + dual-F821: 463 passed, ruff clean.
+  __init__ 2055→1949 (**<2000; ~68% off the 6020 baseline**). ✅
