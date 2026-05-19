@@ -591,3 +591,23 @@ growth and is optimistic for the zero-behavior-change rigor required.
   questionary — F821 clean first try, acyclic. Full 4-name surface
   re-exported (L3). Clean-room + dual-F821 + golden: 463 passed, ruff
   clean, zero drift. __init__ 1385→1181. ✅
+- **Step 31 — `cli.py`** (plan-row 24; **monolith decomposition
+  COMPLETE**): `VERSION` + `_shared_flags`/`build_parser`/
+  `_configure_logging`/`_validate_args`/`main`/`_run_opml`/`_run_url`/
+  `_dedupe_iocs`/`_run_cve`/`_run_stix` → L5 top module (870 LOC —
+  plan-accepted >350 exception, one cohesive argparse+main+runners
+  unit). Trailing `if __name__=="__main__": sys.exit(main())` guard
+  kept in __init__ (resolves re-exported `main`). F821 enumerated 56
+  cross-deps via the facade name→module map → all resolved.
+  **§5.2 mitigation applied:** function-local `import ramen_cve` in
+  `main()` + 6 `DEFAULT_CACHE_PATH` → `ramen_cve.DEFAULT_CACHE_PATH`
+  late-binds (so `patch("ramen_cve.DEFAULT_CACHE_PATH")` is observed);
+  the 5 cache-path patch-contract tests pass. Monkeypatch-repoint
+  (Amendment): 1 failure → repointed test_wizard.py's
+  `_run_wizard/_is_interactive/_run_cve/_run_opml/_run_url/_run_stix`
+  patches → `ramen_cve.cli.*`. L5: pruned dead __init__ imports
+  (argparse/re/date/Path); kept requests+time as `# noqa: F401`
+  monkeypatch seams. Clean-room + F821(all) + golden + entrypoint
+  smoke (`python -m ramen_cve`, `threat_intel_hunter.py`): 463 passed,
+  ruff clean, zero drift. **`__init__` 1181→~250 (pure facade;
+  6020→~250 ≈ 96% off baseline).** ✅
