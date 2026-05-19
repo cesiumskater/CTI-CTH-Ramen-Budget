@@ -392,3 +392,247 @@ growth and is optimistic for the zero-behavior-change rigor required.
   missed `csv` + `EnrichedCve` → 3 NameError, F821-sweep caught,
   added imports. No test repoints (Cache-fixture mocks survive).
   `__init__` 4344→4219. 463 passed, ruff clean. ✅
+- **Step 12/26 — `enrich/iocs.py`:** VT/AbuseIPDB/OTX/MalwareBazaar
+  enrichers + `_EnricherBase`/`_build_default_enrichers`/`enrich_iocs`
+  + their 4 own API-base constants (0 external/test refs → moved
+  cohesively) → L2 (250 LOC). F821-sweep caught grep-missed
+  `urllib.parse` (OTX URL-encode) → 1 NameError, added. Pruned
+  now-dead `import urllib.parse` from `__init__` (verified not a
+  monkeypatch seam). No test repoints. `__init__` 4219→3999
+  (**<4000, 34% off the 6020 baseline**). 463 passed, ruff clean. ✅
+- **Step 13/26 — `enrich/inventory.py`:** `load_inventory`,
+  `_cpe_matches_inventory`, `correlate_inventory` → L1.5 (101 LOC,
+  csv/Path/models only, no net/log). F821-sweep caught grep-missed
+  `OpmlError` (friendly missing-file error) → 2 NameError, added. No
+  test repoints. `__init__` 3999→3915. 463 passed, ruff clean. ✅
+- **Step 14/26 — `dispatch/sinks.py`:** new `dispatch/` pkg (L3
+  notification sinks). `_DispatcherBase` + Slack/Generic-webhook/Email
+  dispatchers + `_build_default_dispatchers` + in-block
+  `DISPATCH_DEFAULT_BUCKETS` const (moved with block, re-exported).
+  Email MIME imports are function-local (travel with code); `smtplib`
+  module-level. `USER_AGENT` ← `constants`; `RAMEN_SMTP_*`/`SLACK_*`
+  are `os.getenv` string literals (not symbols). F821-sweep caught
+  grep-missed `Path` — used only in stringised annotations, so masked
+  by `from __future__ import annotations` (all 463 tests passed even
+  while undefined) → added `from pathlib import Path`. Ruff autofix
+  pruned now-unused `import json`. 0 test repoints (32 dispatcher
+  tests resolve via facade). `__init__` 3915→3640 (**−275; 39.5% off
+  the 6020 baseline**). 463 passed, ruff clean. ✅
+- **Step 15/26 — `dispatch/runner.py`:** `dispatch_records` (dispatch
+  orchestrator) → completes the `dispatch/` pkg (L3). Imports siblings
+  `DISPATCH_DEFAULT_BUCKETS`/`_DispatcherBase`/`_build_default_dispatchers`
+  from `.sinks`; `EnrichedCve` from `..models`. Purity guard caught the
+  naive `[dispatch_records:write_iocs_csv)` boundary dragging two
+  **output-section** constants (`CSV_COLUMNS`@233, `IOC_CSV_COLUMNS`)
+  into runner → corrected to `[dispatch_records:CSV_COLUMNS)` (30
+  lines); constants stay for the output step. Facade re-exports
+  `dispatch_records` (used at `__init__` internal call site + 8 test
+  refs). 0 test repoints. **Verification = local clean-room repro
+  (py3.10 fresh `pip install -e .[dev]` + exact `ci.yml` cmds) + L1
+  F821 gate** (Actions CI red is the L2 runner/PyPI-egress env
+  limitation, user-dispositioned — not chased). `__init__` 3640→3611.
+  463 passed, ruff clean, F821 clean. ✅
+- **CI note (see tasks/lessons.md L2):** GitHub Actions `test` fails
+  deterministically <30 s on provably-green SHAs; faithful clean-room
+  repro of every `ci.yml` step passes. Treated as runner/PyPI-egress
+  env limitation (user-confirmed). Per-step verification story is the
+  clean-room repro + F821, recorded in each entry. Provably-green code
+  is **not** patched to chase unobservable red CI.
+- **Step 16/26 — `output/stix.py`:** new `output/` pkg (L3
+  serialization). IOC-CSV writer + STIX 2.1 / TAXII import-export:
+  `write_iocs_csv`, `write_stix`, `parse_stix_bundle`, `pull_taxii` +
+  5 `_`-helpers + `IOC_CSV_COLUMNS`/`_STIX_PATTERN_RE` consts (9 defs,
+  330-line block `[IOC_CSV_COLUMNS:SIGMA_ELIGIBLE_BUCKETS)`).
+  `CSV_COLUMNS`@204 left for the CVE `write_csv` golden-diff step.
+  Deps pinned exactly: `CVE_REGEX`/`USER_AGENT`←constants,
+  `CveRecord/EnrichedCve/IocRecord/OpmlError`←models, csv/json/re/date/
+  Path, requests; **no uuid/datetime/timezone**. Gate caught (a)
+  grep-missed `_utcnow` (models helper, F821 stix.py) and (b) an
+  under-listed facade re-export — initially only the 5 public names →
+  20 failures (`test_facade` locks private `_stix_*`; `__init__`
+  F821) → expanded to the full 11-name surface (new lesson **L3**).
+  Verification = clean-room repro (py3.10) + dual F821: 463 passed,
+  ruff clean, facade resolves full surface incl. `_stix_uuid`.
+  `__init__` 3611→3288 (**−323; ~45% off the 6020 baseline**). ✅
+- **Step 17/26 — `output/sigma.py`:** Sigma detection-rule stub writer
+  (`SIGMA_ELIGIBLE_BUCKETS` + `_sigma_level_for`/`_sigma_yaml_escape`/
+  `_build_sigma_stub`/`write_sigma_stubs`) → L3 (120-line block
+  `[SIGMA_ELIGIBLE_BUCKETS:_yara_safe_name)`, deps EnrichedCve/Path/
+  date). Gate caught grep-missed `_stix_uuid` (reused for deterministic
+  rule IDs) → added sibling import `from .stix import _stix_uuid` (no
+  cycle: output→output). Full 5-name surface re-exported (L3); F821
+  `__init__` clean. Verification = clean-room repro (py3.10) + dual
+  F821: 463 passed, ruff clean, facade resolves. `__init__` 3288→3181
+  (−107). ✅
+- **Step 18/26 — `output/yara.py`:** YARA rule stub writer
+  (`_yara_safe_name`/`_yara_string_escape`/`_build_yara_stub`/
+  `write_yara_stubs` + `YARA_ELIGIBLE_BUCKETS`) → L3 (99-line block
+  `[_yara_safe_name:write_csv)`). Deps pinned upfront from the
+  `_build_yara_stub(rec, malware: Malware)` signature (L1 working — no
+  grep-miss): `EnrichedCve`/`Malware`←models, sibling
+  `SIGMA_ELIGIBLE_BUCKETS`←`.sigma` (drives `YARA_ELIGIBLE_BUCKETS =
+  SIGMA_ELIGIBLE_BUCKETS`, identity preserved), `_stix_uuid`←`.stix`,
+  re/date/Path. Full 5-name surface re-exported (L3). Green first try:
+  clean-room repro (py3.10) + dual F821 → 463 passed, ruff clean,
+  facade resolves & `YARA_ELIGIBLE_BUCKETS==('kev_override',
+  'patch_now')`. `__init__` 3181→3089 (**−92; ~49% off baseline**). ✅
+- **Step 19/26 — `output/csv_writer.py`** (golden-diff milestone, pt 1):
+  `CSV_COLUMNS` + `write_csv` → L3 (`[CSV_COLUMNS:BUCKET_ORDER)`, deps
+  EnrichedCve/Path/csv). Removed now-dead `import csv` from `__init__`
+  (Risk 5.7; not a patch seam — 0 `patch("ramen_cve.csv")`). Built a
+  **golden byte-oracle** (mocked opml pipeline like `test_smoke`,
+  sha256 of regenerated CSV+MD). Oracle first flagged false-positive
+  drift → localized via `git stash`-diff to the volatile `enriched_at`
+  (`_utcnow()`) column, not a regression (new lesson **L4**: normalise
+  every volatile field; self-validate the oracle). Fixed oracle
+  (normalise CSV `enriched_at` ISO-TS + MD `Generated:`): **post-18 ==
+  post-19 byte-identical** (CSV `3fd1ac95`, MD `e9779ffc`). 463 passed,
+  ruff/F821 clean. `__init__` 3089→3007 (−82). ✅
+- **Step 20/26 — `output/markdown.py`** (golden-diff milestone, pt 2 —
+  **CHECKPOINT PASSED**): `BUCKET_ORDER`/`BUCKET_DISPLAY`/
+  `IOC_TYPE_DISPLAY`/`IOC_TYPE_ORDER` + `_md_safe`/
+  `_summarize_enrichment`/`write_markdown` → L3 (319-line block
+  `[BUCKET_ORDER:VERSION)`). Deps: EnrichedCve/IocRecord/`_utcnow`←
+  models, re/date/Path. F821 caught 4 grep-missed `constants` symbols
+  (`ATTACK_TECHNIQUE_NAMES`, `BUCKET_ACTIONS`, `DEFAULT_CVSS_THRESHOLD`,
+  `DEFAULT_EPSS_THRESHOLD` — report renders thresholds/ATT&CK names) →
+  added. Full 7-name surface re-exported (L3); `__init__` F821 clean.
+  **Golden byte-oracle: post-Step-20 == post-Step-18 byte-identical**
+  (CSV `3fd1ac95`, MD `e9779ffc`, 1069 B / 79 lines) ⇒ the whole
+  `output/` extraction (stix+sigma+yara+csv_writer+markdown, Steps
+  16–20) is provably **zero behavior change**. 463 passed, ruff/F821
+  clean. `__init__` 3007→2697 (**−310; ~55% off the 6020 baseline**).
+  `output/` package COMPLETE. ✅
+- **Step 21/26 — `dispatch/digest.py`:** `_group_records_by_owner`/
+  `_build_digest_body`/`_maybe_digest` → L3 (`[_group_records_by_owner:
+  _maybe_correlate_inventory)`, 131 lines). Deps: EnrichedCve←models,
+  sibling `EmailDispatcher`+`DISPATCH_DEFAULT_BUCKETS`←`.sinks`. F821
+  caught grep-missed `DISPATCH_DEFAULT_BUCKETS` + stdlib `argparse`;
+  ruff pruned unused `date`. Full 3-name surface re-exported (L3).
+  Verification = clean-room repro (py3.10) + dual F821 + golden
+  oracle: 463 passed, ruff clean, zero drift (CSV 3fd1ac95, MD
+  e9779ffc), facade resolves. `dispatch/` pkg COMPLETE. `__init__`
+  2697→2571 (−126). ✅
+- **Step 22/26 — `hunt.py`:** `load_hunt`/`load_all_hunts`/`save_hunt`/
+  `_hunt_path`/`_run_hunt` → L4 (`[load_hunt:load_pir)`, 124 lines).
+  Pre-checked: runners are self-contained (0 calls into __init__ glue
+  `_output`/`_maybe_*`) ⇒ no cycle. Deps: Cache←cache,
+  Hunt/OpmlError/_utcnow←models, F821-added CVE_REGEX/HUNT_STATUSES←
+  constants. Full 5-name surface re-exported (L3). Clean-room +
+  dual-F821: 463 passed, ruff clean, facade resolves. __init__
+  2571→2454. ✅
+- **Step 23/26 — `pir.py`:** `load_pir`/`load_all_pirs`/`save_pir`/
+  `_pir_path`/`_run_pir` → L4 (`[load_pir:_sparkline)`, 122 lines),
+  parallel to hunt; self-contained runner. Deps pinned upfront
+  (Cache/CVE_REGEX/OpmlError/Pir) — F821 clean first try. Full 5-name
+  surface re-exported (L3). Clean-room + dual-F821: 463 passed, ruff
+  clean. __init__ 2454→2339. ✅
+- **Step 24/26 — `trend.py`:** `_SPARKLINE_CHARS` + `_sparkline`/
+  `_record_runs`/`_run_trend` → L4 (`[_SPARKLINE_CHARS:_audit_actor)`,
+  56 lines). Deps Cache/EnrichedCve; F821-added CVE_REGEX←constants.
+  Full 4-name surface re-exported (L3). Clean-room + dual-F821: 463
+  passed, ruff clean. __init__ 2339→2289. ✅
+- **Step 25/26 — `audit.py`:** `_AUDIT_SENSITIVE_KEYS` + `_audit_actor`/
+  `_redact_audit_args`/`_audit_dispatch`/`_run_audit` → L4
+  (`[_AUDIT_SENSITIVE_KEYS:_parse_schedule_time)`, 99 lines).
+  `_audit_dispatch` takes a callable ⇒ self-contained (no __init__
+  glue ref). Deps Cache/_utcnow + argparse/getpass/json/Path; F821
+  added contextlib + datetime.date. Full 5-name surface re-exported
+  (L3). Clean-room + dual-F821: 463 passed, ruff clean. __init__
+  2289→2197. ✅
+- **Step 26/26 — `schedule.py`:** `_parse_schedule_time`/
+  `_entry_script_path`/`_build_schedule_command`/`_emit_windows_task_xml`/
+  `_quote_for_task_scheduler`/`_emit_cron_line`/`_run_schedule` → L4
+  (`[_parse_schedule_time:_run_stix)`, 150 lines), self-contained
+  runner. Deps Cache + argparse/logging/sys/Path; F821-added
+  DEFAULT_CONFIG_DIR←constants + datetime.date. Full 7-name surface
+  re-exported (L3). L5 proactive __init__-F401 check: none. Clean-room
+  + dual-F821: 463 passed, ruff clean. __init__ 2197→2055. ✅
+  (NB: my finer-grained ledger # exceeds the plan's 26-row table;
+  remaining post-26: cliutil/config/wizard/pipeline/cli + finalize.)
+- **Step 27 — `cliutil.py`** (plan-row 19a): `_parse_iso_date`/
+  `_validate_cve_id`/`_strip_path_quotes`/`_path_arg`/`_resolve_out_dir`/
+  `_validate_opml_input`/`_collect_opml_files` → L4 leaf (no logging),
+  `[_parse_iso_date:_resolve_config_path)`, 115 lines. Deps pinned
+  upfront (argparse/date/Path + CVE_REGEX←constants + OpmlError←models)
+  — F821 clean first try. Full 7-name surface re-exported (L3). L5
+  F401: none. Clean-room + dual-F821: 463 passed, ruff clean.
+  __init__ 2055→1949 (**<2000; ~68% off the 6020 baseline**). ✅
+- **Step 28 — `config.py`** (plan-row 19b): 12 YAML/remembered-OPML fns
+  + `_YAML_FLAT_KEY_MAP` → L4 (`[_resolve_config_path:_shared_flags)`,
+  299 lines). Deps: yaml/json/os/argparse/date/Path; F821-added
+  DEFAULT_PRESETS_DIR/DEFAULT_LAST_OPML_PATH←constants, sibling
+  `_parse_iso_date`/`_strip_path_quotes`←cliutil, `_utcnow`←models.
+  **Monkeypatch-repoint (plan Amendment):** 13 failures —
+  `monkeypatch.setattr(ramen_cve,"DEFAULT_PRESETS_DIR"/"DEFAULT_LAST_OPML_PATH")`
+  no longer reached config.py's bound copies; repointed **16 sites**
+  in test_ramen_cve.py → `ramen_cve.config` (behaviour-preserving,
+  only patch-target module changed). L5: pruned now-dead `import json`
+  from __init__ + I001 autofix. Clean-room + dual-F821 + golden:
+  463 passed, ruff clean, CSV/MD byte-identical to anchor. __init__
+  1949→1662. ✅
+- **Step 29 — `pipeline.py`** (plan-row 20): post-enrich glue
+  (`_maybe_enrich_iocs`/`_maybe_filter_by_sector`/`_decay_and_filter_iocs`/
+  `_resolve_associations`/`_maybe_dispatch`/`_maybe_correlate_inventory`/
+  `_get_github_token`/`_safe_basename`/`_unique_output_path`/`_output`
+  + `_KNOWN_OUTPUT_EXTENSIONS`) → L4 (`[_maybe_enrich_iocs:_run_opml)`,
+  291 lines). **Reordered before wizard** (wizard needs `_safe_basename`
+  ⇒ pipeline must precede it; Risk 5.3 cycle avoided). F821 enumerated
+  16 sibling deps (all already-extracted: output.*/dispatch.*/enrich.*/
+  decay/associations/cliutil/models) — no `main` ref (docstring only),
+  acyclic. Full 11-name surface re-exported (L3). Clean-room + dual-F821
+  + golden: 463 passed, ruff clean, zero drift. __init__ 1663→1385. ✅
+- **Step 30 — `wizard.py`** (plan-row 21): `_run_wizard` +
+  `_wizard_validate_{date,cve_list,float}` → L4
+  (`[_run_wizard:main)`, 210 lines). Deps pinned upfront — sibling
+  `_safe_basename`←pipeline (why Step 29 preceded this),
+  `_strip_path_quotes`/`_validate_opml_input`←cliutil,
+  CVE_REGEX/DEFAULT_CVSS_THRESHOLD/DEFAULT_EPSS_THRESHOLD←constants,
+  questionary — F821 clean first try, acyclic. Full 4-name surface
+  re-exported (L3). Clean-room + dual-F821 + golden: 463 passed, ruff
+  clean, zero drift. __init__ 1385→1181. ✅
+- **Step 31 — `cli.py`** (plan-row 24; **monolith decomposition
+  COMPLETE**): `VERSION` + `_shared_flags`/`build_parser`/
+  `_configure_logging`/`_validate_args`/`main`/`_run_opml`/`_run_url`/
+  `_dedupe_iocs`/`_run_cve`/`_run_stix` → L5 top module (870 LOC —
+  plan-accepted >350 exception, one cohesive argparse+main+runners
+  unit). Trailing `if __name__=="__main__": sys.exit(main())` guard
+  kept in __init__ (resolves re-exported `main`). F821 enumerated 56
+  cross-deps via the facade name→module map → all resolved.
+  **§5.2 mitigation applied:** function-local `import ramen_cve` in
+  `main()` + 6 `DEFAULT_CACHE_PATH` → `ramen_cve.DEFAULT_CACHE_PATH`
+  late-binds (so `patch("ramen_cve.DEFAULT_CACHE_PATH")` is observed);
+  the 5 cache-path patch-contract tests pass. Monkeypatch-repoint
+  (Amendment): 1 failure → repointed test_wizard.py's
+  `_run_wizard/_is_interactive/_run_cve/_run_opml/_run_url/_run_stix`
+  patches → `ramen_cve.cli.*`. L5: pruned dead __init__ imports
+  (argparse/re/date/Path); kept requests+time as `# noqa: F401`
+  monkeypatch seams. Clean-room + F821(all) + golden + entrypoint
+  smoke (`python -m ramen_cve`, `threat_intel_hunter.py`): 463 passed,
+  ruff clean, zero drift. **`__init__` 1181→~250 (pure facade;
+  6020→~250 ≈ 96% off baseline).** ✅
+- **Step 32 — finalize façade** (plan-row 25): replaced the now-false
+  41-line "navigation index … when the single-file design is split up"
+  module docstring with an accurate 10-line *pure-façade* docstring
+  (no test asserts `__doc__`). Added a **locked `__all__`** (219 names,
+  generated from the re-export blocks, one-per-line; F822-verified
+  every entry resolves; `from ramen_cve import *` → 219). `_log`
+  retained (preserved façade attribute per L3, not dead code). Manual
+  smoke re-confirmed offline: `python -m ramen_cve --help`,
+  `threat_intel_hunter.py --list-configs`. Clean-room + F821/F822(all)
+  + golden: 463 passed, ruff clean, CSV/MD byte-identical to anchor. ✅
+- **Step 33 — doc/script audit** (plan-row 26): grep for stale
+  `ramen_cve.py` literals → remaining hits are **pre-existing
+  user-facing copy** (`cli.py` argparse help "dirs next to
+  ramen_cve.py", `constants.py` comment, README/PKG-INFO marketing).
+  Rewriting help text changes `--help` output ⇒ a behaviour change,
+  **out of scope** for a zero-behaviour-change refactor (CLAUDE.md
+  scope-creep control); logged here as a deliberate non-change /
+  follow-up rather than touched. No stale *module-path* literal
+  affects imports or correctness (plan §0 confirmed the lone test
+  literal is an inert docstring). Final reviewer-grep invariant holds:
+  the diff is moves + façade + the §5.2 6-line change + Amendment
+  test-repoints + new tests/docs — **no logic edits inside moved
+  functions**. **REFACTOR COMPLETE: `__init__.py` 6020→526 (pure
+  façade: re-exports + locked `__all__` + entry guard); ~30 modules;
+  463 passed; CSV/MD provably byte-identical end-to-end.** ✅

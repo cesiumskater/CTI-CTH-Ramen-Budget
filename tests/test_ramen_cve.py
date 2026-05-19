@@ -6974,7 +6974,7 @@ def test_resolve_config_path_bare_name(monkeypatch, tmp_path):
     """A bare name resolves under DEFAULT_PRESETS_DIR with .yaml appended."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     out = ramen_cve._resolve_config_path("daily-hunt")
     assert out == tmp_path / "daily-hunt.yaml"
 
@@ -6993,7 +6993,7 @@ def test_save_then_load_yaml_round_trip(tmp_path, monkeypatch):
     """save_yaml_config -> load_yaml_config preserves the payload structure."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     payload = {"subcommand": "opml", "opml_path": "/feeds",
                "output": {"format": "csv", "basename": "q2"}}
     written = ramen_cve.save_yaml_config("test", payload)
@@ -7008,7 +7008,7 @@ def test_load_yaml_config_missing_file(tmp_path, monkeypatch):
 
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     with pytest.raises(FileNotFoundError):
         ramen_cve.load_yaml_config("nope")
 
@@ -7029,7 +7029,7 @@ def test_list_yaml_presets_returns_sorted(tmp_path, monkeypatch):
     """list_yaml_presets returns sorted *.yaml files (and nothing else)."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     (tmp_path / "zebra.yaml").write_text("subcommand: opml")
     (tmp_path / "alpha.yaml").write_text("subcommand: cve")
     (tmp_path / "ignored.txt").write_text("nope")
@@ -7173,7 +7173,7 @@ def test_cli_list_configs_subcommand_prints_empty(tmp_path, monkeypatch, capsys)
     """`python threat_intel_hunter.py --list-configs` with no presets is a no-op rc=0."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     rc = ramen_cve.main(["--list-configs"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -7184,7 +7184,7 @@ def test_cli_list_configs_shows_existing_presets(tmp_path, monkeypatch, capsys):
     """`--list-configs` prints `<stem>\\t<path>` per preset."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     (tmp_path / "daily-hunt.yaml").write_text("subcommand: opml")
     rc = ramen_cve.main(["--list-configs"])
     assert rc == 0
@@ -7196,7 +7196,7 @@ def test_cli_config_missing_returns_friendly_error(tmp_path, monkeypatch, capsys
     """`--config noname` exits rc=1 with a "Config file not found" message on stderr."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     rc = ramen_cve.main(["--config", "noname"])
     assert rc == 1
     err = capsys.readouterr().err
@@ -7369,7 +7369,7 @@ def test_save_and_load_remembered_opml_round_trip(tmp_path, monkeypatch):
     import ramen_cve
 
     state = tmp_path / "last_opml.json"
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", state)
     src = tmp_path / "feeds"
     ramen_cve._save_remembered_opml(src)
     assert state.is_file()
@@ -7380,7 +7380,7 @@ def test_load_remembered_opml_missing_returns_none(tmp_path, monkeypatch):
     """No state file → None (no exception)."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", tmp_path / "nope.json")
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", tmp_path / "nope.json")
     assert ramen_cve._load_remembered_opml() is None
 
 
@@ -7390,7 +7390,7 @@ def test_load_remembered_opml_corrupt_returns_none(tmp_path, monkeypatch):
 
     state = tmp_path / "last_opml.json"
     state.write_text("{not valid json")
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", state)
     assert ramen_cve._load_remembered_opml() is None
 
 
@@ -7400,7 +7400,7 @@ def test_reset_remembered_opml(tmp_path, monkeypatch):
 
     state = tmp_path / "last_opml.json"
     state.write_text('{"opml_path": "/x"}')
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", state)
     assert ramen_cve._reset_remembered_opml() is True
     assert not state.exists()
     assert ramen_cve._reset_remembered_opml() is False  # already gone
@@ -7426,7 +7426,7 @@ def test_run_opml_no_path_no_memory_errors(tmp_path, monkeypatch, caplog):
 
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", tmp_path / "none.json")
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", tmp_path / "none.json")
     args = argparse.Namespace(
         subcommand="opml", path=None, remember_opml=False,
         no_exploit_lookup=True, no_enrich_iocs=True, no_cache=True,
@@ -7449,7 +7449,7 @@ def test_run_opml_remembers_and_reuses(tmp_path, monkeypatch):
     import ramen_cve
 
     state = tmp_path / "last_opml.json"
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", state)
     opml = tmp_path / "feeds.opml"
     opml.write_text(
         '<?xml version="1.0"?><opml version="2.0"><body>'
@@ -7499,7 +7499,7 @@ def test_delete_yaml_preset(tmp_path, monkeypatch):
     """delete_yaml_preset removes an existing preset and returns its path."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     (tmp_path / "gone.yaml").write_text("subcommand: opml")
     removed = ramen_cve.delete_yaml_preset("gone")
     assert removed == tmp_path / "gone.yaml"
@@ -7511,7 +7511,7 @@ def test_cli_reset_config(tmp_path, monkeypatch, capsys):
     """`--reset-config NAME` deletes the preset (rc=0) or errors rc=1 if absent."""
     import ramen_cve
 
-    monkeypatch.setattr(ramen_cve, "DEFAULT_PRESETS_DIR", tmp_path)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_PRESETS_DIR", tmp_path)
     (tmp_path / "daily.yaml").write_text("subcommand: opml")
     rc = ramen_cve.main(["--reset-config", "daily"])
     assert rc == 0
@@ -7526,7 +7526,7 @@ def test_cli_reset_opml(tmp_path, monkeypatch, capsys):
     import ramen_cve
 
     state = tmp_path / "last_opml.json"
-    monkeypatch.setattr(ramen_cve, "DEFAULT_LAST_OPML_PATH", state)
+    monkeypatch.setattr(ramen_cve.config, "DEFAULT_LAST_OPML_PATH", state)
     state.write_text('{"opml_path": "/x"}')
     rc = ramen_cve.main(["--reset-opml"])
     assert rc == 0

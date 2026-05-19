@@ -263,9 +263,9 @@ def test_main_invokes_wizard_when_no_args(tmp_path, monkeypatch):
     ]
 
     with (
-        patch("ramen_cve._is_interactive", return_value=True),
-        patch("ramen_cve._run_wizard", return_value=fake_argv) as wizard,
-        patch("ramen_cve._run_cve", return_value=0) as runner,
+        patch("ramen_cve.cli._is_interactive", return_value=True),
+        patch("ramen_cve.cli._run_wizard", return_value=fake_argv) as wizard,
+        patch("ramen_cve.cli._run_cve", return_value=0) as runner,
     ):
         rc = ramen_cve.main()
 
@@ -279,8 +279,8 @@ def test_main_skips_wizard_when_argv_provided(tmp_path):
     import ramen_cve
 
     with (
-        patch("ramen_cve._run_wizard") as wizard,
-        patch("ramen_cve._run_cve", return_value=0),
+        patch("ramen_cve.cli._run_wizard") as wizard,
+        patch("ramen_cve.cli._run_cve", return_value=0),
     ):
         ramen_cve.main(
             ["cve", "CVE-2021-44228", "--no-cache", "--out-dir", str(tmp_path), "--format", "csv"]
