@@ -8,8 +8,6 @@ import sys
 from datetime import date
 from pathlib import Path
 
-import questionary
-
 from .cliutil import _strip_path_quotes, _validate_opml_input
 from .constants import CVE_REGEX, DEFAULT_CVSS_THRESHOLD, DEFAULT_EPSS_THRESHOLD
 from .pipeline import _safe_basename
@@ -23,6 +21,7 @@ def _run_wizard() -> list[str]:
     exactly like what the user could have typed, then main() re-parses it
     so all the normal argparse validation still applies.
     """
+    import questionary  # deferred: keeps `patch.dict(sys.modules)` test seam
 
     print("Ramen CVE — interactive wizard\n", file=sys.stderr)
 

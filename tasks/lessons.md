@@ -136,3 +136,37 @@ rule. Reviewed at session start and before major refactors (per
   `ruff __init__.py --select F401`, and prune any now-dead stdlib
   import **in the same commit** (verify single occurrence + not a
   monkeypatch seam: `0 patch("ramen_cve.<mod>")`).
+
+---
+
+## L6 — Don't hoist a deliberately function-local import; it can be a test seam
+
+- **Failure mode:** The monolith's `_run_wizard` did a *function-local*
+  `import questionary` (deferred — `questionary` is heavy/optional, and
+  `tests/test_wizard.py` relies on it via
+  `with patch.dict("sys.modules", {"questionary": fake_q})`, which only
+  takes effect if the import re-resolves through `sys.modules` on each
+  call). The Step-30 extraction header hoisted `import questionary` to
+  wizard.py module-top; `ruff --fix` then deleted the now-"redundant"
+  function-local import. Result: `questionary` bound once at module
+  import → `patch.dict` no longer intercepts it → 8 `test_wizard`
+  tests `EOFError` (real questionary tried to read stdin). F821 +
+  golden + clean-room ruff were all green; only pytest caught it —
+  and the step had already been committed/pushed (repeat L5 process
+  miss under batch pace).
+- **Detection signal:** Tests using `patch.dict("sys.modules", {...})`
+  or that mock an optional dep fail with `EOFError`/`ImportError`/real
+  side-effects after extraction, while F821/ruff stay green. `git
+  show HEAD~1:…__init__.py | grep -n "import <dep>"` shows the import
+  was *inside* the function in the monolith.
+- **Prevention rule:** The extraction HDR carries only imports that
+  were **module-level** in the monolith. A `import X` that lived inside
+  a function is a deliberate contract (deferred load and/or
+  `sys.modules` test seam) — it travels untouched inside the moved seg
+  and must stay function-local; never hoist it, and don't let
+  `ruff --fix` dedupe it against a hoisted copy. Before extracting a
+  block that imports an optional/heavy dep, grep the monolith for
+  `^\s+import <dep>` (indented = function-local) and preserve scope.
+  And (L5, re-affirmed) **never commit until clean-room pytest is
+  confirmed 463-green** — ruff/F821/golden green is necessary, not
+  sufficient.
