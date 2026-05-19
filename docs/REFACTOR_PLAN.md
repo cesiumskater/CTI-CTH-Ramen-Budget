@@ -392,3 +392,11 @@ growth and is optimistic for the zero-behavior-change rigor required.
   missed `csv` + `EnrichedCve` → 3 NameError, F821-sweep caught,
   added imports. No test repoints (Cache-fixture mocks survive).
   `__init__` 4344→4219. 463 passed, ruff clean. ✅
+- **Step 12/26 — `enrich/iocs.py`:** VT/AbuseIPDB/OTX/MalwareBazaar
+  enrichers + `_EnricherBase`/`_build_default_enrichers`/`enrich_iocs`
+  + their 4 own API-base constants (0 external/test refs → moved
+  cohesively) → L2 (250 LOC). F821-sweep caught grep-missed
+  `urllib.parse` (OTX URL-encode) → 1 NameError, added. Pruned
+  now-dead `import urllib.parse` from `__init__` (verified not a
+  monkeypatch seam). No test repoints. `__init__` 4219→3999
+  (**<4000, 34% off the 6020 baseline**). 463 passed, ruff clean. ✅
