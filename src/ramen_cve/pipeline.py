@@ -1,0 +1,318 @@
+"""ramen_cve.pipeline — post-enrichment glue: optional IOC enrich,
+sector/decay filters, associations, dispatch, inventory digest, and
+the multi-format `_output` writer (Layer-4). See docs/REFACTOR_PLAN.md.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import re
+from pathlib import Path
+
+from .associations import load_associations
+from .cache import Cache
+from .cliutil import _resolve_out_dir
+from .decay import apply_ioc_decay, filter_iocs_by_confidence
+from .dispatch.runner import dispatch_records
+from .enrich.inventory import correlate_inventory, load_inventory
+from .enrich.iocs import enrich_iocs
+from .models import EnrichedCve, IocRecord, OpmlError, _utcnow
+from .output.csv_writer import write_csv
+from .output.markdown import write_markdown
+from .output.sigma import write_sigma_stubs
+from .output.stix import write_iocs_csv, write_stix
+from .output.yara import write_yara_stubs
+
+_log = logging.getLogger(__name__)
+
+
+def _maybe_enrich_iocs(args: argparse.Namespace, iocs: list[IocRecord], cache: Cache) -> None:
+    """Run enrich_iocs unless --no-enrich-iocs was passed."""
+    if iocs and not args.no_enrich_iocs:
+        enrich_iocs(iocs, cache)
+
+
+def _maybe_filter_by_sector(
+    args: argparse.Namespace, enriched: list[EnrichedCve]
+) -> list[EnrichedCve]:
+    """Drop CVEs whose only adversary attribution targets a different sector.
+
+    Safe-by-default policy: a CVE with NO linked_actors stays in the report
+    (we can't claim it isn't relevant). A CVE with linked_actors stays only
+    if at least one actor's sectors_targeted includes the chosen sector.
+
+    A blank `args.sector` (the default) returns the list untouched.
+    """
+    sector = (getattr(args, "sector", None) or "").strip().lower()
+    if not sector:
+        return enriched
+    kept: list[EnrichedCve] = []
+    dropped = 0
+    for rec in enriched:
+        if not rec.linked_actors:
+            kept.append(rec)
+            continue
+        if any(sector in (a.sectors_targeted or []) for a in rec.linked_actors):
+            kept.append(rec)
+        else:
+            dropped += 1
+    if dropped:
+        _log.info(
+            "Dropped %d CVE(s) whose only adversary attribution did not target %r.",
+            dropped, sector,
+        )
+    return kept
+
+
+def _decay_and_filter_iocs(
+    args: argparse.Namespace, iocs: list[IocRecord]
+) -> list[IocRecord]:
+    """Stamp every IOC with its decay-weighted confidence and drop any below the floor.
+
+    Mutates each IOC's confidence in place, then returns a (possibly shorter)
+    list with sub-floor entries excluded. The floor defaults to 0.0 — without
+    --ioc-confidence-floor every input survives.
+    """
+    apply_ioc_decay(iocs)
+    floor = float(getattr(args, "ioc_confidence_floor", 0.0) or 0.0)
+    before = len(iocs)
+    out = filter_iocs_by_confidence(iocs, floor)
+    dropped = before - len(out)
+    if dropped:
+        _log.info(
+            "Dropped %d IOC(s) below the confidence floor (%.3f).", dropped, floor,
+        )
+    return out
+
+
+def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]]:
+    """Resolve which associations file to use for this run.
+
+    Falls back to the bundled DEFAULT_ASSOCIATIONS_PATH unless the user passed
+    --associations-file. A missing file produces an empty dict + warning so the
+    rest of the pipeline still runs.
+    """
+    return load_associations(args.associations_file)
+
+
+def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """If --dispatch is set, push high-priority records to configured dispatchers."""
+    if not getattr(args, "dispatch", False):
+        return
+    sent = dispatch_records(enriched)
+    _log.info("Dispatch complete: %d successful posts.", sent)
+
+
+def _maybe_correlate_inventory(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """Load --inventory (if set) and annotate each EnrichedCve with affected_hosts.
+
+    A missing or unreadable inventory file is logged as an error but does NOT
+    abort the run — the rest of the report is still useful without correlation.
+    The parsed inventory rows are stashed on args._inventory_rows so the email
+    digest dispatcher can map hosts → owner email addresses later.
+    """
+    inv_path: Path | None = getattr(args, "inventory", None)
+    if not inv_path:
+        args._inventory_rows = []
+        return
+    try:
+        inventory = load_inventory(inv_path)
+    except OpmlError as exc:
+        _log.error("Inventory correlation skipped: %s", exc)
+        args._inventory_rows = []
+        return
+    correlate_inventory(enriched, inventory)
+    affected = sum(1 for r in enriched if r.affected_hosts)
+    _log.info(
+        "Inventory correlation: %d/%d CVEs affect at least one host (%d inventory rows).",
+        affected, len(enriched), len(inventory),
+    )
+    args._inventory_rows = inventory
+
+
+def _get_github_token() -> str | None:
+    """Return GITHUB_TOKEN from the environment, or None if absent.
+
+    The token is only used to lift GitHub Search rate limits when
+    enrich_with_exploit_status is enabled. We never log it and never persist it.
+    """
+
+    token = os.getenv("GITHUB_TOKEN") or None
+    return token
+
+
+# Output-format file extensions that _safe_basename strips off a user-supplied
+# basename so we don't end up with `my-report.csv.csv`. Edit here when adding
+# new --format choices.
+_KNOWN_OUTPUT_EXTENSIONS: tuple[str, ...] = (
+    ".csv", ".md", ".json", ".yar", ".yaml", ".yml",
+)
+
+
+def _safe_basename(value: str | None) -> str:
+    """Sanitize a user-supplied basename for use as an output-file stem.
+
+    Steps applied in order:
+      1. Strip surrounding whitespace.
+      2. Replace path / glob / shell-meta characters ( \\ / : * ? " < > | )
+         with ``_``.
+      3. Strip leading dot / dash / underscore runs so traversal artefacts
+         (``../etc/passwd``) and hidden-file shapes (``.cache``) collapse
+         to a clean stem.
+      4. Strip one trailing recognized output extension (``.csv``, ``.md``,
+         ``.json``, ``.yar``, ``.yaml``, ``.yml``). The writer re-appends
+         the correct extension based on the actual format being written,
+         so a user pasting ``my-report.csv`` ends up with one ``.csv``,
+         not two.
+
+    Empty input returns ``''`` (the caller falls back to a timestamped stem).
+    """
+    if not value:
+        return ""
+    cleaned = re.sub(r"[\\/:*?\"<>|]+", "_", value.strip())
+    cleaned = cleaned.lstrip(". -_")
+    # Strip ONE known output extension if present (case-insensitive).
+    lower = cleaned.lower()
+    for ext in _KNOWN_OUTPUT_EXTENSIONS:
+        if lower.endswith(ext):
+            cleaned = cleaned[: -len(ext)]
+            break
+    return cleaned or ""
+
+
+def _unique_output_path(
+    out_dir: Path, ts: str, suffix: str, basename: str | None = None
+) -> Path:
+    """Return a path that does not yet exist by appending -N if needed.
+
+    If `basename` is provided it becomes the file stem (e.g. 'q2-triage.csv').
+    Otherwise we fall back to the timestamped 'ramen-cve-<ts>.<suffix>' shape.
+    Two runs that land on the same stem must not silently overwrite each other:
+    we probe -1, -2, ... up to 1000 and return the first free name.
+    """
+    stem = _safe_basename(basename) or f"ramen-cve-{ts}"
+    base = out_dir / f"{stem}.{suffix}"
+    if not base.exists():
+        return base
+    for i in range(1, 1000):
+        candidate = out_dir / f"{stem}-{i}.{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not allocate a unique output filename in {out_dir}")
+
+
+def _output(
+    enriched: list[EnrichedCve],
+    args: argparse.Namespace,
+    metadata: dict,
+    iocs: list[IocRecord] | None = None,
+) -> dict[str, Path | None]:
+    """Write CSV and/or Markdown output based on --format flag.
+
+    Returns a dict mapping output kind ('csv', 'iocs_csv', 'md', 'stix',
+    'sigma_dir', 'yara_dir') to the Path that was written, or None for the
+    kinds that --format didn't ask for. Callers use that dict to attach the
+    rendered files in downstream pushes (see _maybe_digest).
+
+    When `iocs` is non-empty and --format includes csv, an additional
+    `<basename>-iocs.csv` file is written next to the main CVE CSV. The
+    Markdown report grows an Indicators of Compromise section regardless.
+
+    TLP:RED records are stripped from the output unless --allow-tlp-red was
+    passed; the count of stripped records is logged at WARNING.
+    """
+    # Microsecond resolution makes single-process collisions essentially
+    # impossible; the -N suffix loop in _unique_output_path covers
+    # cross-process collisions and any clock that lacks sub-second
+    # resolution.
+    ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
+    # Resolve --out-dir = None / '' / '.' to the actual cwd so the on-disk
+    # path is unambiguous (no leading-period surprises on Windows).
+    out_dir: Path = _resolve_out_dir(getattr(args, "out_dir", None))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    iocs = iocs or []
+    basename = _safe_basename(getattr(args, "basename", None))
+    sigma_stem = basename or f"ramen-cve-{ts}"
+
+    if not getattr(args, "allow_tlp_red", False):
+        before = (len(enriched), len(iocs))
+        enriched = [r for r in enriched if (r.tlp or "CLEAR").upper() != "RED"]
+        iocs = [i for i in iocs if (i.tlp or "CLEAR").upper() != "RED"]
+        stripped_cve = before[0] - len(enriched)
+        stripped_ioc = before[1] - len(iocs)
+        if stripped_cve or stripped_ioc:
+            _log.warning(
+                "Stripped %d TLP:RED CVE record(s) and %d TLP:RED IOC record(s); "
+                "pass --allow-tlp-red to include them.",
+                stripped_cve,
+                stripped_ioc,
+            )
+
+    paths: dict[str, Path | None] = {
+        "csv": None, "iocs_csv": None, "md": None,
+        "stix": None, "sigma_dir": None, "yara_dir": None,
+    }
+
+    if args.format in ("csv", "both", "all"):
+        csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
+        _log.info("Writing CVE CSV report → %s", csv_path)
+        write_csv(enriched, csv_path)
+        print(str(csv_path))
+        paths["csv"] = csv_path
+        if iocs:
+            # Without a basename, we want `ramen-cve-<ts>-iocs.csv`. Encoding
+            # the "-iocs" tail via the suffix kwarg keeps that shape. With a
+            # basename, we instead set the stem to `<basename>-iocs` and use
+            # a plain ".csv" suffix so we don't end up with `*-iocs.iocs.csv`.
+            if basename:
+                iocs_path = _unique_output_path(
+                    out_dir, ts, "csv", basename=f"{basename}-iocs"
+                )
+            else:
+                iocs_path = _unique_output_path(out_dir, ts, "iocs.csv")
+            _log.info("Writing IOC CSV report → %s", iocs_path)
+            write_iocs_csv(iocs, iocs_path)
+            print(str(iocs_path))
+            paths["iocs_csv"] = iocs_path
+
+    if args.format in ("md", "both", "all"):
+        md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
+        _log.info("Writing Markdown report → %s", md_path)
+        write_markdown(enriched, md_path, metadata, iocs=iocs)
+        print(str(md_path))
+        paths["md"] = md_path
+
+    if args.format in ("stix", "all"):
+        stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
+        _log.info("Writing STIX 2.1 bundle → %s", stix_path)
+        write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
+        print(str(stix_path))
+        paths["stix"] = stix_path
+
+    if args.format in ("sigma", "all"):
+        sigma_dir = out_dir / f"{sigma_stem}-sigma"
+        _log.info("Writing Sigma rule stubs → %s", sigma_dir)
+        files = write_sigma_stubs(enriched, sigma_dir)
+        if files:
+            print(str(sigma_dir))
+            paths["sigma_dir"] = sigma_dir
+        else:
+            _log.info(
+                "No kev_override / patch_now CVEs in this run; no Sigma stubs written."
+            )
+
+    if args.format in ("yara", "all"):
+        yara_dir = out_dir / f"{sigma_stem}-yara"
+        _log.info("Writing YARA rule stubs → %s", yara_dir)
+        files = write_yara_stubs(enriched, yara_dir)
+        if files:
+            print(str(yara_dir))
+            paths["yara_dir"] = yara_dir
+        else:
+            _log.info(
+                "No kev_override / patch_now CVEs with linked malware; "
+                "no YARA stubs written."
+            )
+    return paths
+

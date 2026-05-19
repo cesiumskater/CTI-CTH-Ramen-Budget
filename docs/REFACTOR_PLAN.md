@@ -571,3 +571,14 @@ growth and is optimistic for the zero-behavior-change rigor required.
   from __init__ + I001 autofix. Clean-room + dual-F821 + golden:
   463 passed, ruff clean, CSV/MD byte-identical to anchor. __init__
   1949→1662. ✅
+- **Step 29 — `pipeline.py`** (plan-row 20): post-enrich glue
+  (`_maybe_enrich_iocs`/`_maybe_filter_by_sector`/`_decay_and_filter_iocs`/
+  `_resolve_associations`/`_maybe_dispatch`/`_maybe_correlate_inventory`/
+  `_get_github_token`/`_safe_basename`/`_unique_output_path`/`_output`
+  + `_KNOWN_OUTPUT_EXTENSIONS`) → L4 (`[_maybe_enrich_iocs:_run_opml)`,
+  291 lines). **Reordered before wizard** (wizard needs `_safe_basename`
+  ⇒ pipeline must precede it; Risk 5.3 cycle avoided). F821 enumerated
+  16 sibling deps (all already-extracted: output.*/dispatch.*/enrich.*/
+  decay/associations/cliutil/models) — no `main` ref (docstring only),
+  acyclic. Full 11-name surface re-exported (L3). Clean-room + dual-F821
+  + golden: 463 passed, ruff clean, zero drift. __init__ 1663→1385. ✅
