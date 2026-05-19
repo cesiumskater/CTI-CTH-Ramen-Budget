@@ -513,3 +513,11 @@ growth and is optimistic for the zero-behavior-change rigor required.
   oracle: 463 passed, ruff clean, zero drift (CSV 3fd1ac95, MD
   e9779ffc), facade resolves. `dispatch/` pkg COMPLETE. `__init__`
   2697→2571 (−126). ✅
+- **Step 22/26 — `hunt.py`:** `load_hunt`/`load_all_hunts`/`save_hunt`/
+  `_hunt_path`/`_run_hunt` → L4 (`[load_hunt:load_pir)`, 124 lines).
+  Pre-checked: runners are self-contained (0 calls into __init__ glue
+  `_output`/`_maybe_*`) ⇒ no cycle. Deps: Cache←cache,
+  Hunt/OpmlError/_utcnow←models, F821-added CVE_REGEX/HUNT_STATUSES←
+  constants. Full 5-name surface re-exported (L3). Clean-room +
+  dual-F821: 463 passed, ruff clean, facade resolves. __init__
+  2571→2454. ✅
