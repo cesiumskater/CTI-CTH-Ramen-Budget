@@ -454,3 +454,13 @@ growth and is optimistic for the zero-behavior-change rigor required.
   Verification = clean-room repro (py3.10) + dual F821: 463 passed,
   ruff clean, facade resolves full surface incl. `_stix_uuid`.
   `__init__` 3611→3288 (**−323; ~45% off the 6020 baseline**). ✅
+- **Step 17/26 — `output/sigma.py`:** Sigma detection-rule stub writer
+  (`SIGMA_ELIGIBLE_BUCKETS` + `_sigma_level_for`/`_sigma_yaml_escape`/
+  `_build_sigma_stub`/`write_sigma_stubs`) → L3 (120-line block
+  `[SIGMA_ELIGIBLE_BUCKETS:_yara_safe_name)`, deps EnrichedCve/Path/
+  date). Gate caught grep-missed `_stix_uuid` (reused for deterministic
+  rule IDs) → added sibling import `from .stix import _stix_uuid` (no
+  cycle: output→output). Full 5-name surface re-exported (L3); F821
+  `__init__` clean. Verification = clean-room repro (py3.10) + dual
+  F821: 463 passed, ruff clean, facade resolves. `__init__` 3288→3181
+  (−107). ✅
