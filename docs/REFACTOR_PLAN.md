@@ -582,3 +582,12 @@ growth and is optimistic for the zero-behavior-change rigor required.
   decay/associations/cliutil/models) — no `main` ref (docstring only),
   acyclic. Full 11-name surface re-exported (L3). Clean-room + dual-F821
   + golden: 463 passed, ruff clean, zero drift. __init__ 1663→1385. ✅
+- **Step 30 — `wizard.py`** (plan-row 21): `_run_wizard` +
+  `_wizard_validate_{date,cve_list,float}` → L4
+  (`[_run_wizard:main)`, 210 lines). Deps pinned upfront — sibling
+  `_safe_basename`←pipeline (why Step 29 preceded this),
+  `_strip_path_quotes`/`_validate_opml_input`←cliutil,
+  CVE_REGEX/DEFAULT_CVSS_THRESHOLD/DEFAULT_EPSS_THRESHOLD←constants,
+  questionary — F821 clean first try, acyclic. Full 4-name surface
+  re-exported (L3). Clean-room + dual-F821 + golden: 463 passed, ruff
+  clean, zero drift. __init__ 1385→1181. ✅
