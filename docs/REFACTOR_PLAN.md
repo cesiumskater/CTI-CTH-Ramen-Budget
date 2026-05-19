@@ -532,3 +532,11 @@ growth and is optimistic for the zero-behavior-change rigor required.
   56 lines). Deps Cache/EnrichedCve; F821-added CVE_REGEX←constants.
   Full 4-name surface re-exported (L3). Clean-room + dual-F821: 463
   passed, ruff clean. __init__ 2339→2289. ✅
+- **Step 25/26 — `audit.py`:** `_AUDIT_SENSITIVE_KEYS` + `_audit_actor`/
+  `_redact_audit_args`/`_audit_dispatch`/`_run_audit` → L4
+  (`[_AUDIT_SENSITIVE_KEYS:_parse_schedule_time)`, 99 lines).
+  `_audit_dispatch` takes a callable ⇒ self-contained (no __init__
+  glue ref). Deps Cache/_utcnow + argparse/getpass/json/Path; F821
+  added contextlib + datetime.date. Full 5-name surface re-exported
+  (L3). Clean-room + dual-F821: 463 passed, ruff clean. __init__
+  2289→2197. ✅
