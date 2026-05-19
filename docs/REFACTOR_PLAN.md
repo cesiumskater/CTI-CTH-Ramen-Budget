@@ -464,3 +464,15 @@ growth and is optimistic for the zero-behavior-change rigor required.
   `__init__` clean. Verification = clean-room repro (py3.10) + dual
   F821: 463 passed, ruff clean, facade resolves. `__init__` 3288→3181
   (−107). ✅
+- **Step 18/26 — `output/yara.py`:** YARA rule stub writer
+  (`_yara_safe_name`/`_yara_string_escape`/`_build_yara_stub`/
+  `write_yara_stubs` + `YARA_ELIGIBLE_BUCKETS`) → L3 (99-line block
+  `[_yara_safe_name:write_csv)`). Deps pinned upfront from the
+  `_build_yara_stub(rec, malware: Malware)` signature (L1 working — no
+  grep-miss): `EnrichedCve`/`Malware`←models, sibling
+  `SIGMA_ELIGIBLE_BUCKETS`←`.sigma` (drives `YARA_ELIGIBLE_BUCKETS =
+  SIGMA_ELIGIBLE_BUCKETS`, identity preserved), `_stix_uuid`←`.stix`,
+  re/date/Path. Full 5-name surface re-exported (L3). Green first try:
+  clean-room repro (py3.10) + dual F821 → 463 passed, ruff clean,
+  facade resolves & `YARA_ELIGIBLE_BUCKETS==('kev_override',
+  'patch_now')`. `__init__` 3181→3089 (**−92; ~49% off baseline**). ✅
