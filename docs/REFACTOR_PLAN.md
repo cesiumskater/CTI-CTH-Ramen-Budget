@@ -405,3 +405,16 @@ growth and is optimistic for the zero-behavior-change rigor required.
   csv/Path/models only, no net/log). F821-sweep caught grep-missed
   `OpmlError` (friendly missing-file error) → 2 NameError, added. No
   test repoints. `__init__` 3999→3915. 463 passed, ruff clean. ✅
+- **Step 14/26 — `dispatch/sinks.py`:** new `dispatch/` pkg (L3
+  notification sinks). `_DispatcherBase` + Slack/Generic-webhook/Email
+  dispatchers + `_build_default_dispatchers` + in-block
+  `DISPATCH_DEFAULT_BUCKETS` const (moved with block, re-exported).
+  Email MIME imports are function-local (travel with code); `smtplib`
+  module-level. `USER_AGENT` ← `constants`; `RAMEN_SMTP_*`/`SLACK_*`
+  are `os.getenv` string literals (not symbols). F821-sweep caught
+  grep-missed `Path` — used only in stringised annotations, so masked
+  by `from __future__ import annotations` (all 463 tests passed even
+  while undefined) → added `from pathlib import Path`. Ruff autofix
+  pruned now-unused `import json`. 0 test repoints (32 dispatcher
+  tests resolve via facade). `__init__` 3915→3640 (**−275; 39.5% off
+  the 6020 baseline**). 463 passed, ruff clean. ✅
