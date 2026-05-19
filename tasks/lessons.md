@@ -86,3 +86,31 @@ rule. Reviewed at session start and before major refactors (per
   collections, never a hand-picked "public" subset. Then the L1
   `ruff --select F821` sweep on **both** the new module and `__init__`,
   plus the L2 clean-room suite, is the blocking gate.
+
+---
+
+## L4 — A golden byte-oracle must normalise EVERY volatile field; self-validate it
+
+- **Failure mode:** The Step-19 golden oracle hashed regenerated
+  CSV+MD to detect output drift, but normalised only the MD
+  `Generated:` clock line. The CSV `enriched_at` column is `_utcnow()`
+  at enrichment time (the committed `examples/sample-output.csv` had it
+  *frozen* at `2026-01-15T09:00:00`, so it looked like fixture data,
+  not a live field). Result: a **false-positive "DRIFT DETECTED"** on
+  Step 19 even though every non-timestamp byte was identical and the MD
+  hash matched exactly. Panic-reverting would have discarded correct
+  work; the suite (test_smoke = presence checks only) gave no signal
+  either way.
+- **Detection signal:** Oracle reports drift, but a localized
+  `git stash`-diff of pre-vs-post output shows the *only* delta is a
+  wall-clock field. Equivalent self-check: running the oracle **twice
+  on the same code** yields different hashes ⇒ normalisation is
+  incomplete (a volatile field is unmasked), not a real regression.
+- **Prevention rule:** Before trusting a golden oracle as a drift
+  detector, **self-validate it**: run it twice on identical code and
+  assert equal hashes; if not, a volatile field is unmasked — fix
+  normalisation first. Enumerate volatile fields from the *render
+  code* (`_utcnow()`, `.now()`, timestamped filenames, RNG), not from
+  eyeballing a frozen committed sample. On an oracle "drift" alert,
+  **localize before reverting** (Triage: Reproduce→Localize→Reduce):
+  diff actual content; only a non-volatile delta is real drift.

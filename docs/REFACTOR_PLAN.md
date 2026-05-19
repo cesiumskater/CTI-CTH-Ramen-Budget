@@ -476,3 +476,15 @@ growth and is optimistic for the zero-behavior-change rigor required.
   clean-room repro (py3.10) + dual F821 → 463 passed, ruff clean,
   facade resolves & `YARA_ELIGIBLE_BUCKETS==('kev_override',
   'patch_now')`. `__init__` 3181→3089 (**−92; ~49% off baseline**). ✅
+- **Step 19/26 — `output/csv_writer.py`** (golden-diff milestone, pt 1):
+  `CSV_COLUMNS` + `write_csv` → L3 (`[CSV_COLUMNS:BUCKET_ORDER)`, deps
+  EnrichedCve/Path/csv). Removed now-dead `import csv` from `__init__`
+  (Risk 5.7; not a patch seam — 0 `patch("ramen_cve.csv")`). Built a
+  **golden byte-oracle** (mocked opml pipeline like `test_smoke`,
+  sha256 of regenerated CSV+MD). Oracle first flagged false-positive
+  drift → localized via `git stash`-diff to the volatile `enriched_at`
+  (`_utcnow()`) column, not a regression (new lesson **L4**: normalise
+  every volatile field; self-validate the oracle). Fixed oracle
+  (normalise CSV `enriched_at` ISO-TS + MD `Generated:`): **post-18 ==
+  post-19 byte-identical** (CSV `3fd1ac95`, MD `e9779ffc`). 463 passed,
+  ruff/F821 clean. `__init__` 3089→3007 (−82). ✅
