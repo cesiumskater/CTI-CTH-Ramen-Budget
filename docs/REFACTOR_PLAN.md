@@ -438,3 +438,19 @@ growth and is optimistic for the zero-behavior-change rigor required.
   env limitation (user-confirmed). Per-step verification story is the
   clean-room repro + F821, recorded in each entry. Provably-green code
   is **not** patched to chase unobservable red CI.
+- **Step 16/26 — `output/stix.py`:** new `output/` pkg (L3
+  serialization). IOC-CSV writer + STIX 2.1 / TAXII import-export:
+  `write_iocs_csv`, `write_stix`, `parse_stix_bundle`, `pull_taxii` +
+  5 `_`-helpers + `IOC_CSV_COLUMNS`/`_STIX_PATTERN_RE` consts (9 defs,
+  330-line block `[IOC_CSV_COLUMNS:SIGMA_ELIGIBLE_BUCKETS)`).
+  `CSV_COLUMNS`@204 left for the CVE `write_csv` golden-diff step.
+  Deps pinned exactly: `CVE_REGEX`/`USER_AGENT`←constants,
+  `CveRecord/EnrichedCve/IocRecord/OpmlError`←models, csv/json/re/date/
+  Path, requests; **no uuid/datetime/timezone**. Gate caught (a)
+  grep-missed `_utcnow` (models helper, F821 stix.py) and (b) an
+  under-listed facade re-export — initially only the 5 public names →
+  20 failures (`test_facade` locks private `_stix_*`; `__init__`
+  F821) → expanded to the full 11-name surface (new lesson **L3**).
+  Verification = clean-room repro (py3.10) + dual F821: 463 passed,
+  ruff clean, facade resolves full surface incl. `_stix_uuid`.
+  `__init__` 3611→3288 (**−323; ~45% off the 6020 baseline**). ✅

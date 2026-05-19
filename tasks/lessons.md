@@ -63,3 +63,26 @@ rule. Reviewed at session start and before major refactors (per
   verification explicitly in each step's ledger entry. Surface (don't
   silently absorb) any CI-vs-local divergence whose cause can't be
   observed; let the human decide disposition.
+
+---
+
+## L3 — Facade must re-export the COMPLETE moved surface, incl. `_`-private
+
+- **Failure mode:** Step 16 moved the STIX block (9 funcs + 2 consts)
+  and the facade re-export listed only the 5 *public* names. Result:
+  20 test failures — `tests/test_facade.py` locks **every** name that
+  was ever a `ramen_cve.*` attribute (private `_stix_uuid`,
+  `_ioc_to_stix_pattern`, `_extract_iocs_from_pattern`, … included),
+  and `__init__` itself still had internal call sites referencing the
+  private helpers (F821 `_stix_uuid`).
+- **Detection signal:** `ruff --select F821` on `__init__.py` flags the
+  un-re-exported private names still called there; `test_facade.py`
+  fails with `facade dropped attribute(s): [...]`; `ImportError:
+  cannot import name '_X' from 'ramen_cve'`.
+- **Prevention rule:** The re-export set = the **entire** top-level
+  surface moved out (all `def`/`class`/CONST names, public *and*
+  `_`-prefixed), not just the public API. Build the re-export list
+  directly from the extraction's guard-verified `defs`+`consts`
+  collections, never a hand-picked "public" subset. Then the L1
+  `ruff --select F821` sweep on **both** the new module and `__init__`,
+  plus the L2 clean-room suite, is the blocking gate.
