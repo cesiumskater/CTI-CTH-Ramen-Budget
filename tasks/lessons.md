@@ -33,3 +33,33 @@ rule. Reviewed at session start and before major refactors (per
   Do not rely on the test suite alone — annotation-only undefined names
   pass tests but are still bugs. Add missing imports, re-run both, only
   then commit.
+
+---
+
+## L2 — GitHub Actions CI is an unreliable signal in this environment
+
+- **Failure mode:** PR #20's `test` workflow fails deterministically in
+  15–25 s on a SHA whose code is provably correct. A faithful clean-room
+  reproduction — fresh `python3.10 -m venv`, `pip install -e ".[dev]"`,
+  then the exact `ruff` / import-guard / `pytest` commands from
+  `.github/workflows/ci.yml` — passes every step (463 passed, ruff
+  clean, entry point resolves). The runner fails far too fast for the
+  real test phase; `ci.yml` has no pip caching, so each run does a full
+  network `pip install` from PyPI. Most plausible cause: the Actions
+  runner has restricted/no PyPI egress, so the install fails fast and
+  deterministically — an environment limitation, not a code defect.
+  (User-confirmed disposition: treat as runner/PyPI-egress.)
+- **Detection signal:** CI red within <30 s **while** a same-Python
+  (3.10) clean-room repro of every `ci.yml` step is green. Available
+  tooling cannot fetch Actions job logs (no logs MCP tool; WebFetch
+  can't authenticate to Actions), so the red check is not actionable
+  from logs.
+- **Prevention / mitigation rule:** Do **not** patch provably-green code
+  to chase an unobservable red CI — that violates "smallest change" and
+  "be explicit about uncertainty". The authoritative per-step
+  verification story for this refactor is the **local clean-room repro**
+  (py3.10 fresh `pip install -e ".[dev]"` + exact `ci.yml` command
+  sequence) **plus** the L1 F821-before-commit gate. Record that
+  verification explicitly in each step's ledger entry. Surface (don't
+  silently absorb) any CI-vs-local divergence whose cause can't be
+  observed; let the human decide disposition.

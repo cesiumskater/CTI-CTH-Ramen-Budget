@@ -418,3 +418,23 @@ growth and is optimistic for the zero-behavior-change rigor required.
   pruned now-unused `import json`. 0 test repoints (32 dispatcher
   tests resolve via facade). `__init__` 3915→3640 (**−275; 39.5% off
   the 6020 baseline**). 463 passed, ruff clean. ✅
+- **Step 15/26 — `dispatch/runner.py`:** `dispatch_records` (dispatch
+  orchestrator) → completes the `dispatch/` pkg (L3). Imports siblings
+  `DISPATCH_DEFAULT_BUCKETS`/`_DispatcherBase`/`_build_default_dispatchers`
+  from `.sinks`; `EnrichedCve` from `..models`. Purity guard caught the
+  naive `[dispatch_records:write_iocs_csv)` boundary dragging two
+  **output-section** constants (`CSV_COLUMNS`@233, `IOC_CSV_COLUMNS`)
+  into runner → corrected to `[dispatch_records:CSV_COLUMNS)` (30
+  lines); constants stay for the output step. Facade re-exports
+  `dispatch_records` (used at `__init__` internal call site + 8 test
+  refs). 0 test repoints. **Verification = local clean-room repro
+  (py3.10 fresh `pip install -e .[dev]` + exact `ci.yml` cmds) + L1
+  F821 gate** (Actions CI red is the L2 runner/PyPI-egress env
+  limitation, user-dispositioned — not chased). `__init__` 3640→3611.
+  463 passed, ruff clean, F821 clean. ✅
+- **CI note (see tasks/lessons.md L2):** GitHub Actions `test` fails
+  deterministically <30 s on provably-green SHAs; faithful clean-room
+  repro of every `ci.yml` step passes. Treated as runner/PyPI-egress
+  env limitation (user-confirmed). Per-step verification story is the
+  clean-room repro + F821, recorded in each entry. Provably-green code
+  is **not** patched to chase unobservable red CI.
