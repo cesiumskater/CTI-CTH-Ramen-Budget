@@ -521,3 +521,9 @@ growth and is optimistic for the zero-behavior-change rigor required.
   constants. Full 5-name surface re-exported (L3). Clean-room +
   dual-F821: 463 passed, ruff clean, facade resolves. __init__
   2571→2454. ✅
+- **Step 23/26 — `pir.py`:** `load_pir`/`load_all_pirs`/`save_pir`/
+  `_pir_path`/`_run_pir` → L4 (`[load_pir:_sparkline)`, 122 lines),
+  parallel to hunt; self-contained runner. Deps pinned upfront
+  (Cache/CVE_REGEX/OpmlError/Pir) — F821 clean first try. Full 5-name
+  surface re-exported (L3). Clean-room + dual-F821: 463 passed, ruff
+  clean. __init__ 2454→2339. ✅
