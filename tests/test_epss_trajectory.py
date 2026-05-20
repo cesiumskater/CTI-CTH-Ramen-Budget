@@ -199,3 +199,117 @@ def test_epss_trajectory_field_is_default_empty():
         first_seen_type="manual_input",
     )
     assert r.epss_trajectory == {}
+
+
+# ---------------------------------------------------------------------------
+# Slice B — sidecar CSV writer + pipeline integration
+# ---------------------------------------------------------------------------
+
+
+def _enriched(cve_id: str, trajectory: dict[str, dict] | None = None):
+    from ramen_cve import EnrichedCve
+    return EnrichedCve(
+        cve_id=cve_id,
+        source="t",
+        first_seen=date(2024, 6, 1),
+        first_seen_type="manual_input",
+        epss_trajectory=trajectory or {},
+    )
+
+
+def test_write_epss_trajectory_csv_writes_one_row_per_date(tmp_path):
+    """A record with N trajectory entries produces N data rows + 1 header."""
+    from ramen_cve import write_epss_trajectory_csv
+
+    rec = _enriched(
+        "CVE-2024-0001",
+        {
+            "2024-06-01": {"epss": 0.10, "percentile": 0.50},
+            "2024-06-02": {"epss": 0.15, "percentile": 0.75},
+            "2024-06-03": {"epss": 0.20, "percentile": 0.99},
+        },
+    )
+    out = tmp_path / "traj.csv"
+    write_epss_trajectory_csv([rec], out)
+
+    lines = out.read_text().splitlines()
+    assert lines[0] == "cve_id,date,epss,percentile"
+    assert lines[1:] == [
+        "CVE-2024-0001,2024-06-01,0.1000,0.5000",
+        "CVE-2024-0001,2024-06-02,0.1500,0.7500",
+        "CVE-2024-0001,2024-06-03,0.2000,0.9900",
+    ]
+
+
+def test_write_epss_trajectory_csv_skips_records_with_empty_trajectory(tmp_path):
+    """Records without a trajectory contribute zero data rows (just the header)."""
+    from ramen_cve import write_epss_trajectory_csv
+
+    out = tmp_path / "traj.csv"
+    write_epss_trajectory_csv(
+        [_enriched("CVE-2024-AAAA"), _enriched("CVE-2024-BBBB")], out
+    )
+
+    assert out.read_text().splitlines() == ["cve_id,date,epss,percentile"]
+
+
+def test_write_epss_trajectory_csv_rows_are_sorted(tmp_path):
+    """Rows are sorted by (cve_id, date) for byte-stable output."""
+    from ramen_cve import write_epss_trajectory_csv
+
+    a = _enriched(
+        "CVE-2024-ZZZZ",
+        {"2024-06-03": {"epss": 0.3, "percentile": 0.9}},
+    )
+    b = _enriched(
+        "CVE-2024-AAAA",
+        {
+            "2024-06-02": {"epss": 0.2, "percentile": 0.8},
+            "2024-06-01": {"epss": 0.1, "percentile": 0.5},
+        },
+    )
+    out = tmp_path / "traj.csv"
+    # Pass in shuffled order; output must still be sorted.
+    write_epss_trajectory_csv([a, b], out)
+
+    assert out.read_text().splitlines()[1:] == [
+        "CVE-2024-AAAA,2024-06-01,0.1000,0.5000",
+        "CVE-2024-AAAA,2024-06-02,0.2000,0.8000",
+        "CVE-2024-ZZZZ,2024-06-03,0.3000,0.9000",
+    ]
+
+
+def test_pipeline_output_emits_sidecar_only_when_trajectory_present(tmp_path):
+    """_output writes <basename>-epss-trajectory.csv iff any record has trajectory.
+
+    Exercises the conditional emission inside pipeline._output: an
+    enriched run with no trajectory must NOT create the sidecar; one
+    with at least one trajectory entry must.
+    """
+    from ramen_cve import _output
+
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, basename="run",
+        allow_tlp_red=True,  # avoid stripping
+    )
+    md = {"version": "test"}
+
+    # Run 1: no trajectory anywhere -> no sidecar
+    out_dir_1 = tmp_path / "run1"
+    out_dir_1.mkdir()
+    args.out_dir = out_dir_1
+    _output([_enriched("CVE-2024-AAAA")], args, md, iocs=None)
+    assert not list(out_dir_1.glob("*epss-trajectory*"))
+
+    # Run 2: one record has a trajectory -> sidecar appears
+    out_dir_2 = tmp_path / "run2"
+    out_dir_2.mkdir()
+    args.out_dir = out_dir_2
+    rec = _enriched(
+        "CVE-2024-AAAA",
+        {"2024-06-01": {"epss": 0.1, "percentile": 0.5}},
+    )
+    _output([rec], args, md, iocs=None)
+    sidecars = list(out_dir_2.glob("*epss-trajectory*"))
+    assert len(sidecars) == 1, sidecars
+    assert sidecars[0].name == "run-epss-trajectory.csv"

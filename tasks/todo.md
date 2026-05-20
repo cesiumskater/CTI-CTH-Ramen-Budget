@@ -30,11 +30,16 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       Verification: 470 passed (was 463 + 7 new trajectory tests in
       `tests/test_epss_trajectory.py`), ruff clean, golden byte-oracle
       byte-identical to anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
-- [ ] **Slice B — sidecar CSV.** New `write_epss_trajectory_csv` in
-      `output/csv_writer.py`; one row per `(cve_id, date, epss,
-      percentile)`. `pipeline._output` emits it whenever any record
-      has a non-empty trajectory dict. Locked column tuple
-      `EPSS_TRAJECTORY_COLUMNS` for the consumer contract.
+- [x] **Slice B — sidecar CSV.** `EPSS_TRAJECTORY_COLUMNS` +
+      `write_epss_trajectory_csv` added to `output/csv_writer.py`;
+      one row per `(cve_id, date, epss, percentile)`, rows sorted for
+      byte-stable output. `pipeline._output` emits
+      `<basename>-epss-trajectory.csv` whenever any record has a
+      non-empty trajectory dict. L3 façade re-export updated;
+      test_facade contract list updated. +4 tests (writer-direct
+      basic / skip-empty / sort, plus pipeline-level emit-iff-present
+      integration). Verification: 474 passed, ruff clean, golden
+      byte-identical (sidecar suppressed when no trajectory).
 - [ ] **Slice C — Markdown sparkline + table.** Reuse
       `trend._sparkline`; possibly lift it to `util/render.py` if the
       L4 → L4 sibling import is awkward.

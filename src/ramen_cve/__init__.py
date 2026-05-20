@@ -215,7 +215,9 @@ from .models import (  # noqa: F401
 )
 from .output.csv_writer import (  # noqa: F401
     CSV_COLUMNS,
+    EPSS_TRAJECTORY_COLUMNS,
     write_csv,
+    write_epss_trajectory_csv,
 )
 from .output.markdown import (  # noqa: F401
     BUCKET_DISPLAY,
@@ -329,6 +331,7 @@ __all__ = [
     "EMAIL_REGEX",
     "ENV_FILE_PATH",
     "EPSS_API_BASE",
+    "EPSS_TRAJECTORY_COLUMNS",
     "EXPLOITDB_CSV_URL",
     "EXPLOIT_STATUS_VALUES",
     "EmailDispatcher",
@@ -512,6 +515,7 @@ __all__ = [
     "search_github_for_cve",
     "time",
     "write_csv",
+    "write_epss_trajectory_csv",
     "write_iocs_csv",
     "write_markdown",
     "write_sigma_stubs",
