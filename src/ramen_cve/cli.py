@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--hunt-dir",
         type=_path_arg,
         default=DEFAULT_HUNT_DIR,
-        help="Directory of hunt JSON files (default: hunts/ next to ramen_cve.py).",
+        help="Directory of hunt JSON files (default: the package's bundled data/hunts/).",
     )
 
     # pir subcommand: leadership-blessed Priority Intelligence Requirements
@@ -345,7 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--pir-dir",
         type=_path_arg,
         default=DEFAULT_PIR_DIR,
-        help="Directory of PIR JSON files (default: pirs/ next to ramen_cve.py).",
+        help="Directory of PIR JSON files (default: the package's bundled data/pirs/).",
     )
 
     # trend subcommand: historical bucket / CVSS / EPSS for one CVE

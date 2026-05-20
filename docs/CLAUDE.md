@@ -264,10 +264,38 @@ This section is project-specific and applies only to the `ramen-cve` tool that l
 
 ### Project shape
 
-- **Single-file Python script.** The tool lives in one file, `ramen_cve.py`, at the repo root. No `src/` layout, no package, no `__init__.py`. Beginners must be able to read it top to bottom in one sitting.
-- **Target line budget:** ~400 lines. If the file passes 500 lines, that's the signal to refactor into a small package — not before.
-- **Python version:** 3.10 or newer. Use modern syntax (`match` statements, structural pattern matching, `X | Y` union types, `dict[str, int]` generics) where it improves readability.
-- **License:** MIT. The repo is meant to be forked and adapted by anyone who watches the talk.
+> **Status note:** this project-specific section was originally written
+> for the single-file v1 (`ramen_cve.py` at the repo root, ~400 LOC). The
+> codebase has since been refactored into a ~30-module package under
+> `src/ramen_cve/` behind a flat re-export façade — see
+> `docs/REFACTOR_PLAN.md` for the authoritative architecture and the
+> Execution Log. The entries below have been updated to reflect the
+> current package shape; the global AI-agent operating principles above
+> are unchanged.
+
+- **Layered package.** Implementation lives under `src/ramen_cve/` as
+  ~30 focused, layered modules: `constants`, `models`, `cache`,
+  `extract`, `decay`, `analyze`, `associations`, `keyring`,
+  `enrich/{nvd,epss,kev,exploits,iocs,inventory,orchestrator}`,
+  `output/{csv_writer,markdown,stix,sigma,yara}`,
+  `dispatch/{sinks,runner,digest}`, `config`, `cliutil`, `pipeline`,
+  `wizard`, `hunt`, `pir`, `trend`, `audit`, `schedule`, `cli`.
+  `src/ramen_cve/__init__.py` is a pure re-export façade with a locked
+  `__all__` that preserves the flat `from ramen_cve import X` /
+  `ramen_cve.X` contract.
+- **Entry points:** `python -m ramen_cve`, the `ramen-cve` console
+  script (installed by `pip install -e .`), and the
+  `threat_intel_hunter.py` shim at the repo root. All three route
+  through `ramen_cve.cli.main`.
+- **Per-module line budget:** ≤~350 LOC each (CLAUDE.md §6). Documented
+  exceptions where splitting adds indirection without reducing
+  complexity: `cli.py` (cohesive argparse + main + runners) and
+  `output/stix.py`.
+- **Python version:** 3.10 or newer. Use modern syntax (`match`
+  statements, structural pattern matching, `X | Y` union types,
+  `dict[str, int]` generics) where it improves readability.
+- **License:** MIT. The repo is meant to be forked and adapted by
+  anyone who watches the talk.
 
 ### Dependencies (keep this list small)
 
@@ -318,24 +346,54 @@ Both APIs are documented at the URLs above and behavior is subject to change. If
 ```
 ramen-cve/
 ├── README.md
-├── ramen_cve.py
-├── requirements.txt
-├── requirements-dev.txt
+├── pyproject.toml              # ramen-cve console script + dev extra
+├── threat_intel_hunter.py      # entry-point shim (routes to ramen_cve.cli.main)
+├── conftest.py                 # tests bootstrap (src/ on sys.path)
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
+├── src/ramen_cve/
+│   ├── __init__.py             # pure re-export façade + locked __all__
+│   ├── __main__.py             # `python -m ramen_cve` -> cli.main
+│   ├── constants.py            # regexes, thresholds, DEFAULT_*, lookup tables
+│   ├── models.py               # OpmlError + 10 dataclasses (L0 leaf)
+│   ├── cache.py                # SQLite cache
+│   ├── extract.py, decay.py    # opml/CVE/IOC extraction; IOC decay
+│   ├── analyze.py              # bucket_and_suggest, filter_by_date, TLP/Admiralty
+│   ├── associations.py         # threat-actor / campaign / malware associations
+│   ├── keyring.py              # API-key bootstrap + redaction
+│   ├── enrich/                 # nvd, epss, kev, exploits, iocs, inventory, orchestrator
+│   ├── output/                 # csv_writer, markdown, stix, sigma, yara
+│   ├── dispatch/               # sinks (Slack/webhook/email), runner, digest
+│   ├── config.py, cliutil.py   # YAML presets + remembered-OPML; argparse validators
+│   ├── pipeline.py             # _maybe_* glue, _output multi-format writer
+│   ├── wizard.py               # interactive questionary wizard
+│   ├── hunt.py, pir.py, trend.py
+│   ├── audit.py, schedule.py   # tamper-evident audit log; cron / Task XML emit
+│   ├── cli.py                  # _shared_flags, build_parser, main, _run_*
+│   └── data/                   # bundled associations.json, default hunts/ + pirs/
 ├── examples/
 │   ├── sample.opml
 │   ├── sample-output.csv
 │   └── sample-report.md
 ├── tests/
-│   └── test_ramen_cve.py
+│   ├── test_ramen_cve.py       # main suite
+│   ├── test_facade.py          # façade-contract lock
+│   ├── test_smoke.py           # mocked-pipeline E2E
+│   ├── test_wizard.py
+│   └── fixtures/               # NVD/EPSS JSON fixtures
+├── docs/
+│   ├── CLAUDE.md               # these guidelines
+│   └── REFACTOR_PLAN.md        # authoritative architecture + Execution Log
 └── tasks/
-    ├── todo.md
-    └── lessons.md
+    └── lessons.md              # L1–L6 (recurring failure modes + prevention)
 ```
 
-`tasks/todo.md` and `tasks/lessons.md` follow the templates in the global section above. They are not optional for this project.
+`tasks/lessons.md` is mandatory and is reviewed at session start (per the
+Self-Improvement Loop). `tasks/todo.md` is currently consolidated into
+`docs/REFACTOR_PLAN.md`'s Execution Log to keep a single auditable
+ledger — `REFACTOR_PLAN.md` and `lessons.md` together cover the
+templates in the global section above.
 
 ### Style
 
@@ -352,20 +410,28 @@ ramen-cve/
 - **One smoke test that runs the whole pipeline against the bundled `examples/sample.opml`** with mocked APIs and asserts the output files exist and contain expected bucket headers. This is the "would it actually work" test.
 - **Coverage target:** not measured in v1. The above tests are enough.
 
-### Things explicitly out of scope for v1
+### Things still out of scope
 
-The following are good ideas, but they live in `tasks/todo.md` under "Future" and don't ship in the first version. Not because they're wrong, but because shipping is more important than completeness:
+The list below is what remains genuinely future work after the package
+refactor. Items that the v1 doc originally listed here but that have
+since shipped (Slack / generic-webhook / email digest dispatchers in
+`dispatch/`, the Windows Task Scheduler / cron emitter in `schedule.py`,
+STIX 2.1 + Sigma + YARA writers in `output/`) are no longer out of
+scope — they are documented in `docs/REFACTOR_PLAN.md` §2.
 
 - HTML quadrant chart output.
 - EPSS trajectory mode (date-range historical lookups).
 - Multi-page URL crawling (the `--depth 1` option).
-- Configurable bucket labels or thresholds beyond CVSS and EPSS cutoffs.
-- Output formats beyond CSV and Markdown (JSON, STIX, etc.).
-- Slack / email / webhook delivery.
+- Configurable bucket labels or thresholds beyond the CVSS and EPSS
+  cutoffs.
 - A web UI.
-- Scheduled / daemon mode.
+- A long-running daemon mode (the `schedule` subcommand emits a
+  cron line / Task XML for the user's own scheduler — the tool itself
+  still runs one shot at a time).
 
-If a request would expand scope into one of these, push it to `tasks/todo.md` as a "Future" entry rather than scope-creeping v1.
+If a request would expand scope into one of these, log it as a follow-up
+in `docs/REFACTOR_PLAN.md` (or its successor) rather than scope-creeping
+the current change.
 
 ### Definition of Done for v1 specifically
 
