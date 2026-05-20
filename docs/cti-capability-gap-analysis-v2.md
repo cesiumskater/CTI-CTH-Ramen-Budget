@@ -2,7 +2,16 @@
 
 **Repository:** `cesiumskater/cti-cth-ramen-budget`
 **Analysis date:** 2026-05-06
-**Scope:** All `.py` files in the repository — `ramen_cve.py` (4,120 lines) and `tests/` (5,400 lines across `test_ramen_cve.py`, `test_smoke.py`, `test_wizard.py`, `test_api_key_prompt.py`).
+**Scope:** All `.py` files in the repository — at the time of this analysis, the implementation lived in a single ~4,120-line `ramen_cve.py` plus `tests/` (5,400 lines across `test_ramen_cve.py`, `test_smoke.py`, `test_wizard.py`, `test_api_key_prompt.py`).
+
+> **Status (as of 2026-05-20):** this analysis was conducted against the
+> pre-refactor monolith. The monolith was split into a ~30-module
+> package under `src/ramen_cve/` between 2026-05-18 and 2026-05-20
+> (see `docs/REFACTOR_PLAN.md` Execution Log, steps 0–33). All
+> capabilities catalogued below remain present and behave identically;
+> file/line references in this document point at pre-refactor paths
+> (`ramen_cve.py:NNNN`) and are preserved for historical traceability.
+> Current test count: **463 passing** (was 302 at the time of writing).
 
 This is the **second-pass audit** following the v1 gap analysis (`cti-capability-gap-analysis.md`). Since v1, fourteen features have shipped (CISA KEV catalog, multi-IOC extraction, MITRE ATT&CK mapping, exploit/PoC tracking, STIX/TAXII I/O, threat-actor modeling, Sigma rule generation, multi-source IOC enrichment, TLP+Admiralty tagging, threat-hunt workflow, asset/inventory correlation, Slack/webhook dispatchers, Diamond Model + Kill Chain, historical trending). The gaps below are the next layer the project would need to grow into to reach the level of a fully-staffed enterprise CTI program.
 
@@ -10,13 +19,13 @@ This is the **second-pass audit** following the v1 gap analysis (`cti-capability
 
 ## Executive Summary
 
-`ramen-cve` has graduated decisively past the v1 "vulnerability triage utility" classification. The codebase now spans CVE enrichment, multi-IOC collection, STIX 2.1 / TAXII 2.x bidirectional interoperability, MITRE ATT&CK technique mapping, Diamond Model + Cyber Kill Chain framing, threat-actor / campaign / malware attribution, asset-exposure correlation against an inventory CSV, four pluggable IOC enrichers (VirusTotal / AbuseIPDB / OTX / MalwareBazaar), a hunt-hypothesis JSON workflow, Sigma detection-rule scaffolding, Slack + webhook dispatch, and historical trending with sparkline rendering. Maturity is now best described as **Intermediate — broad-coverage CTI/TH platform**: it produces analyst-actionable artifacts in formats every downstream platform (MISP, OpenCTI, SIEM, ticketing) can consume, with provenance (TLP / Admiralty), kill-chain framing, and detection scaffolds. The remaining gaps are no longer foundational; they are the second-stage features that distinguish a working CTI tool from a fully-instrumented program — SSVC-style decision frameworks, native SIEM query languages, MISP-platform integration, indicator decay, audit logging, a delta-on-bucket-change alert path, and a more sophisticated risk-weighted prioritization model that takes asset criticality into account. Operationally, the single-file design has reached ~4,100 lines (≈8× the project's stated 500-line refactor threshold) — a package split is overdue and would unlock the next round of features without a maintenance cliff.
+`ramen-cve` has graduated decisively past the v1 "vulnerability triage utility" classification. The codebase now spans CVE enrichment, multi-IOC collection, STIX 2.1 / TAXII 2.x bidirectional interoperability, MITRE ATT&CK technique mapping, Diamond Model + Cyber Kill Chain framing, threat-actor / campaign / malware attribution, asset-exposure correlation against an inventory CSV, four pluggable IOC enrichers (VirusTotal / AbuseIPDB / OTX / MalwareBazaar), a hunt-hypothesis JSON workflow, Sigma detection-rule scaffolding, Slack + webhook dispatch, and historical trending with sparkline rendering. Maturity is now best described as **Intermediate — broad-coverage CTI/TH platform**: it produces analyst-actionable artifacts in formats every downstream platform (MISP, OpenCTI, SIEM, ticketing) can consume, with provenance (TLP / Admiralty), kill-chain framing, and detection scaffolds. The remaining gaps are no longer foundational; they are the second-stage features that distinguish a working CTI tool from a fully-instrumented program — SSVC-style decision frameworks, native SIEM query languages, MISP-platform integration, indicator decay, audit logging, a delta-on-bucket-change alert path, and a more sophisticated risk-weighted prioritization model that takes asset criticality into account. Operationally, the single-file design had reached ~4,100 lines at the time of this analysis (≈8× the project's stated 500-line refactor threshold). The package split was executed between 2026-05-18 and 2026-05-20 (see `docs/REFACTOR_PLAN.md`) and has cleared the maintenance cliff — `src/ramen_cve/__init__.py` is now a 526-LOC pure re-export façade with implementation distributed across ~30 focused modules.
 
 ---
 
 ## Current Capability Inventory
 
-The features below are present today in `.py` files. Filenames and function names are referenced so each item can be located directly. Line counts compared to v1: `ramen_cve.py` grew from ~1,400 → 4,120 (+193%); test count grew from ~115 → **302 passing**.
+The features below are present today in `.py` files. Filenames and function names are referenced so each item can be located directly. Line counts compared to v1: `ramen_cve.py` grew from ~1,400 → 4,120 (+193%) before the May-2026 package refactor; test count grew from ~115 (v1) → ~302 (at the time of this analysis) → **463 passing** (post-refactor, current).
 
 ### Collection
 - **OPML feed ingestion with TLP / Admiralty inheritance.** `ramen_cve.py:parse_opml` walks `<outline>` elements recursively and reads `data-tlp` / `data-admiralty` extension attributes (with parent-outline inheritance).

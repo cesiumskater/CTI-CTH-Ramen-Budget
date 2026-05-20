@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ramen-cve"
 version = "0.2.0"
-description = "CVE triage on a ramen budget — single-file friendly CTI/CTH pipeline."
+description = "CVE triage on a ramen budget — modular CTI/CTH package with NVD/EPSS/KEV enrichment, STIX/Sigma/YARA writers, dispatchers, scheduling, and hunt/PIR workflow."
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"

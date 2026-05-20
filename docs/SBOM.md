@@ -17,7 +17,7 @@ source is bundled — only the runtime wheels resolved from PyPI.
 
 | Component | Path | License | Notes |
 | --- | --- | --- | --- |
-| `ramen_cve` (package) | `src/ramen_cve/__init__.py` (+ `__main__.py`) | MIT | The entire implementation. |
+| `ramen_cve` (package) | `src/ramen_cve/` (~30 focused modules; `__init__.py` is a 526-LOC re-export façade — implementation lives in submodules, see `docs/REFACTOR_PLAN.md`) | MIT | The entire implementation. |
 | `threat_intel_hunter.py` | repo root | MIT | 10-line entry-point shim → `ramen_cve.main()`. |
 | Bundled lookup data | `src/ramen_cve/data/associations.json`, `data/hunts/*`, `data/pirs/*` | MIT | Curated CVE → actor/campaign/malware map + sample hunt + sample PIR. Sourced from public MITRE ATT&CK Groups data and public reporting; no proprietary intel. |
 | YAML config template + presets | `src/ramen_cve/config/config.yaml`, `config/presets/` | MIT | Documented configuration schema. |

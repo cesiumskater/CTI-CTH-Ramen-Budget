@@ -106,11 +106,14 @@ caches, a non-purged `runs` history (for trending), and an append-only
 `audit_log`. Bundled lookup data ships inside the package
 (`src/ramen_cve/data/`); YAML presets ship under `src/ramen_cve/config/`.
 
-The codebase is one package (`ramen_cve`) with the structure documented in
-`docs/REFACTOR_PLAN.md`; the package's navigation index maps every section
-to its eventual fine-grained module. The src/ layout is in place; the
-further core/parsers/outputs split is staged but deferred to avoid churning
-the 446-case test suite in a single pass.
+The codebase is a ~30-module package under `src/ramen_cve/`, refactored from
+the original single-file design on 2026-05-18 → 2026-05-20 (see
+`docs/REFACTOR_PLAN.md` Execution Log, steps 0–33). The package layers
+(constants → models → cache → extract → … → output / dispatch / config →
+cli → façade) preserve the flat `from ramen_cve import X` contract via a
+re-export `__init__.py`. The 463-test suite and a golden byte-oracle
+proved the refactor is zero-behaviour-change end-to-end (regenerated
+CSV/Markdown are byte-identical to the pre-refactor baseline).
 
 ---
 
