@@ -6,7 +6,7 @@ into EnrichedCve. See docs/REFACTOR_PLAN.md.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from ..analyze import (
     _best_admiralty,
@@ -30,11 +30,19 @@ def enrich_cves(
     cache: Cache,
     api_key: str | None,
     associations: dict[str, dict[str, list]] | None = None,
+    epss_date_range: tuple[date, date] | None = None,
 ) -> list[EnrichedCve]:
     """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
     Deduplicates CVE IDs before hitting the APIs. When the same CVE appears in
     multiple records, only the earliest first_seen date is kept.
+
+    `epss_date_range` is `(start, end)` for EPSS trajectory mode: when set and
+    `start != end`, EPSS is fetched once per day in the inclusive range and
+    accumulated into each `EnrichedCve.epss_trajectory` dict (keyed by ISO
+    date), with the scalar `epss_score`/`epss_percentile`/`epss_date` fields
+    pinned to the END-date value. When `start == end` (or the range is None),
+    behaviour is byte-identical to today's single-shot EPSS call.
 
     If `associations` is provided, each enriched record is also annotated with
     the linked actors, campaigns, and malware for that CVE.
@@ -68,8 +76,39 @@ def enrich_cves(
                 result = fetch_nvd(cve_id, cache, api_key)
         nvd_data[cve_id] = result
 
-    # Fetch EPSS data in one batched call
-    epss_data = fetch_epss(unique_ids, cache)
+    # Fetch EPSS data. Single-shot in the common case; if the caller asked for
+    # a multi-day trajectory we loop over every day in the range and stash the
+    # full time-series on each EnrichedCve.epss_trajectory while keeping the
+    # scalar epss_* fields pinned to the END-date value.
+    epss_trajectories: dict[str, dict[str, dict]] = {}
+    if (
+        epss_date_range is not None
+        and epss_date_range[0] != epss_date_range[1]
+    ):
+        traj_start, traj_end = epss_date_range
+        end_date_str = traj_end.isoformat()
+        cur = traj_start
+        while cur <= traj_end:
+            date_str = cur.isoformat()
+            batch = fetch_epss(unique_ids, cache, score_date=date_str)
+            for cid, payload in batch.items():
+                epss_trajectories.setdefault(cid, {})[date_str] = {
+                    "epss": payload["epss"],
+                    "percentile": payload["percentile"],
+                }
+            cur += timedelta(days=1)
+        # End-date scalars (drives epss_score / epss_percentile / epss_date).
+        epss_data = {
+            cid: {
+                "epss": traj[end_date_str]["epss"],
+                "percentile": traj[end_date_str]["percentile"],
+                "date": end_date_str,
+            }
+            for cid, traj in epss_trajectories.items()
+            if end_date_str in traj
+        }
+    else:
+        epss_data = fetch_epss(unique_ids, cache)
 
     # Fetch the authoritative CISA KEV catalog (one HTTP call, cached).
     kev_catalog = fetch_kev_catalog(cache)
@@ -114,6 +153,7 @@ def enrich_cves(
                 epss_score=epss.get("epss"),
                 epss_percentile=epss.get("percentile"),
                 epss_date=epss.get("date"),
+                epss_trajectory=epss_trajectories.get(cve_id, {}),
                 kev_due_date=_parse_kev_due_date(kev.get("dueDate")) if kev else None,
                 kev_required_action=kev.get("requiredAction") if kev else None,
                 kev_known_ransomware_use=(

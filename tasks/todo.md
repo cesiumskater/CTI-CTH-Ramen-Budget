@@ -15,7 +15,32 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
 
 ## In progress
 
-_(nothing live — see Planned below.)_
+### Task 1 — EPSS trajectory mode (Slice A landed; B/C/D pending)
+
+- [x] **Slice A — model + per-date fetch loop + CLI plumbing.** Added
+      `EnrichedCve.epss_trajectory: dict[str, dict]` (defaults empty,
+      preserves byte-identical contract for single-date / no-range runs).
+      `enrich_cves` gains `epss_date_range: tuple[date, date] | None`;
+      when start != end it loops `fetch_epss(score_date=d)` per day in
+      the inclusive range and accumulates the time-series, pinning the
+      scalar `epss_*` fields to the END-date value. Relaxed the
+      `_validate_args` and `filter_by_date` `start == end` constraint
+      for `--date-mode epss`. New `cli._epss_date_range_for(args)`
+      helper threads the range into the four `enrich_cves` call sites.
+      Verification: 470 passed (was 463 + 7 new trajectory tests in
+      `tests/test_epss_trajectory.py`), ruff clean, golden byte-oracle
+      byte-identical to anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
+- [ ] **Slice B — sidecar CSV.** New `write_epss_trajectory_csv` in
+      `output/csv_writer.py`; one row per `(cve_id, date, epss,
+      percentile)`. `pipeline._output` emits it whenever any record
+      has a non-empty trajectory dict. Locked column tuple
+      `EPSS_TRAJECTORY_COLUMNS` for the consumer contract.
+- [ ] **Slice C — Markdown sparkline + table.** Reuse
+      `trend._sparkline`; possibly lift it to `util/render.py` if the
+      L4 → L4 sibling import is awkward.
+- [ ] **Slice D — volume guard + UX polish.** Pre-flight call count;
+      warn ≥200 projected calls; hard-error ≥500 unless an explicit
+      opt-in flag is also passed.
 
 ---
 
