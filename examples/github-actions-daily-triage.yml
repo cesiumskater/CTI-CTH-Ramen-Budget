@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -r requirements.txt
+      - run: pip install -e .
       - name: Run ramen-cve against bundled OPML
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
@@ -32,7 +32,7 @@ jobs:
           # Optional dispatch destinations:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          python ramen_cve.py opml examples/sample.opml \
+          ramen-cve opml examples/sample.opml \
             --format all \
             --out-dir reports
       - uses: actions/upload-artifact@v4

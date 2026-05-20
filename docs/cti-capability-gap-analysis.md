@@ -2,7 +2,16 @@
 
 **Repository:** `cesiumskater/cti-cth-ramen-budget`
 **Analysis date:** 2026-05-05
-**Scope:** All `.py` files in the repository (`ramen_cve.py` and `tests/*.py`).
+**Scope:** All `.py` files in the repository — at the time of this analysis, the implementation lived in a single `ramen_cve.py` plus `tests/*.py`.
+
+> **Status (as of 2026-05-20):** this analysis predates the package
+> refactor (2026-05-18 → 2026-05-20). The implementation now lives in
+> a ~30-module package under `src/ramen_cve/` behind a re-export
+> façade (see `docs/REFACTOR_PLAN.md`); file/line references like
+> `ramen_cve.py:NNNN` are preserved as pre-refactor traceability.
+> The capability inventory below remains accurate (zero behaviour
+> change). The companion second-pass audit is
+> `cti-capability-gap-analysis-v2.md`.
 
 ---
 

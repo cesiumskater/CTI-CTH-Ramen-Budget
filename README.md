@@ -1,7 +1,8 @@
 # ramen-cve
 
-CVE triage on a ramen budget — a single-file Python CLI for threat intelligence and threat
-hunting teams who need a working pipeline before they have a working platform.
+CVE triage on a ramen budget — a ~30-module Python package (CTI / threat-hunting
+pipeline behind a flat re-export façade) for teams who need a working pipeline
+before they have a working platform.
 
 Give it an OPML feed list (or a directory of them), a single article URL, a list of CVE IDs,
 or a STIX 2.1 bundle. It extracts CVE identifiers, enriches each with CVSS (NVD), exploitation
@@ -20,7 +21,7 @@ Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** 
 
 ```
 .
-├── threat_intel_hunter.py   # entry-point shim → src/ramen_cve/__init__.py:main()
+├── threat_intel_hunter.py   # entry-point shim → ramen_cve.cli:main() (façade-re-exported)
 ├── README.md                # this file
 ├── LICENSE                  # MIT
 ├── pyproject.toml           # project metadata + ruff + pytest config
@@ -30,7 +31,7 @@ Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** 
 │
 ├── src/
 │   └── ramen_cve/           # the installable package (src layout)
-│       ├── __init__.py      # the implementation
+│       ├── __init__.py      # pure re-export façade + locked __all__; implementation in submodules (see docs/REFACTOR_PLAN.md)
 │       ├── __main__.py      # python -m ramen_cve entry
 │       ├── config/          # YAML config system
 │       │   ├── config.yaml  #   fully-commented schema / template
@@ -366,7 +367,7 @@ the bundled values let `python threat_intel_hunter.py` work out of the box.
 - `src/ramen_cve/data/hunts/log4shell-evidence.json` — sample threat-hunt hypothesis.
 - `src/ramen_cve/data/pirs/log4j-exposure.json` — sample Priority Intelligence Requirement.
 
-Add or correct entries directly in those JSON files; `ramen_cve.py` reads them on every run.
+Add or correct entries directly in those JSON files; the package reads them on every run (paths resolve relative to `src/ramen_cve/data/`).
 
 ---
 
