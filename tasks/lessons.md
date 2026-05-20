@@ -38,6 +38,17 @@ rule. Reviewed at session start and before major refactors (per
 
 ## L2 — GitHub Actions CI is an unreliable signal in this environment
 
+> **CORRECTION (see L7):** the specific diagnosis below ("runner has
+> restricted/no PyPI egress") was **wrong**. The real cause of the
+> deterministic <30 s CI failures was 5 tests in `test_ramen_cve.py`
+> that hardcoded `.venv/bin/python` (only present in my local dev
+> environment) inside `subprocess.run([...])`, so they failed with
+> `FileNotFoundError: '.venv/bin/python'` the moment pytest reached
+> them on a GitHub-hosted runner. `pip install` was fine all along.
+> The lesson about *not chasing red CI from symptoms when you can't
+> read the logs* still holds — but the moral is "get the log",
+> not "blame egress". See L7.
+
 - **Failure mode:** PR #20's `test` workflow fails deterministically in
   15–25 s on a SHA whose code is provably correct. A faithful clean-room
   reproduction — fresh `python3.10 -m venv`, `pip install -e ".[dev]"`,
@@ -170,3 +181,47 @@ rule. Reviewed at session start and before major refactors (per
   And (L5, re-affirmed) **never commit until clean-room pytest is
   confirmed 463-green** — ruff/F821/golden green is necessary, not
   sufficient.
+
+---
+
+## L7 — When CI logs are inaccessible from your tooling, GET the log before diagnosing
+
+- **Failure mode:** From session start through Step 31, GitHub Actions
+  was failing in 15–25 s on every push. I diagnosed it (L2) as a
+  runner / PyPI-egress environment limitation, based on symptoms (fast
+  deterministic fail, identical SHA repro green) plus the unavailability
+  of Actions job logs through any MCP tool / `WebFetch`. The diagnosis
+  *sounded* plausible, the user accepted it ("treat as runner egress"),
+  and I went on for many steps treating the red CI as an environment
+  wart to be ignored. **The actual cause was 5 tests in
+  `test_ramen_cve.py` that did
+  `subprocess.run([".venv/bin/python", "threat_intel_hunter.py", …])`
+  — the hardcoded `.venv/bin/python` only exists in the local dev
+  venv; on a GitHub-hosted runner that path doesn't exist, so each of
+  the 5 tests died with `FileNotFoundError: '.venv/bin/python'` the
+  moment pytest got to them.** A trivial portable fix
+  (`sys.executable` instead of the hardcoded path) makes them work
+  everywhere. The fix took 3 minutes once the log was visible; the
+  wrong diagnosis stood for ~30 commits.
+- **Detection signal:** I never read the actual error text. The
+  symptom-based diagnosis (fast deterministic + identical local repro
+  green) was *consistent with* many causes; I picked the most
+  "structural" one and stopped. The user asked "what do I need to do
+  to enable success?", pasted the log, and the answer was visible in
+  the first failing frame.
+- **Prevention rule:** When CI / a runner / any system you can't
+  observe is failing deterministically and your local repro is green,
+  **explicitly surface the log gap to the user as the first move**,
+  not after building a diagnosis. Concrete script: (1) state plainly
+  "I can't read the Actions log with available tools — please paste
+  the failing step or run `gh run view <id> --log-failed`"; (2) until
+  the actual error text is in hand, treat any diagnosis as a
+  hypothesis, not a disposition; (3) never let a hypothetical
+  environment cause become a stable "leave it red" decision without
+  having read the log at least once. Speed-of-resolution >>
+  internal-confidence-in-a-diagnosis.
+
+  Concrete amends: the Step 31 commit and PR #20 description claim
+  "Actions CI red remains the L2 env limitation" — at the time of
+  writing, the real cause was the 5 hardcoded-path tests now fixed
+  in the same PR-21 cycle.

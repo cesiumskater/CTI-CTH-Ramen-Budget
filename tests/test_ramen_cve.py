@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import sys
 import tempfile
 import textwrap
 from datetime import date, datetime, timedelta
@@ -1267,7 +1268,7 @@ def test_cli_invalid_date_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "threat_intel_hunter.py", "opml", "x.opml", "--start", "not-a-date"],
+        [sys.executable, "threat_intel_hunter.py", "opml", "x.opml", "--start", "not-a-date"],
         capture_output=True,
         text=True,
     )
@@ -1281,7 +1282,7 @@ def test_cli_start_after_end_rejected():
 
     result = subprocess.run(
         [
-            ".venv/bin/python", "threat_intel_hunter.py", "opml", "x.opml",
+            sys.executable, "threat_intel_hunter.py", "opml", "x.opml",
             "--start", "2024-12-31", "--end", "2024-01-01",
         ],
         capture_output=True,
@@ -1296,7 +1297,7 @@ def test_cli_invalid_cve_id_rejected():
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "threat_intel_hunter.py", "cve", "NOT-A-CVE"],
+        [sys.executable, "threat_intel_hunter.py", "cve", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
@@ -1310,7 +1311,7 @@ def test_cli_from_file_missing_returns_friendly_error(tmp_path):
     missing = tmp_path / "does-not-exist.txt"
     result = subprocess.run(
         [
-            ".venv/bin/python", "threat_intel_hunter.py",
+            sys.executable, "threat_intel_hunter.py",
             "cve", "--from-file", str(missing), "--no-cache",
         ],
         capture_output=True,
@@ -4808,7 +4809,7 @@ def test_run_trend_invalid_cve_id_exits_1(tmp_path, caplog):
     import subprocess
 
     result = subprocess.run(
-        [".venv/bin/python", "threat_intel_hunter.py", "trend", "NOT-A-CVE"],
+        [sys.executable, "threat_intel_hunter.py", "trend", "NOT-A-CVE"],
         capture_output=True,
         text=True,
     )
