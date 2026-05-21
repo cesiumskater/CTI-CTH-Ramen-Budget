@@ -252,17 +252,36 @@ from all collected pages, not just the seed.
    second call, zero delay skips sleep, secret-redaction in error).
    Verification: 487 passed (482 + 5), ruff clean, golden
    byte-identical.
-3. **Slice C — wire into `_run_url`.**
-   - Add `--depth` / `--max-crawl-links` / `--crawl-delay-ms` to the
-     `url` subparser (`cli.build_parser`).
-   - Refactor `_run_url` to: fetch seed, optionally extract +
-     enumerate + rate-limit-fetch links, collect each page's text,
-     then run the existing `extract_cves` / `extract_iocs` over the
-     union; dedupe extracted CVEs by CVE id.
-4. **Slice D — error robustness + UX.**
-   - Each followed-link failure is fail-soft (WARNING log,
-     continue).
-   - Markdown "Sources" section enumerates all visited URLs.
+- [x] **Slice C — wire into `_run_url`.** Added `--depth {0,1}`
+   (default 0), `--max-crawl-links` (default 25, hard ceiling 200),
+   and `--crawl-delay-ms` (default 500) to the `url` subparser.
+   Refactored `_run_url`: fetches the seed via the
+   `_fetch_url_with_rate_limit` helper from Slice B; on `--depth 1`,
+   feeds the seed HTML through `_filter_and_cap_links` then loops
+   per-link fetches (same throttle); CVE/IOC extraction runs over
+   the union of every visited page with that page's URL stamped as
+   `source` so downstream attribution stays per-page-correct. +7
+   integration tests (depth-0 byte-identical seed-only path; depth-1
+   follows same-host links; depth-1 skips off-host links; depth-1
+   fail-soft on followed 4xx/5xx; depth-1 respects --max-crawl-links
+   cap; depth-0 `sources` metadata = [seed]; depth-1 `sources`
+   metadata = every visited URL).
+- [x] **Slice D — error robustness + UX** (folded into Slice C; same
+   integration site). Per-link failure raises `OpmlError` inside the
+   fetch helper; the loop catches it, logs a WARNING via the
+   `_safe_url_for_log`-redacted message, and continues with the next
+   link. The run metadata's `sources` list now enumerates every
+   visited URL (seed + followed), so the Markdown report's
+   "## Sources" section is a faithful per-run audit trail. At
+   `--depth 0` this is exactly `[args.url]` — byte-identical to
+   pre-feature output. Verification: 494 passed (487 + 7 new), ruff
+   clean, golden byte-identical.
+
+**Task 2 status: COMPLETE.** Multi-page URL crawl is shipped
+end-to-end (link extraction primitives + rate-limited fetch helper +
+`_run_url` integration + per-link fail-soft + Sources enumeration).
+PR #25 carries Slices A–D; opt-in via `--depth 1` on the `url`
+subcommand.
 
 **Test strategy.**
 - `tests/test_url_crawl.py`:
