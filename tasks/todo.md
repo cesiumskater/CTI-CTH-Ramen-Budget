@@ -228,15 +228,18 @@ from all collected pages, not just the seed.
 
 **Implementation slices.**
 
-1. **Slice A — pure helpers, no integration (testable in isolation).**
-   - New `src/ramen_cve/extract.py` helpers (this layer already
-     handles text-→IOC extraction):
-     - `_extract_links(html: str, base_url: str) -> list[str]`
-     - `_same_host(url1: str, url2: str) -> bool`
-     - `_filter_and_cap_links(seed_url, html, cap) -> list[str]`
-   - Unit tests in `tests/test_extract.py`: same-host edge cases
-     (www-stripping, port mismatch, IPv6 brackets, malformed HTML).
-2. **Slice B — rate-limited fetch helper.**
+- [x] **Slice A — pure helpers, no integration (testable in
+  isolation).** Added `_HREF_RE`, `_extract_links(html, base_url)`,
+  `_same_host(url1, url2)`, `_filter_and_cap_links(seed, html, cap)`
+  to `src/ramen_cve/extract.py` (~80 LOC), plus
+  `DEFAULT_MAX_CRAWL_LINKS=25` and `MAX_CRAWL_LINKS_CEILING=200`
+  constants. Pure stdlib (`re` + `urllib.parse`); no new dep. New
+  `tests/test_url_crawl.py` with 19 cases covering link extraction,
+  same-host edge cases (www-stripping, port mismatch, case, blank /
+  unparseable), dedupe + sort, cap argument, ceiling clamp, default
+  cap, and negative-cap → empty. Verification: 482 passed (463 + 19
+  new), ruff clean, golden byte-identical to anchor.
+- [ ] **Slice B — rate-limited fetch helper.**
    - New module-private helper in `cli.py`:
      `_fetch_url_with_rate_limit(url, delay_ms)` (mirror `fetch_nvd`
      pattern). Returns response text or raises `OpmlError` on HTTP

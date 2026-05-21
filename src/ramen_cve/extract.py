@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date
 from pathlib import Path
@@ -248,3 +249,85 @@ def extract_iocs(
 
     return out
 
+
+
+
+# ---------------------------------------------------------------------------
+# URL-crawl helpers (depth-1 follow of same-host links).
+#
+# Pure-stdlib HTML link extraction. The tight `re` below catches the
+# overwhelming majority of real-world `<a href>` tags without pulling in
+# BeautifulSoup — preserving the project's 5-runtime-dep budget. Use only
+# for opportunistic seed-page link discovery in `_run_url`; not a general
+# HTML parser.
+# ---------------------------------------------------------------------------
+
+# `<a` followed by any tag attributes, then `href=` with optional quoting.
+# Captures the URL up to the first whitespace, `>`, or matching quote.
+_HREF_RE = re.compile(
+    r"""<a\s+[^>]*?href=["']?([^"'>\s]+)""",
+    re.IGNORECASE,
+)
+
+# Maximum links followed per seed (foot-gun + abuse guard). CLI exposes
+# `--max-crawl-links` to override up to a hard ceiling.
+DEFAULT_MAX_CRAWL_LINKS = 25
+MAX_CRAWL_LINKS_CEILING = 200
+
+
+def _extract_links(html: str, base_url: str) -> list[str]:
+    """Extract every `<a href>` from `html` and resolve relatives against `base_url`.
+
+    Order is preserved from the source HTML. Caller is responsible for any
+    deduplication, host filtering, or rate limiting. Malformed URLs are
+    skipped silently (this is a discovery pass, not a validator).
+    """
+    out: list[str] = []
+    for m in _HREF_RE.finditer(html):
+        href = m.group(1).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        try:
+            absolute = urllib.parse.urljoin(base_url, href)
+        except ValueError:
+            continue
+        out.append(absolute)
+    return out
+
+
+def _same_host(url1: str, url2: str) -> bool:
+    """True if `url1` and `url2` share a host (case-insensitive, www-stripped).
+
+    Same-host comparison normalises:
+    - Case (lowercase netloc).
+    - A single leading `www.` (so `www.example.com` matches `example.com`).
+    - IPv6 literal brackets (urlparse already handles).
+    Port mismatch keeps two URLs distinct (intentional — different services).
+    Unparseable URLs return False rather than raising.
+    """
+    def _norm(url: str) -> str:
+        try:
+            host = urllib.parse.urlparse(url).netloc.lower()
+        except ValueError:
+            return ""
+        return host[4:] if host.startswith("www.") else host
+    a, b = _norm(url1), _norm(url2)
+    return bool(a) and a == b
+
+
+def _filter_and_cap_links(
+    seed_url: str, html: str, cap: int = DEFAULT_MAX_CRAWL_LINKS
+) -> list[str]:
+    """Extract, filter to same-host, dedupe (lowercased), sort, and cap to `cap`.
+
+    Sorting + lowercasing makes the followed-link set deterministic across
+    runs (critical for test snapshots + audit-log reproducibility).
+    Capped at `min(cap, MAX_CRAWL_LINKS_CEILING)` so the CLI flag can't
+    foot-gun arbitrarily.
+    """
+    cap = max(0, min(int(cap), MAX_CRAWL_LINKS_CEILING))
+    candidates = _extract_links(html, seed_url)
+    same_host = [u for u in candidates if _same_host(u, seed_url)]
+    # Dedupe by lowercased URL, then sort for byte-stable ordering.
+    deduped = sorted({u.lower() for u in same_host})
+    return deduped[:cap]
