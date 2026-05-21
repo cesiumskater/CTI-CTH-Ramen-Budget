@@ -9,6 +9,7 @@ import argparse
 import logging
 import re
 import sys
+import time  # rate-limit pacing in `_fetch_url_with_rate_limit` (Task 2 Slice B)
 from datetime import date
 from pathlib import Path
 
@@ -55,6 +56,9 @@ from .dispatch.digest import _maybe_digest
 from .enrich.exploits import enrich_with_exploit_status
 from .enrich.orchestrator import enrich_cves
 from .extract import (
+    DEFAULT_MAX_CRAWL_LINKS,
+    MAX_CRAWL_LINKS_CEILING,
+    _filter_and_cap_links,
     extract_cves,
     extract_iocs,
     parse_opml,
@@ -303,6 +307,40 @@ def build_parser() -> argparse.ArgumentParser:
     # url subcommand
     url_p = sub.add_parser("url", help="Extract CVEs from a single URL.")
     url_p.add_argument("url", help="URL of the article or page to scan.")
+    url_p.add_argument(
+        "--depth",
+        type=int,
+        choices=[0, 1],
+        default=0,
+        help=(
+            "Follow same-host links up to N hops from the seed URL. 0 (default) "
+            "= seed only — byte-identical to today; 1 = seed + every same-host "
+            "<a href> found on the seed page (deduped, sorted, capped, "
+            "rate-limited per host). Off-host links are never followed."
+        ),
+    )
+    url_p.add_argument(
+        "--max-crawl-links",
+        type=int,
+        default=DEFAULT_MAX_CRAWL_LINKS,
+        metavar="N",
+        help=(
+            f"Maximum followed links per seed when --depth >= 1 "
+            f"(default {DEFAULT_MAX_CRAWL_LINKS}, hard ceiling "
+            f"{MAX_CRAWL_LINKS_CEILING})."
+        ),
+    )
+    url_p.add_argument(
+        "--crawl-delay-ms",
+        type=int,
+        default=500,
+        metavar="MS",
+        help=(
+            "Minimum milliseconds between successive URL fetches when "
+            "--depth >= 1 (default 500). Mirrors the throttle pattern used "
+            "for NVD/EPSS fetches."
+        ),
+    )
     _shared_flags(url_p)
 
     # cve subcommand
@@ -753,18 +791,54 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     return 0
 
 
-def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
-    """Execute the url subcommand."""
-    safe_url = _safe_url_for_log(args.url)
-    _log.info("Fetching URL: %s", safe_url)
+def _fetch_url_with_rate_limit(url: str, delay_ms: int = 500) -> str:
+    """Fetch `url` and return its body text, pacing successive calls.
+
+    Mirrors the `_last_call` function-attribute pattern used by
+    `enrich/nvd.py:fetch_nvd`. The throttle is global across all
+    URL-mode fetches in one process: `--depth 1` follows same-host
+    links from a single seed so one global bucket suffices. `time.sleep`
+    and `time.monotonic` are looked up through the shared `time` module
+    so `patch("ramen_cve.time.sleep")` continues to work in tests
+    (REFACTOR_PLAN §5.1).
+
+    Raises `OpmlError` on any HTTP-level failure, with the safe-logged
+    URL embedded, so callers can fail-soft per followed link via a
+    single except clause.
+    """
+    delay = max(0.0, delay_ms / 1000.0)
+    last = getattr(_fetch_url_with_rate_limit, "_last_call", 0.0)
+    elapsed = time.monotonic() - last
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
+    _fetch_url_with_rate_limit._last_call = time.monotonic()
     try:
-        resp = requests.get(args.url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
         resp.raise_for_status()
     except Exception as exc:
-        _log.error("Failed to fetch URL %s: %s", safe_url, exc)
+        raise OpmlError(
+            f"Failed to fetch {_safe_url_for_log(url)}: {exc}"
+        ) from exc
+    return resp.text
+
+
+def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Execute the url subcommand.
+
+    With `--depth 0` (default): single-fetch behaviour, byte-identical to
+    pre-feature output. With `--depth 1`: also extracts every same-host
+    `<a href>` from the seed page, fetches each one (rate-limited per host,
+    fail-soft per link), and runs CVE/IOC extraction over the union.
+    """
+    safe_url = _safe_url_for_log(args.url)
+    _log.info("Fetching URL: %s", safe_url)
+    delay_ms = getattr(args, "crawl_delay_ms", 500)
+    try:
+        text = _fetch_url_with_rate_limit(args.url, delay_ms=delay_ms)
+    except OpmlError as exc:
+        _log.error("%s", exc)
         return 1
 
-    text = resp.text
     pub_date = date.today()
     for pattern in [
         r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\'](\d{4}-\d{2}-\d{2})',
@@ -787,9 +861,35 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     else:
         _log.warning("Could not find publication date in %s; using today.", safe_url)
 
+    # Build the page list: seed first, then optionally one hop of same-host
+    # links. The seed's discovered pub_date is reused for linked pages —
+    # follow-up pages are usually undated index/blog list pages without a
+    # better signal, so the seed date is the best per-run anchor.
+    visited: list[tuple[str, str]] = [(args.url, text)]
+    depth = int(getattr(args, "depth", 0) or 0)
+    if depth >= 1:
+        raw_cap = getattr(args, "max_crawl_links", DEFAULT_MAX_CRAWL_LINKS)
+        cap = int(raw_cap or DEFAULT_MAX_CRAWL_LINKS)
+        followed = _filter_and_cap_links(args.url, text, cap=cap)
+        if followed:
+            _log.info(
+                "Following %d same-host link(s) from seed (cap %d, throttle %dms).",
+                len(followed), cap, delay_ms,
+            )
+        for url in followed:
+            try:
+                page_text = _fetch_url_with_rate_limit(url, delay_ms=delay_ms)
+            except OpmlError as exc:
+                _log.warning("%s", exc)
+                continue
+            visited.append((url, page_text))
+
     date_mode = args.date_mode or "feed"
-    records = extract_cves(text, args.url, pub_date, "feed_pub")
-    iocs = extract_iocs(text, args.url, pub_date, "feed_pub")
+    records = []
+    iocs = []
+    for src_url, page_text in visited:
+        records.extend(extract_cves(page_text, src_url, pub_date, "feed_pub"))
+        iocs.extend(extract_iocs(page_text, src_url, pub_date, "feed_pub"))
     enriched = enrich_cves(
         records, cache, api_key,
         associations=_resolve_associations(args),
@@ -807,7 +907,9 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     metadata = {
         "version": VERSION,
         "args": f"url {args.url}",
-        "sources": [args.url],
+        # Every page actually visited (seed + any followed depth-1 links).
+        # At --depth 0 this is just [args.url] — byte-identical to today.
+        "sources": [u for u, _ in visited],
         "start": str(args.start) if args.start else None,
         "end": str(args.end) if args.end else None,
         "date_mode": date_mode,
