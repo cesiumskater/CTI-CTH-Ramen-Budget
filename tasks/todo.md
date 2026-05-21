@@ -445,13 +445,35 @@ that.
 
 **Implementation slices.**
 
-1. **Slice A — subcommand scaffolding.**
-   - Add `daemon` to `cli.build_parser`; route via `_audit_dispatch`.
-   - New module `src/ramen_cve/daemon.py` (L4, mirrors
-     `schedule.py`).
-   - Implement `_run_daemon(args, cache, api_key)` with **only**
-     `--max-runs 1` working — i.e. it runs the pipeline once and
-     returns. Proves wiring without touching the loop.
+- [x] **Slice A — subcommand scaffolding.** New
+   `src/ramen_cve/daemon.py` (L4, mirrors `schedule.py` style) with
+   `_build_iteration_argv(preset_name)` and `_run_daemon(args, cache,
+   api_key)`. The argv builder reads a YAML preset's `subcommand`
+   (opml/url/cve/stix) + positional and emits the argv that
+   `ramen_cve.main(...)` would parse, plus `--config <preset>` so the
+   preset's other flags flow through `apply_yaml_config`.
+   `_run_daemon` validates `--for-config`, resolves the iteration
+   argv, and runs the pipeline once via a deferred `import ramen_cve;
+   ramen_cve.main(iter_argv)` (avoids the cli<->daemon module-level
+   circular import; matches the §5.2 deferred-lookup pattern). The
+   daemon's own exit code is 0 once an iteration has executed —
+   inner-iteration failures log a WARNING but don't crash the
+   daemon (Slice B will retry on the next interval). Wired the
+   `daemon` subparser into `cli.build_parser` with `--for-config`
+   (required), `--interval`, `--jitter`, `--max-runs`,
+   `--prune-after-days`. Dispatch via `_audit_dispatch(cache,
+   "daemon", args, lambda: _run_daemon(args, cache, None))` —
+   `api_key=None` because the recursive inner `main()` resolves its
+   own. Façade re-exports `_build_iteration_argv` and `_run_daemon`;
+   `tests/test_facade.py` contract updated. +15 tests: 9 covering
+   `_build_iteration_argv` (each subcommand happy path + 4 error
+   paths), 5 covering `_run_daemon` (requires-for-config, invokes
+   main exactly once with resolved argv, returns 0 even when inner
+   main fails, unsupported `--max-runs` logs WARN but still runs,
+   bad preset → rc=2 without calling main), and 1 end-to-end via
+   `ramen_cve.main` proving the subparser routes through
+   `_audit_dispatch`. Verification: 529 passed (was 514 + 15), ruff
+   clean, golden byte-identical.
 2. **Slice B — the loop + signal handling.**
    - `while not _stop: run_pipeline_iteration(); jittered_sleep()`.
    - SIGTERM/SIGINT handlers flip `_stop`.

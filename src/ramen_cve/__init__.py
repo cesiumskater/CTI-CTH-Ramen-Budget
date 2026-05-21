@@ -123,6 +123,10 @@ from .constants import (  # noqa: F401
     URL_REGEX,
     USER_AGENT,
 )
+from .daemon import (  # noqa: F401
+    _build_iteration_argv,
+    _run_daemon,
+)
 from .decay import (  # noqa: F401
     IOC_HALF_LIFE_DAYS,
     _ioc_confidence,
@@ -392,6 +396,7 @@ __all__ = [
     "_build_default_dispatchers",
     "_build_default_enrichers",
     "_build_digest_body",
+    "_build_iteration_argv",
     "_build_malware",
     "_build_schedule_command",
     "_build_sigma_stub",
@@ -443,6 +448,7 @@ __all__ = [
     "_resolve_out_dir",
     "_run_audit",
     "_run_cve",
+    "_run_daemon",
     "_run_hunt",
     "_run_opml",
     "_run_pir",

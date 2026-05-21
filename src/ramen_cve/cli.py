@@ -52,6 +52,7 @@ from .constants import (
     DEFAULT_PRESETS_DIR,
     USER_AGENT,
 )
+from .daemon import _run_daemon
 from .dispatch.digest import _maybe_digest
 from .enrich.exploits import enrich_with_exploit_status
 from .enrich.orchestrator import enrich_cves
@@ -465,6 +466,43 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_p.add_argument("--quiet", action="store_true")
     schedule_p.add_argument("--verbose", action="store_true")
 
+    # daemon subcommand: first-party long-running mode that loops the pipeline
+    # at a fixed interval (Task 3 in tasks/todo.md). Slice A wiring only —
+    # the loop / signal / jitter / prune behaviours land in Slices B–D.
+    daemon_p = sub.add_parser(
+        "daemon",
+        help="Run a configured pipeline preset at intervals in one long-lived "
+             "process (Slice A: single-shot wiring; Slices B-D add loop, "
+             "signal handling, and history pruning).",
+    )
+    daemon_p.add_argument(
+        "--for-config", type=str, required=True, metavar="NAME",
+        help="Saved YAML preset name (or YAML file path) the daemon loops. "
+             "Must declare a `subcommand` of opml / url / cve / stix.",
+    )
+    daemon_p.add_argument(
+        "--interval", type=int, default=21600, metavar="SECONDS",
+        help="Sleep between iterations (default 21600 = 6 hours). "
+             "Active from Slice B; ignored in Slice A.",
+    )
+    daemon_p.add_argument(
+        "--jitter", type=int, default=0, metavar="SECONDS",
+        help="Random +/- jitter added to --interval (default 0 = exact). "
+             "Active from Slice B.",
+    )
+    daemon_p.add_argument(
+        "--max-runs", type=int, default=-1, metavar="N",
+        help="Cap on iterations; -1 (default) = unbounded (Slice B+). "
+             "Slice A always runs exactly one iteration regardless.",
+    )
+    daemon_p.add_argument(
+        "--prune-after-days", type=int, default=0, metavar="N",
+        help="Delete per-iteration output subdirs older than N days "
+             "(default 0 = no pruning). Active from Slice D.",
+    )
+    daemon_p.add_argument("--quiet", action="store_true")
+    daemon_p.add_argument("--verbose", action="store_true")
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=_path_arg, help="Path to a STIX bundle JSON file.")
@@ -622,6 +660,17 @@ def main(argv: list[str] | None = None) -> int:
         cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
         return _audit_dispatch(
             cache, "schedule", args, lambda: _run_schedule(args, cache, None)
+        )
+
+    # daemon subcommand: dispatch alongside schedule (audit-logged so an
+    # operator can trace when the daemon was (re)started). The recursive
+    # main() call inside _run_daemon resolves its own api_key for each
+    # inner iteration, so the outer call passes None — preventing the
+    # dispatch from depending on api_key resolution this early in main().
+    if args.subcommand == "daemon":
+        cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
+        return _audit_dispatch(
+            cache, "daemon", args, lambda: _run_daemon(args, cache, None)
         )
 
     _validate_args(args, parser)

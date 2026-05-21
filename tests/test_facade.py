@@ -78,12 +78,13 @@ PUBLIC_API: tuple[str, ...] = (
     "_maybe_correlate_inventory", "_output",
     # wizard.py
     "_wizard_validate_cve_list",
-    # hunt/pir/trend/audit/schedule
+    # hunt/pir/trend/audit/schedule/daemon
     "load_hunt", "load_all_hunts", "save_hunt", "load_pir",
     "load_all_pirs", "save_pir", "_sparkline", "_record_runs",
     "_run_opml", "_audit_actor", "_redact_audit_args", "_audit_dispatch",
     "_parse_schedule_time", "_quote_for_task_scheduler", "_emit_cron_line",
     "_emit_windows_task_xml", "_run_schedule",
+    "_run_daemon", "_build_iteration_argv",
     # cli.py
     "build_parser", "main",
 )
