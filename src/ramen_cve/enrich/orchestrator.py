@@ -25,12 +25,17 @@ from .nvd import fetch_nvd
 _log = logging.getLogger(__name__)
 
 
+EPSS_TRAJECTORY_WARN_THRESHOLD = 200
+EPSS_TRAJECTORY_ABUSE_THRESHOLD = 500
+
+
 def enrich_cves(
     records: list[CveRecord],
     cache: Cache,
     api_key: str | None,
     associations: dict[str, dict[str, list]] | None = None,
     epss_date_range: tuple[date, date] | None = None,
+    confirm_large_trajectory: bool = False,
 ) -> list[EnrichedCve]:
     """Fetch NVD, EPSS, and CISA KEV data for each unique CVE and return enriched records.
 
@@ -43,6 +48,11 @@ def enrich_cves(
     date), with the scalar `epss_score`/`epss_percentile`/`epss_date` fields
     pinned to the END-date value. When `start == end` (or the range is None),
     behaviour is byte-identical to today's single-shot EPSS call.
+
+    Trajectory volume guard: projected EPSS API calls are
+    `days × ceil(len(unique_cves) / 100)`. ≥200 logs a WARNING; ≥500 raises
+    `ValueError` unless `confirm_large_trajectory=True` (CLI:
+    `--allow-large-epss-trajectory`).
 
     If `associations` is provided, each enriched record is also annotated with
     the linked actors, campaigns, and malware for that CVE.
@@ -86,6 +96,28 @@ def enrich_cves(
         and epss_date_range[0] != epss_date_range[1]
     ):
         traj_start, traj_end = epss_date_range
+        # Pre-flight projected EPSS API call count: days × ceil(N/100).
+        # Threshold-based protection against accidentally hammering the
+        # FIRST.org API with very large ranges or CVE counts. Cache hits
+        # don't reduce the *projected* call count (we can't know hit
+        # rates without iterating), so this is a conservative upper bound.
+        days = (traj_end - traj_start).days + 1
+        batches_per_day = -(-len(unique_ids) // 100)  # ceil
+        projected_calls = days * batches_per_day
+        if projected_calls >= EPSS_TRAJECTORY_ABUSE_THRESHOLD and not confirm_large_trajectory:
+            raise ValueError(
+                f"EPSS trajectory would issue {projected_calls} API calls "
+                f"({days} days × {batches_per_day} batch(es)/day for "
+                f"{len(unique_ids)} CVE(s)); ≥{EPSS_TRAJECTORY_ABUSE_THRESHOLD} "
+                f"requires explicit confirmation. Pass --allow-large-epss-trajectory "
+                f"to proceed, or shrink the date range / CVE set."
+            )
+        if projected_calls >= EPSS_TRAJECTORY_WARN_THRESHOLD:
+            _log.warning(
+                "EPSS trajectory will issue %d API calls (%d days × %d "
+                "batch(es)/day for %d CVE(s)); may be slow and rate-limited.",
+                projected_calls, days, batches_per_day, len(unique_ids),
+            )
         end_date_str = traj_end.isoformat()
         cur = traj_start
         while cur <= traj_end:

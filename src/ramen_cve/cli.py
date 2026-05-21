@@ -183,6 +183,15 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--allow-large-epss-trajectory",
+        action="store_true",
+        help=(
+            "Bypass the EPSS trajectory volume guard, which hard-errors when "
+            "the projected number of EPSS API calls would be >= 500 "
+            "(days x ceil(N_cves/100)). A warning is still logged at >= 200."
+        ),
+    )
+    parser.add_argument(
         "--inventory",
         type=_path_arg,
         metavar="PATH",
@@ -706,6 +715,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         records, cache, api_key,
         associations=_resolve_associations(args),
         epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
     )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
@@ -784,6 +794,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         records, cache, api_key,
         associations=_resolve_associations(args),
         epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
     )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
@@ -895,6 +906,7 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         records, cache, api_key,
         associations=_resolve_associations(args),
         epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
     )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
@@ -955,7 +967,11 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         _log.warning("STIX source produced no CVEs or IOCs.")
 
     date_mode = args.date_mode or "disclosure"
-    enriched = enrich_cves(cve_records, cache, api_key, epss_date_range=_epss_date_range_for(args))
+    enriched = enrich_cves(
+        cve_records, cache, api_key,
+        epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
+    )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)

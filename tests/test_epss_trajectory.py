@@ -403,3 +403,146 @@ def test_markdown_omits_table_when_trajectory_is_long(tmp_path):
     assert "- **EPSS trajectory:**" in text
     assert "12 samples" in text
     assert "| Date | EPSS | Percentile |" not in text  # table suppressed
+
+
+# ---------------------------------------------------------------------------
+# Slice D — volume guard (warn / hard-error / opt-in bypass)
+# ---------------------------------------------------------------------------
+
+
+def _lower_thresholds(monkeypatch, warn: int, abuse: int) -> None:
+    """Shrink the trajectory thresholds so tests can hit them with tiny ranges."""
+    from ramen_cve.enrich import orchestrator
+    monkeypatch.setattr(orchestrator, "EPSS_TRAJECTORY_WARN_THRESHOLD", warn)
+    monkeypatch.setattr(orchestrator, "EPSS_TRAJECTORY_ABUSE_THRESHOLD", abuse)
+
+
+def test_trajectory_guard_errors_at_abuse_threshold(monkeypatch, tmp_path):
+    """≥ abuse threshold raises ValueError without the opt-in flag.
+
+    Math: `days * ceil(len(unique_ids) / 100)`. With one CVE and a 12-day
+    range that's 12 projected calls. Shrinking the abuse threshold to 10
+    lets us trip the guard cheaply.
+    """
+    _lower_thresholds(monkeypatch, warn=5, abuse=10)
+    _stub_nvd_kev(monkeypatch)
+    cache = Cache(str(tmp_path / "c.db"))
+
+    start, end = date(2024, 6, 1), date(2024, 6, 12)  # 12 days × 1 batch
+    with pytest.raises(ValueError, match="EPSS trajectory would issue 12"):
+        enrich_cves(
+            [_single_record()], cache, None, epss_date_range=(start, end)
+        )
+
+
+def test_trajectory_guard_bypassed_with_confirm(monkeypatch, tmp_path):
+    """`confirm_large_trajectory=True` lets a >= abuse-threshold run proceed."""
+    _lower_thresholds(monkeypatch, warn=5, abuse=10)
+    _stub_nvd_kev(monkeypatch)
+    monkeypatch.setattr(
+        "ramen_cve.enrich.orchestrator.fetch_epss",
+        lambda ids, c, score_date=None: {
+            "CVE-2024-0001": {"epss": 0.5, "percentile": 0.5, "date": score_date}
+        },
+    )
+    cache = Cache(str(tmp_path / "c.db"))
+
+    start, end = date(2024, 6, 1), date(2024, 6, 12)  # 12 calls, > abuse=10
+    [r] = enrich_cves(
+        [_single_record()], cache, None,
+        epss_date_range=(start, end),
+        confirm_large_trajectory=True,
+    )
+    # 12-day range successfully looped → 12 entries in the trajectory.
+    assert len(r.epss_trajectory) == 12
+
+
+def test_trajectory_guard_warns_in_warn_band(monkeypatch, tmp_path, caplog):
+    """warn ≤ projected < abuse logs a WARNING but proceeds normally."""
+    import logging as _logging
+    _lower_thresholds(monkeypatch, warn=5, abuse=100)
+    _stub_nvd_kev(monkeypatch)
+    monkeypatch.setattr(
+        "ramen_cve.enrich.orchestrator.fetch_epss",
+        lambda ids, c, score_date=None: {
+            "CVE-2024-0001": {"epss": 0.5, "percentile": 0.5, "date": score_date}
+        },
+    )
+    cache = Cache(str(tmp_path / "c.db"))
+
+    with caplog.at_level(_logging.WARNING, logger="ramen_cve.enrich.orchestrator"):
+        start, end = date(2024, 6, 1), date(2024, 6, 7)  # 7 calls, ≥ warn=5
+        enrich_cves(
+            [_single_record()], cache, None, epss_date_range=(start, end)
+        )
+
+    assert any(
+        "EPSS trajectory will issue 7 API calls" in rec.message
+        for rec in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_trajectory_guard_silent_below_warn(monkeypatch, tmp_path, caplog):
+    """projected < warn logs no warning (the normal small-range path)."""
+    import logging as _logging
+    _lower_thresholds(monkeypatch, warn=100, abuse=500)
+    _stub_nvd_kev(monkeypatch)
+    monkeypatch.setattr(
+        "ramen_cve.enrich.orchestrator.fetch_epss",
+        lambda ids, c, score_date=None: {
+            "CVE-2024-0001": {"epss": 0.5, "percentile": 0.5, "date": score_date}
+        },
+    )
+    cache = Cache(str(tmp_path / "c.db"))
+
+    with caplog.at_level(_logging.WARNING, logger="ramen_cve.enrich.orchestrator"):
+        start, end = date(2024, 6, 1), date(2024, 6, 3)  # 3 calls, well below warn=100
+        enrich_cves(
+            [_single_record()], cache, None, epss_date_range=(start, end)
+        )
+
+    assert not any(
+        "EPSS trajectory will issue" in rec.message for rec in caplog.records
+    )
+
+
+def test_allow_large_epss_trajectory_flag_threaded_through(monkeypatch, tmp_path):
+    """The CLI flag --allow-large-epss-trajectory reaches the orchestrator.
+
+    Patches the orchestrator's enrich_cves so we can read back the kwarg
+    value that the cli runner forwarded.
+    """
+    captured: dict[str, bool] = {}
+
+    def _spy_enrich_cves(
+        records, cache, api_key, *,
+        associations=None,
+        epss_date_range=None,
+        confirm_large_trajectory=False,
+    ):
+        captured["confirm_large_trajectory"] = confirm_large_trajectory
+        return []
+
+    # Patch at the cli's import-time binding (Amendment: monkeypatch the
+    # symbol on the module where it's *resolved*, not at the façade).
+    monkeypatch.setattr("ramen_cve.cli.enrich_cves", _spy_enrich_cves)
+    # The cve runner is the cheapest to drive end-to-end.
+    monkeypatch.setattr("ramen_cve.cli.enrich_with_exploit_status", lambda *a, **k: None)
+    monkeypatch.setattr("ramen_cve.cli._maybe_correlate_inventory", lambda *a, **k: None)
+    monkeypatch.setattr("ramen_cve.cli._maybe_dispatch", lambda *a, **k: None)
+    monkeypatch.setattr("ramen_cve.cli._maybe_digest", lambda *a, **k: None)
+    monkeypatch.setattr("ramen_cve.cli._output", lambda *a, **k: {})
+    monkeypatch.setattr("ramen_cve.cli._record_runs", lambda *a, **k: None)
+    monkeypatch.setattr("ramen_cve.cli.bucket_and_suggest", lambda enriched, *a, **k: enriched)
+
+    import ramen_cve
+    rc = ramen_cve.main(
+        [
+            "cve", "CVE-2024-0001",
+            "--no-cache", "--format", "csv",
+            "--out-dir", str(tmp_path),
+            "--allow-large-epss-trajectory",
+        ]
+    )
+    assert rc == 0
+    assert captured.get("confirm_large_trajectory") is True

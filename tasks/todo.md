@@ -55,9 +55,24 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       suppressed when long). Verification: 478 passed, ruff clean,
       golden CSV+MD byte-identical to the post-Step-18 anchor (no
       trajectory in the smoke fixture → markdown unchanged).
-- [ ] **Slice D — volume guard + UX polish.** Pre-flight call count;
-      warn ≥200 projected calls; hard-error ≥500 unless an explicit
-      opt-in flag is also passed.
+- [x] **Slice D — volume guard.** Added the constants
+      `EPSS_TRAJECTORY_WARN_THRESHOLD=200` and
+      `EPSS_TRAJECTORY_ABUSE_THRESHOLD=500` to
+      `enrich/orchestrator.py`. Pre-loop, `enrich_cves` computes
+      `projected = days × ceil(N_cves / 100)`; ≥ WARN logs a WARNING
+      and proceeds, ≥ ABUSE raises `ValueError` unless the new
+      `confirm_large_trajectory: bool = False` parameter is True.
+      The CLI side adds a `--allow-large-epss-trajectory` flag
+      (shared across all four runners). +5 tests (error at abuse,
+      bypass with flag, warn-band logging, silent below warn, and
+      end-to-end CLI flag threading via a spy on `enrich_cves`).
+      Verification: 483 passed (20 trajectory tests total across
+      Slices A–D), ruff clean, golden CSV+MD byte-identical to anchor.
+
+**Task 1 status: COMPLETE.** EPSS trajectory mode is shipped end-to-
+end (model + per-date fetch + sidecar CSV + Markdown sparkline/table
++ volume guard). PR #24 carries all four slices; opt-in via
+`--date-mode epss` with a multi-day `--start`/`--end`.
 
 ---
 
