@@ -16,6 +16,7 @@ from ..constants import (
     DEFAULT_EPSS_THRESHOLD,
 )
 from ..models import EnrichedCve, IocRecord, _utcnow
+from ..render import _sparkline
 
 BUCKET_ORDER = [
     "kev_override",
@@ -216,6 +217,27 @@ def write_markdown(
                 lines.append(f"- **EPSS:** {rec.epss_score:.4f}")
             else:
                 lines.append("- **EPSS:** N/A")
+            if rec.epss_trajectory:
+                # EPSS trajectory mode (`--date-mode epss` with a multi-day
+                # range): show a sparkline summary, and — for short windows
+                # — a compact inline table. The full series is always in
+                # the `<basename>-epss-trajectory.csv` sidecar (Slice B).
+                traj_dates = sorted(rec.epss_trajectory.keys())
+                traj_values = [rec.epss_trajectory[d]["epss"] for d in traj_dates]
+                lines.append(
+                    f"- **EPSS trajectory:** `{_sparkline(traj_values)}` "
+                    f"({traj_dates[0]} → {traj_dates[-1]}, {len(traj_dates)} samples)"
+                )
+                if len(traj_dates) <= 10:
+                    lines.append("")
+                    lines.append("    | Date | EPSS | Percentile |")
+                    lines.append("    | --- | --- | --- |")
+                    for d in traj_dates:
+                        p = rec.epss_trajectory[d]
+                        lines.append(
+                            f"    | {d} | {p['epss']:.4f} | {p['percentile']:.4f} |"
+                        )
+                    lines.append("")
             lines.append(f"- **CWE:** {', '.join(rec.cwe) if rec.cwe else 'N/A'}")
             if rec.attack_techniques:
                 techniques_display = ", ".join(

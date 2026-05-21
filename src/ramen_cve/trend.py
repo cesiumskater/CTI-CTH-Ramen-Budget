@@ -9,27 +9,13 @@ from .cache import Cache
 from .constants import CVE_REGEX
 from .models import EnrichedCve
 
+# Lifted to the L1 `render` leaf so output/markdown.py can reuse the
+# sparkline without an upward L3 -> L4 import (see render.py docstring).
+# Re-imported here so `ramen_cve.trend._sparkline` (and the façade
+# re-export) keep resolving for back-compat.
+from .render import _SPARKLINE_CHARS, _sparkline  # noqa: F401
+
 _log = logging.getLogger(__name__)
-
-
-_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
-
-
-def _sparkline(values: list[float | None]) -> str:
-    """Render a list of numbers as a unicode sparkline; None renders as a space."""
-    real = [v for v in values if v is not None]
-    if not real:
-        return ""
-    lo, hi = min(real), max(real)
-    span = hi - lo if hi > lo else 1.0
-    out: list[str] = []
-    for v in values:
-        if v is None:
-            out.append(" ")
-            continue
-        idx = int(((v - lo) / span) * (len(_SPARKLINE_CHARS) - 1))
-        out.append(_SPARKLINE_CHARS[max(0, min(idx, len(_SPARKLINE_CHARS) - 1))])
-    return "".join(out)
 
 
 def _record_runs(cache: Cache, enriched: list[EnrichedCve]) -> None:

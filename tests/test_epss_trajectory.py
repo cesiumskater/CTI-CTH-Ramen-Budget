@@ -313,3 +313,93 @@ def test_pipeline_output_emits_sidecar_only_when_trajectory_present(tmp_path):
     sidecars = list(out_dir_2.glob("*epss-trajectory*"))
     assert len(sidecars) == 1, sidecars
     assert sidecars[0].name == "run-epss-trajectory.csv"
+
+
+# ---------------------------------------------------------------------------
+# Slice C — Markdown sparkline + inline table; render.py lift
+# ---------------------------------------------------------------------------
+
+
+def test_render_sparkline_identical_to_trend_facade():
+    """The `ramen_cve.render._sparkline` lift preserves `_sparkline` behaviour;
+    the `ramen_cve.trend` re-import and the façade keep resolving."""
+    import ramen_cve
+    from ramen_cve.render import _SPARKLINE_CHARS as char_set
+    from ramen_cve.render import _sparkline as render_sparkline
+    from ramen_cve.trend import _sparkline as trend_sparkline
+
+    assert ramen_cve._sparkline is render_sparkline
+    assert ramen_cve._sparkline is trend_sparkline  # trend re-imports it
+    assert char_set == ramen_cve._SPARKLINE_CHARS
+
+    # Smoke: known mappings.
+    assert render_sparkline([0.0, 1.0]) == "▁█"
+    assert render_sparkline([0.5, None, 0.5]) == "▁ ▁"
+    assert render_sparkline([]) == ""
+
+
+def _enriched_for_markdown(cve_id, trajectory=None):
+    """An EnrichedCve with the minimum metadata write_markdown needs."""
+    rec = _enriched(cve_id, trajectory=trajectory)
+    rec.bucket = "patch_now"  # routes into a real section, not "## No CVEs found"
+    rec.cvss_score = 9.0
+    rec.cvss_severity = "CRITICAL"
+    rec.epss_score = 0.5
+    rec.epss_percentile = 0.8
+    return rec
+
+
+def test_markdown_emits_trajectory_section_for_records_with_trajectory(tmp_path):
+    """A record with `epss_trajectory` gets a sparkline line + inline table."""
+    from ramen_cve import write_markdown
+
+    rec = _enriched_for_markdown(
+        "CVE-2024-0001",
+        trajectory={
+            "2024-06-01": {"epss": 0.10, "percentile": 0.50},
+            "2024-06-02": {"epss": 0.15, "percentile": 0.75},
+            "2024-06-03": {"epss": 0.20, "percentile": 0.99},
+        },
+    )
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, {"version": "test"})
+    text = out.read_text()
+
+    assert "- **EPSS trajectory:**" in text
+    assert "2024-06-01 → 2024-06-03, 3 samples" in text
+    # Inline table (<=10 samples threshold)
+    assert "| Date | EPSS | Percentile |" in text
+    assert "| 2024-06-01 | 0.1000 | 0.5000 |" in text
+    assert "| 2024-06-03 | 0.2000 | 0.9900 |" in text
+
+
+def test_markdown_omits_trajectory_section_when_dict_empty(tmp_path):
+    """No trajectory key → no extra lines (byte-identical to pre-feature path)."""
+    from ramen_cve import write_markdown
+
+    rec = _enriched_for_markdown("CVE-2024-0001", trajectory=None)
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, {"version": "test"})
+    text = out.read_text()
+
+    assert "EPSS trajectory" not in text
+    assert "| Date | EPSS | Percentile |" not in text
+
+
+def test_markdown_omits_table_when_trajectory_is_long(tmp_path):
+    """> 10 samples: sparkline summary line only; table is suppressed
+    (the full series is in the sidecar CSV from Slice B)."""
+    from ramen_cve import write_markdown
+
+    trajectory = {
+        f"2024-06-{day:02d}": {"epss": 0.1 + day * 0.01, "percentile": 0.5}
+        for day in range(1, 13)  # 12 samples
+    }
+    rec = _enriched_for_markdown("CVE-2024-0001", trajectory=trajectory)
+    out = tmp_path / "report.md"
+    write_markdown([rec], out, {"version": "test"})
+    text = out.read_text()
+
+    assert "- **EPSS trajectory:**" in text
+    assert "12 samples" in text
+    assert "| Date | EPSS | Percentile |" not in text  # table suppressed

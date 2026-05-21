@@ -40,9 +40,21 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       basic / skip-empty / sort, plus pipeline-level emit-iff-present
       integration). Verification: 474 passed, ruff clean, golden
       byte-identical (sidecar suppressed when no trajectory).
-- [ ] **Slice C — Markdown sparkline + table.** Reuse
-      `trend._sparkline`; possibly lift it to `util/render.py` if the
-      L4 → L4 sibling import is awkward.
+- [x] **Slice C — Markdown sparkline + table; `_sparkline` lift.**
+      Lifted `_SPARKLINE_CHARS` + `_sparkline` from `trend.py` (L4)
+      into a new `render.py` L1 leaf so `output/markdown.py` (L3) can
+      reuse them without an upward import. `trend.py` re-imports the
+      symbols (back-compat; `ramen_cve.trend._sparkline` and the
+      façade re-export keep resolving). `write_markdown` now appends a
+      `**EPSS trajectory:** \`<sparkline>\` (start → end, N samples)`
+      bullet for any record with a non-empty trajectory dict, plus a
+      compact inline date/EPSS/percentile table when N ≤ 10 (above
+      that, the sparkline alone — the full series lives in the
+      Slice-B sidecar CSV). +4 tests (sparkline-lift identity,
+      trajectory section emitted, omitted when no trajectory, table
+      suppressed when long). Verification: 478 passed, ruff clean,
+      golden CSV+MD byte-identical to the post-Step-18 anchor (no
+      trajectory in the smoke fixture → markdown unchanged).
 - [ ] **Slice D — volume guard + UX polish.** Pre-flight call count;
       warn ≥200 projected calls; hard-error ≥500 unless an explicit
       opt-in flag is also passed.
