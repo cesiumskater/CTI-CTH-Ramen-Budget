@@ -474,10 +474,27 @@ that.
    `ramen_cve.main` proving the subparser routes through
    `_audit_dispatch`. Verification: 529 passed (was 514 + 15), ruff
    clean, golden byte-identical.
-2. **Slice B — the loop + signal handling.**
-   - `while not _stop: run_pipeline_iteration(); jittered_sleep()`.
-   - SIGTERM/SIGINT handlers flip `_stop`.
-   - Reset `args._inventory_rows` and similar fields per iteration.
+- [x] **Slice B — the loop + signal handling.** Replaced Slice A's
+   single-shot call with a `while True` loop terminated by either
+   `--max-runs N` (iteration cap) or a SIGTERM/SIGINT-driven
+   `threading.Event`. The loop uses `_should_stop.wait(timeout=
+   interval + jitter)` so the daemon wakes immediately on signal
+   rather than after the full interval (sub-second shutdown
+   latency on a 6 h interval). `_install_signal_handlers()` saves
+   the prior handlers and the daemon's `finally` clause restores
+   them, so embedders don't lose their signal handling. Fixed an
+   `X or default` short-circuit bug surfaced during testing —
+   `interval=0` / `jitter=0` / `max_runs=0` are now honoured
+   verbatim instead of being silently coerced to defaults
+   (captured as `tasks/lessons.md` L8). +6 Slice-B tests
+   (max-runs N actually loops N times, unbounded run exits on
+   `_should_stop`, failed iterations don't abort the loop, signal
+   handler flips the event, restore-handlers works, jitter
+   modulates sleep, negative jitter clamps to zero). One Slice-A
+   test (`logs_warning_for_unsupported_max_runs`) rewritten as
+   `honours_max_runs_positive` since the loop now supports it.
+   Verification: 535 passed (515 + 21 daemon tests, run in 0.20s),
+   ruff clean, golden byte-identical.
 3. **Slice C — timestamped output dirs.**
    - Compute `out_subdir = out_dir / f"ramen-cve-{_utcnow().strftime(...)}"`
      and pass that as the iteration's effective `--out-dir`.

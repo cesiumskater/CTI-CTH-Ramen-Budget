@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
+import signal
+import threading
 
 from .cache import Cache
 from .config import load_yaml_config
@@ -28,6 +31,46 @@ _log = logging.getLogger(__name__)
 # scope — looping those doesn't make sense for an ongoing triage
 # pipeline.)
 _DAEMON_VALID_SUBCOMMANDS = ("opml", "url", "cve", "stix")
+
+# Module-level stop signal shared between the SIGTERM/SIGINT handlers
+# and the daemon loop. A `threading.Event` lets the loop block on
+# `wait(timeout=interval)` and wake immediately when a signal lands,
+# without the per-syscall flakiness of `time.sleep` interruption.
+# Cleared at the top of every `_run_daemon` call so test invocations
+# in the same process don't bleed state.
+_should_stop: threading.Event = threading.Event()
+
+
+def _install_signal_handlers():
+    """Install SIGTERM/SIGINT handlers; return a restore-callable.
+
+    Both signals set the module-level `_should_stop` event, which the
+    loop checks after every iteration. We don't interrupt mid-pipeline
+    — partial output files are worse than a one-iteration delay on
+    shutdown. The previous handlers are saved + restored so embedders
+    don't lose their signal handling when the daemon exits.
+
+    Note: `signal.signal` only works on the main thread. The daemon is
+    always invoked from the main thread (it's the top-of-process CLI
+    runner), so this is safe in production. Tests that need to skip
+    the install can monkeypatch the function.
+    """
+
+    def _handler(signum, frame):  # noqa: ARG001 — signal API contract
+        _log.info(
+            "daemon: received signal %d; will finish current iteration and exit.",
+            signum,
+        )
+        _should_stop.set()
+
+    prev_term = signal.signal(signal.SIGTERM, _handler)
+    prev_int = signal.signal(signal.SIGINT, _handler)
+
+    def _restore() -> None:
+        signal.signal(signal.SIGTERM, prev_term)
+        signal.signal(signal.SIGINT, prev_int)
+
+    return _restore
 
 
 def _build_iteration_argv(preset_name: str) -> list[str]:
@@ -96,28 +139,28 @@ def _build_iteration_argv(preset_name: str) -> list[str]:
 
 
 def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
-    """Run the configured pipeline once (Slice A wiring; no loop yet).
+    """Loop the configured pipeline at fixed intervals until stopped.
 
-    Slice A intentionally supports only a single iteration so the
-    subcommand dispatch, preset resolution, and recursive ``main()``
-    plumbing can be tested end-to-end without committing to the
-    long-lived-process surface. Slice B replaces the single call with
-    a ``while not _stop: run(); jittered_sleep()`` loop and adds the
-    signal handlers.
+    Loop body per iteration:
+      1. ``ramen_cve.main(iter_argv)`` runs the inner pipeline once.
+         Inner failures log a WARNING but don't abort the daemon —
+         the next iteration retries.
+      2. If `--max-runs` is positive and we've hit it, exit.
+      3. If a SIGTERM/SIGINT has flipped `_should_stop`, exit.
+      4. ``_should_stop.wait(interval + jitter)`` — sleep until the
+         next iteration OR until a signal wakes us, whichever comes
+         first. This is what gives the daemon sub-second shutdown
+         latency on a long interval.
+
+    `--max-runs -1` (the default) means "unbounded — exit only on
+    signal". `--max-runs 1` is the Slice-A single-shot mode and is
+    still honoured. `--interval 0` makes the daemon run iterations
+    back-to-back (useful for tests).
     """
     preset = getattr(args, "for_config", None)
     if not preset:
         _log.error("daemon: --for-config NAME is required.")
         return 2
-
-    max_runs = int(getattr(args, "max_runs", -1) or -1)
-    if max_runs not in (-1, 1):
-        _log.warning(
-            "daemon Slice A only supports --max-runs 1 (or -1 = unbounded "
-            "with the Slice-B loop, not yet implemented); got %s. Running "
-            "exactly one iteration.",
-            max_runs,
-        )
 
     try:
         iter_argv = _build_iteration_argv(preset)
@@ -125,20 +168,67 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
         _log.error("%s", exc)
         return 2
 
-    # Deferred import: cli imports daemon at module load, so importing
-    # ramen_cve (which re-exports cli.main) at module-level would create
-    # a circular import. Function-local lookup goes through the package
-    # namespace and resolves whatever main is in scope at call time —
-    # also the documented seam tests can patch via
-    # `patch("ramen_cve.main", ...)` (Amendment 2026-05-18 monkeypatch
-    # protocol).
-    import ramen_cve
+    # Use ``X if X is not None else default`` rather than ``X or default``
+    # so an explicit zero (e.g. --interval 0 in tests) is honoured, not
+    # silently coerced back to the default.
+    raw_max = getattr(args, "max_runs", -1)
+    max_runs = int(raw_max if raw_max is not None else -1)
+    raw_int = getattr(args, "interval", 21600)
+    interval = max(0, int(raw_int if raw_int is not None else 21600))
+    raw_jit = getattr(args, "jitter", 0)
+    jitter = max(0, int(raw_jit if raw_jit is not None else 0))
 
-    _log.info("daemon: running iteration via %s", iter_argv)
-    rc = ramen_cve.main(iter_argv)
-    if rc != 0:
-        _log.warning("daemon: iteration returned rc=%d", rc)
-    # The daemon itself exits 0 once it successfully ran an iteration —
-    # downstream-pipeline failures don't terminate the daemon (they'll
-    # be retried on the next interval once Slice B lands the loop).
+    # Fresh state per call: tests rely on starting with a clear event.
+    _should_stop.clear()
+    restore_signals = _install_signal_handlers()
+    iterations = 0
+    try:
+        # Deferred import: cli imports daemon at module load, so
+        # importing ramen_cve (which re-exports cli.main) at module-
+        # level would create a circular import. Function-local lookup
+        # goes through the package namespace and resolves whatever
+        # `main` is in scope at call time — tests patch via
+        # `patch("ramen_cve.main", ...)` (Amendment 2026-05-18
+        # monkeypatch protocol).
+        import ramen_cve
+
+        while True:
+            iterations += 1
+            _log.info("daemon: iteration %d via %s", iterations, iter_argv)
+            rc = ramen_cve.main(iter_argv)
+            if rc != 0:
+                _log.warning(
+                    "daemon: iteration %d returned rc=%d (will retry on the next interval).",
+                    iterations, rc,
+                )
+
+            if max_runs > 0 and iterations >= max_runs:
+                _log.info(
+                    "daemon: reached --max-runs %d, exiting cleanly.", max_runs,
+                )
+                break
+            if _should_stop.is_set():
+                _log.info("daemon: stop signal received, exiting after iteration %d.", iterations)
+                break
+
+            # Jitter is ±N seconds added to the base interval (uniform).
+            # Clamped at zero so a wild jitter setting can't make us
+            # busy-loop with a negative sleep.
+            jittered = float(interval)
+            if jitter:
+                jittered += random.uniform(-jitter, jitter)
+            jittered = max(0.0, jittered)
+            _log.info("daemon: sleeping %.1fs before next iteration.", jittered)
+            # `Event.wait(timeout)` returns True iff the event was set
+            # during the wait — that's our signal-driven early exit.
+            if _should_stop.wait(timeout=jittered):
+                _log.info(
+                    "daemon: stop signal received during sleep, exiting after iteration %d.",
+                    iterations,
+                )
+                break
+    finally:
+        restore_signals()
+
+    _log.info("daemon: clean exit after %d iteration(s).", iterations)
     return 0

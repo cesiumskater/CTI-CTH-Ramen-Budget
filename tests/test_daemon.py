@@ -43,7 +43,16 @@ def preset_dir(tmp_path, monkeypatch):
 
 
 def _ns(**kw):
-    base = {"for_config": None, "max_runs": -1, "no_cache": True}
+    # interval=0/jitter=0 means back-to-back iterations with no real sleep —
+    # essential for tests because the loop's `Event.wait(timeout)` blocks
+    # otherwise (real-time intervals are minutes-to-hours in production).
+    base = {
+        "for_config": None,
+        "max_runs": -1,
+        "no_cache": True,
+        "interval": 0,
+        "jitter": 0,
+    }
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -158,22 +167,19 @@ def test_run_daemon_returns_0_even_if_inner_main_failed(preset_dir):
     assert rc == 0
 
 
-def test_run_daemon_logs_warning_for_unsupported_max_runs(preset_dir, caplog):
-    """Slice A only honours --max-runs 1 (or -1); other values log a WARN
-    and still run exactly once."""
-    import logging as _logging
-
+def test_run_daemon_honours_max_runs_positive(preset_dir):
+    """Slice B: `--max-runs N` (N>0) actually loops N iterations and exits."""
     _, write = preset_dir
     write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
 
-    args = _ns(for_config="daily-cve", max_runs=3)
-    with (
-        patch("ramen_cve.main", return_value=0),
-        caplog.at_level(_logging.WARNING, logger="ramen_cve.daemon"),
-    ):
+    calls: list[list[str]] = []
+    with patch("ramen_cve.main", side_effect=lambda argv: calls.append(list(argv)) or 0):
+        args = _ns(for_config="daily-cve", max_runs=3)
         rc = _run_daemon(args, cache=object(), api_key=None)
     assert rc == 0
-    assert any("Slice A only supports --max-runs 1" in r.message for r in caplog.records)
+    assert len(calls) == 3, calls
+    # Every iteration sees the same argv (the preset doesn't change mid-run).
+    assert all(c == ["cve", "CVE-2024-0001", "--config", "daily-cve"] for c in calls)
 
 
 def test_run_daemon_surfaces_bad_preset_as_rc_2(preset_dir):
@@ -245,3 +251,186 @@ def test_cli_daemon_subcommand_dispatches_through_audit(preset_dir, tmp_path, mo
     # The inner main was invoked exactly once with the resolved argv.
     inner_argvs = [c for c in calls if c != "OUTER-PLACEHOLDER"]
     assert inner_argvs == [["cve", "CVE-2024-0001", "--config", "test-preset"]]
+
+
+# ---------------------------------------------------------------------------
+# Slice B — loop + signal handling
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_unbounded_exits_on_stop_event(preset_dir):
+    """`--max-runs -1` is unbounded; setting `_should_stop` from inside a
+    mocked iteration drops out of the loop after that iteration finishes."""
+    _, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    from ramen_cve import daemon as d_mod
+
+    calls: list[list[str]] = []
+
+    def _trip_after_two(argv):
+        calls.append(list(argv))
+        if len(calls) == 2:
+            d_mod._should_stop.set()
+        return 0
+
+    with patch("ramen_cve.main", side_effect=_trip_after_two):
+        args = _ns(for_config="daily-cve", max_runs=-1)
+        rc = _run_daemon(args, cache=object(), api_key=None)
+    # Iteration 1 → no stop, sleep(0); iteration 2 → trip stop → break BEFORE
+    # iteration 3 even though max_runs is unbounded.
+    assert rc == 0
+    assert len(calls) == 2
+
+
+def test_daemon_failed_inner_iterations_keep_running(preset_dir, caplog):
+    """A failing iteration logs a WARN but the loop continues to the next
+    iteration; the daemon's own rc is 0 once it exits cleanly."""
+    import logging as _logging
+
+    _, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    return_codes = iter([2, 1, 0])  # fail, fail, succeed — all three loop.
+    with (
+        patch("ramen_cve.main", side_effect=lambda argv: next(return_codes)),
+        caplog.at_level(_logging.WARNING, logger="ramen_cve.daemon"),
+    ):
+        args = _ns(for_config="daily-cve", max_runs=3)
+        rc = _run_daemon(args, cache=object(), api_key=None)
+    assert rc == 0
+    # Two WARN lines for the two failing iterations (rc=2 then rc=1); the
+    # successful third iteration produces none.
+    warn_msgs = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert sum(1 for m in warn_msgs if "returned rc=" in m) == 2
+
+
+def test_daemon_signal_handler_sets_stop_event(preset_dir):
+    """The handler installed by `_install_signal_handlers` flips
+    `_should_stop` when invoked (we don't rely on real SIGTERM delivery
+    in tests — too platform-/scheduler-dependent)."""
+    import signal as _signal
+
+    from ramen_cve import daemon as d_mod
+
+    d_mod._should_stop.clear()
+    restore = d_mod._install_signal_handlers()
+    try:
+        # The just-installed SIGTERM handler is what we want to invoke.
+        handler = _signal.getsignal(_signal.SIGTERM)
+        assert callable(handler), "SIGTERM should have a callable handler now"
+        handler(_signal.SIGTERM, None)
+        assert d_mod._should_stop.is_set()
+    finally:
+        restore()
+
+
+def test_daemon_restores_previous_signal_handlers(preset_dir):
+    """After the daemon exits, SIGTERM/SIGINT go back to whatever was set
+    before — embedders don't lose their signal handling."""
+    import signal as _signal
+
+
+    sentinel = lambda *a, **kw: None  # noqa: E731  — distinguishable handler
+
+    prev_term = _signal.signal(_signal.SIGTERM, sentinel)
+    prev_int = _signal.signal(_signal.SIGINT, sentinel)
+    try:
+        _, write = preset_dir
+        write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+        with patch("ramen_cve.main", return_value=0):
+            args = _ns(for_config="daily-cve", max_runs=1)
+            _run_daemon(args, cache=object(), api_key=None)
+
+        # After daemon exit, our sentinel should be restored.
+        assert _signal.getsignal(_signal.SIGTERM) is sentinel
+        assert _signal.getsignal(_signal.SIGINT) is sentinel
+    finally:
+        _signal.signal(_signal.SIGTERM, prev_term)
+        _signal.signal(_signal.SIGINT, prev_int)
+
+
+def test_daemon_jitter_modulates_sleep(preset_dir):
+    """`--jitter N` adds uniform ±N seconds to the base interval. We
+    patch `random.uniform` to capture the argument range and confirm
+    the loop calls Event.wait with the jittered value."""
+    _, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    from ramen_cve import daemon as d_mod
+
+    sleep_calls: list[float] = []
+
+    class _SpyEvent:
+        def __init__(self):
+            self._set = False
+            self._real = d_mod._should_stop
+
+        def is_set(self):
+            return self._real.is_set()
+
+        def clear(self):
+            self._real.clear()
+
+        def set(self):
+            self._real.set()
+
+        def wait(self, timeout):  # noqa: ARG002
+            sleep_calls.append(timeout)
+            # After the first sleep, flip the real event so the loop exits.
+            self._real.set()
+            return True
+
+    fake = _SpyEvent()
+    with (
+        patch("ramen_cve.main", return_value=0),
+        patch.object(d_mod, "_should_stop", fake),
+        # Lock the random component so the assertion is deterministic.
+        patch("ramen_cve.daemon.random.uniform", return_value=4.0),
+    ):
+        args = _ns(for_config="daily-cve", max_runs=-1, interval=10, jitter=5)
+        rc = _run_daemon(args, cache=object(), api_key=None)
+    assert rc == 0
+    # One sleep call before the early-exit; jittered = 10 + 4.0 = 14.0.
+    assert sleep_calls == [14.0]
+
+
+def test_daemon_negative_jitter_clamps_to_zero(preset_dir):
+    """Sleep duration is clamped at zero; a wild negative jitter can't make
+    `Event.wait` choke on a negative timeout."""
+    _, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    from ramen_cve import daemon as d_mod
+
+    sleep_calls: list[float] = []
+
+    class _SpyEvent:
+        def __init__(self):
+            self._real = d_mod._should_stop
+
+        def is_set(self):
+            return self._real.is_set()
+
+        def clear(self):
+            self._real.clear()
+
+        def set(self):
+            self._real.set()
+
+        def wait(self, timeout):  # noqa: ARG002
+            sleep_calls.append(timeout)
+            self._real.set()
+            return True
+
+    fake = _SpyEvent()
+    with (
+        patch("ramen_cve.main", return_value=0),
+        patch.object(d_mod, "_should_stop", fake),
+        patch("ramen_cve.daemon.random.uniform", return_value=-100.0),
+    ):
+        args = _ns(for_config="daily-cve", max_runs=-1, interval=10, jitter=5)
+        _run_daemon(args, cache=object(), api_key=None)
+    # 10 + (-100) would be -90, but the clamp pins it at 0.0.
+    assert sleep_calls == [0.0]
