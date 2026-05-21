@@ -239,11 +239,19 @@ from all collected pages, not just the seed.
   unparseable), dedupe + sort, cap argument, ceiling clamp, default
   cap, and negative-cap → empty. Verification: 482 passed (463 + 19
   new), ruff clean, golden byte-identical to anchor.
-- [ ] **Slice B — rate-limited fetch helper.**
-   - New module-private helper in `cli.py`:
-     `_fetch_url_with_rate_limit(url, delay_ms)` (mirror `fetch_nvd`
-     pattern). Returns response text or raises `OpmlError` on HTTP
-     failure.
+- [x] **Slice B — rate-limited fetch helper.** Added
+   `_fetch_url_with_rate_limit(url, delay_ms=500)` to `cli.py`,
+   mirroring `enrich/nvd.py:fetch_nvd`'s `_last_call`
+   function-attribute pattern. Uses `time.monotonic()` for elapsed
+   timing and `time.sleep()` for the throttle — resolved through the
+   shared `time` module so `patch("ramen_cve.time.sleep")` continues
+   to work. Raises `OpmlError` with a `_safe_url_for_log`-redacted
+   URL on any HTTP-level failure so callers can fail-soft per
+   followed link via a single except clause. Added `import time` to
+   `cli.py`. +5 tests (returns text, raises on HTTP error, throttles
+   second call, zero delay skips sleep, secret-redaction in error).
+   Verification: 487 passed (482 + 5), ruff clean, golden
+   byte-identical.
 3. **Slice C — wire into `_run_url`.**
    - Add `--depth` / `--max-crawl-links` / `--crawl-delay-ms` to the
      `url` subparser (`cli.build_parser`).

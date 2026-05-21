@@ -9,6 +9,7 @@ import argparse
 import logging
 import re
 import sys
+import time  # rate-limit pacing in `_fetch_url_with_rate_limit` (Task 2 Slice B)
 from datetime import date
 from pathlib import Path
 
@@ -719,6 +720,37 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         except OSError as exc:
             _log.warning("Could not persist remembered OPML: %s", exc)
     return 0
+
+
+def _fetch_url_with_rate_limit(url: str, delay_ms: int = 500) -> str:
+    """Fetch `url` and return its body text, pacing successive calls.
+
+    Mirrors the `_last_call` function-attribute pattern used by
+    `enrich/nvd.py:fetch_nvd`. The throttle is global across all
+    URL-mode fetches in one process: `--depth 1` follows same-host
+    links from a single seed so one global bucket suffices. `time.sleep`
+    and `time.monotonic` are looked up through the shared `time` module
+    so `patch("ramen_cve.time.sleep")` continues to work in tests
+    (REFACTOR_PLAN §5.1).
+
+    Raises `OpmlError` on any HTTP-level failure, with the safe-logged
+    URL embedded, so callers can fail-soft per followed link via a
+    single except clause.
+    """
+    delay = max(0.0, delay_ms / 1000.0)
+    last = getattr(_fetch_url_with_rate_limit, "_last_call", 0.0)
+    elapsed = time.monotonic() - last
+    if elapsed < delay:
+        time.sleep(delay - elapsed)
+    _fetch_url_with_rate_limit._last_call = time.monotonic()
+    try:
+        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise OpmlError(
+            f"Failed to fetch {_safe_url_for_log(url)}: {exc}"
+        ) from exc
+    return resp.text
 
 
 def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
