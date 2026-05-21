@@ -53,7 +53,8 @@ PUBLIC_API: tuple[str, ...] = (
     "MalwareBazaarEnricher", "enrich_iocs", "load_inventory",
     "_cpe_matches_inventory", "correlate_inventory", "enrich_cves",
     # output/*
-    "write_csv", "write_iocs_csv", "write_markdown",
+    "write_csv", "write_epss_trajectory_csv", "EPSS_TRAJECTORY_COLUMNS",
+    "write_iocs_csv", "write_markdown",
     "_summarize_enrichment", "write_stix", "parse_stix_bundle",
     "pull_taxii", "_stix_uuid", "_ioc_to_stix_pattern",
     "_extract_iocs_from_pattern", "_sigma_level_for", "_build_sigma_stub",

@@ -170,12 +170,9 @@ def filter_by_date(
     Records missing the relevant date are logged and dropped.
     Both start and end are inclusive. None means no bound on that side.
     """
-    if date_mode == "epss" and start != end:
-        raise ValueError(
-            f"--date-mode epss requires --start == --end (got {start} .. {end})."
-            " Use a single date for historical EPSS lookup."
-        )
-
+    # `--date-mode epss` with start != end is now valid (EPSS trajectory mode:
+    # historical EPSS is fetched once per day in the inclusive range; the
+    # filter below still uses nvd_published as the inclusion criterion).
     result: list[EnrichedCve] = []
     for rec in enriched:
         if date_mode == "feed":
