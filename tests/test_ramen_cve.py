@@ -991,13 +991,22 @@ def test_filter_epss_mode_single_date_ok():
     assert len(result) == 1
 
 
-def test_filter_epss_mode_date_range_raises():
-    """EPSS mode with start != end raises ValueError."""
+def test_filter_epss_mode_date_range_accepted():
+    """EPSS mode with start != end is allowed (trajectory mode).
+
+    Pre-trajectory-feature behaviour was to raise ValueError on a range; the
+    constraint was lifted when EPSS trajectory mode landed (orchestrator
+    fetches historical EPSS once per day in the range; the filter below
+    keeps using nvd_published as the inclusion criterion).
+    """
     from ramen_cve import filter_by_date
 
-    rec = _enriched_with_dates(nvd_published=date(2024, 6, 1))
-    with pytest.raises(ValueError, match="epss"):
-        filter_by_date([rec], date(2024, 1, 1), date(2024, 12, 31), "epss")
+    in_range = _enriched_with_dates(nvd_published=date(2024, 6, 1))
+    out_of_range = _enriched_with_dates(nvd_published=date(2025, 1, 1))
+    kept = filter_by_date(
+        [in_range, out_of_range], date(2024, 1, 1), date(2024, 12, 31), "epss"
+    )
+    assert kept == [in_range]
 
 
 def test_filter_empty_list():

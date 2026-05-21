@@ -268,6 +268,13 @@ class EnrichedCve:
     epss_percentile: float | None = None
     epss_date: str | None = None
 
+    # When `--date-mode epss` is given a multi-day range, the orchestrator
+    # fetches EPSS scores for every day in the range and stores them here,
+    # keyed by ISO date string ("YYYY-MM-DD" -> {"epss": float,
+    # "percentile": float}). Empty for the common single-date / no-date
+    # case — preserves the byte-identical contract for existing runs.
+    epss_trajectory: dict[str, dict] = field(default_factory=dict)
+
     # MITRE ATT&CK technique IDs derived from the CWE list (best-effort, lossy).
     attack_techniques: list[str] = field(default_factory=list)
 

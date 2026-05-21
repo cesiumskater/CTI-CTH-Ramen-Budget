@@ -18,7 +18,7 @@ from .dispatch.runner import dispatch_records
 from .enrich.inventory import correlate_inventory, load_inventory
 from .enrich.iocs import enrich_iocs
 from .models import EnrichedCve, IocRecord, OpmlError, _utcnow
-from .output.csv_writer import write_csv
+from .output.csv_writer import write_csv, write_epss_trajectory_csv
 from .output.markdown import write_markdown
 from .output.sigma import write_sigma_stubs
 from .output.stix import write_iocs_csv, write_stix
@@ -250,7 +250,7 @@ def _output(
             )
 
     paths: dict[str, Path | None] = {
-        "csv": None, "iocs_csv": None, "md": None,
+        "csv": None, "iocs_csv": None, "epss_trajectory_csv": None, "md": None,
         "stix": None, "sigma_dir": None, "yara_dir": None,
     }
 
@@ -275,6 +275,21 @@ def _output(
             write_iocs_csv(iocs, iocs_path)
             print(str(iocs_path))
             paths["iocs_csv"] = iocs_path
+        # EPSS trajectory sidecar — only emitted when --date-mode epss was
+        # given a multi-day range (the orchestrator populates each record's
+        # epss_trajectory dict). Records with an empty dict contribute no
+        # rows; the file is suppressed entirely when no record has any.
+        if any(r.epss_trajectory for r in enriched):
+            if basename:
+                traj_path = _unique_output_path(
+                    out_dir, ts, "csv", basename=f"{basename}-epss-trajectory"
+                )
+            else:
+                traj_path = _unique_output_path(out_dir, ts, "epss-trajectory.csv")
+            _log.info("Writing EPSS trajectory sidecar → %s", traj_path)
+            write_epss_trajectory_csv(enriched, traj_path)
+            print(str(traj_path))
+            paths["epss_trajectory_csv"] = traj_path
 
     if args.format in ("md", "both", "all"):
         md_path = _unique_output_path(out_dir, ts, "md", basename=basename)

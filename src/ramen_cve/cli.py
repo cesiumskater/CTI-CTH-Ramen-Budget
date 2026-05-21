@@ -187,6 +187,15 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--allow-large-epss-trajectory",
+        action="store_true",
+        help=(
+            "Bypass the EPSS trajectory volume guard, which hard-errors when "
+            "the projected number of EPSS API calls would be >= 500 "
+            "(days x ceil(N_cves/100)). A warning is still logged at >= 200."
+        ),
+    )
+    parser.add_argument(
         "--inventory",
         type=_path_arg,
         metavar="PATH",
@@ -487,14 +496,14 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     """Cross-field validation that argparse can't express natively."""
     if args.start is not None and args.end is not None and args.start > args.end:
         parser.error(f"--start ({args.start}) must not be later than --end ({args.end}).")
-    if args.date_mode == "epss":
-        if args.start is None or args.end is None:
-            parser.error(
-                "--date-mode epss requires both --start and --end (set to the same date "
-                "for the EPSS snapshot you want)."
-            )
-        if args.start != args.end:
-            parser.error("--date-mode epss requires --start and --end to be the same date.")
+    # --date-mode epss requires both bounds; start != end is allowed and
+    # triggers EPSS trajectory mode (orchestrator fetches historical EPSS
+    # once per day in the range and stashes it on EnrichedCve.epss_trajectory).
+    if args.date_mode == "epss" and (args.start is None or args.end is None):
+        parser.error(
+            "--date-mode epss requires both --start and --end (set them to the same "
+            "date for a single-day snapshot, or to a range for trajectory mode)."
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -642,6 +651,24 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
+def _epss_date_range_for(args: argparse.Namespace) -> tuple[date, date] | None:
+    """Return (start, end) when EPSS trajectory mode applies; otherwise None.
+
+    Trajectory mode is opt-in via `--date-mode epss` plus both `--start`
+    and `--end`. When start == end the orchestrator's behaviour is byte-
+    identical to today's single-shot EPSS fetch; when start != end it loops
+    once per day in the inclusive range and stashes the time-series on
+    EnrichedCve.epss_trajectory.
+    """
+    if (
+        getattr(args, "date_mode", None) == "epss"
+        and getattr(args, "start", None) is not None
+        and getattr(args, "end", None) is not None
+    ):
+        return (args.start, args.end)
+    return None
+
+
 def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Execute the opml subcommand.
 
@@ -722,7 +749,12 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     iocs = _dedupe_iocs(iocs)
 
     date_mode = args.date_mode or "feed"
-    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
+    enriched = enrich_cves(
+        records, cache, api_key,
+        associations=_resolve_associations(args),
+        epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
+    )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
@@ -858,7 +890,12 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     for src_url, page_text in visited:
         records.extend(extract_cves(page_text, src_url, pub_date, "feed_pub"))
         iocs.extend(extract_iocs(page_text, src_url, pub_date, "feed_pub"))
-    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
+    enriched = enrich_cves(
+        records, cache, api_key,
+        associations=_resolve_associations(args),
+        epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
+    )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
@@ -967,7 +1004,12 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     today = date.today()
     records = [CveRecord(cve_id, "manual_input", today, "manual_input") for cve_id in cve_ids]
-    enriched = enrich_cves(records, cache, api_key, associations=_resolve_associations(args))
+    enriched = enrich_cves(
+        records, cache, api_key,
+        associations=_resolve_associations(args),
+        epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
+    )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
@@ -1027,7 +1069,11 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         _log.warning("STIX source produced no CVEs or IOCs.")
 
     date_mode = args.date_mode or "disclosure"
-    enriched = enrich_cves(cve_records, cache, api_key)
+    enriched = enrich_cves(
+        cve_records, cache, api_key,
+        epss_date_range=_epss_date_range_for(args),
+        confirm_large_trajectory=getattr(args, 'allow_large_epss_trajectory', False),
+    )
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)

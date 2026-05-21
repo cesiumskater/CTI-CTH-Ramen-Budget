@@ -15,7 +15,64 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
 
 ## In progress
 
-_(nothing live — see Planned below.)_
+### Task 1 — EPSS trajectory mode (Slice A landed; B/C/D pending)
+
+- [x] **Slice A — model + per-date fetch loop + CLI plumbing.** Added
+      `EnrichedCve.epss_trajectory: dict[str, dict]` (defaults empty,
+      preserves byte-identical contract for single-date / no-range runs).
+      `enrich_cves` gains `epss_date_range: tuple[date, date] | None`;
+      when start != end it loops `fetch_epss(score_date=d)` per day in
+      the inclusive range and accumulates the time-series, pinning the
+      scalar `epss_*` fields to the END-date value. Relaxed the
+      `_validate_args` and `filter_by_date` `start == end` constraint
+      for `--date-mode epss`. New `cli._epss_date_range_for(args)`
+      helper threads the range into the four `enrich_cves` call sites.
+      Verification: 470 passed (was 463 + 7 new trajectory tests in
+      `tests/test_epss_trajectory.py`), ruff clean, golden byte-oracle
+      byte-identical to anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
+- [x] **Slice B — sidecar CSV.** `EPSS_TRAJECTORY_COLUMNS` +
+      `write_epss_trajectory_csv` added to `output/csv_writer.py`;
+      one row per `(cve_id, date, epss, percentile)`, rows sorted for
+      byte-stable output. `pipeline._output` emits
+      `<basename>-epss-trajectory.csv` whenever any record has a
+      non-empty trajectory dict. L3 façade re-export updated;
+      test_facade contract list updated. +4 tests (writer-direct
+      basic / skip-empty / sort, plus pipeline-level emit-iff-present
+      integration). Verification: 474 passed, ruff clean, golden
+      byte-identical (sidecar suppressed when no trajectory).
+- [x] **Slice C — Markdown sparkline + table; `_sparkline` lift.**
+      Lifted `_SPARKLINE_CHARS` + `_sparkline` from `trend.py` (L4)
+      into a new `render.py` L1 leaf so `output/markdown.py` (L3) can
+      reuse them without an upward import. `trend.py` re-imports the
+      symbols (back-compat; `ramen_cve.trend._sparkline` and the
+      façade re-export keep resolving). `write_markdown` now appends a
+      `**EPSS trajectory:** \`<sparkline>\` (start → end, N samples)`
+      bullet for any record with a non-empty trajectory dict, plus a
+      compact inline date/EPSS/percentile table when N ≤ 10 (above
+      that, the sparkline alone — the full series lives in the
+      Slice-B sidecar CSV). +4 tests (sparkline-lift identity,
+      trajectory section emitted, omitted when no trajectory, table
+      suppressed when long). Verification: 478 passed, ruff clean,
+      golden CSV+MD byte-identical to the post-Step-18 anchor (no
+      trajectory in the smoke fixture → markdown unchanged).
+- [x] **Slice D — volume guard.** Added the constants
+      `EPSS_TRAJECTORY_WARN_THRESHOLD=200` and
+      `EPSS_TRAJECTORY_ABUSE_THRESHOLD=500` to
+      `enrich/orchestrator.py`. Pre-loop, `enrich_cves` computes
+      `projected = days × ceil(N_cves / 100)`; ≥ WARN logs a WARNING
+      and proceeds, ≥ ABUSE raises `ValueError` unless the new
+      `confirm_large_trajectory: bool = False` parameter is True.
+      The CLI side adds a `--allow-large-epss-trajectory` flag
+      (shared across all four runners). +5 tests (error at abuse,
+      bypass with flag, warn-band logging, silent below warn, and
+      end-to-end CLI flag threading via a spy on `enrich_cves`).
+      Verification: 483 passed (20 trajectory tests total across
+      Slices A–D), ruff clean, golden CSV+MD byte-identical to anchor.
+
+**Task 1 status: COMPLETE.** EPSS trajectory mode is shipped end-to-
+end (model + per-date fetch + sidecar CSV + Markdown sparkline/table
++ volume guard). PR #24 carries all four slices; opt-in via
+`--date-mode epss` with a multi-day `--start`/`--end`.
 
 ---
 

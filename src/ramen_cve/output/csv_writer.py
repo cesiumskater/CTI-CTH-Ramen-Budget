@@ -1,5 +1,7 @@
-"""ramen_cve.output.csv_writer — flat one-row-per-CVE CSV report
-(Layer-3 serialization). Column order is the CSV_COLUMNS contract.
+"""ramen_cve.output.csv_writer — flat one-row-per-CVE CSV report and the
+optional one-row-per-(CVE,date) EPSS trajectory sidecar (Layer-3
+serialization). Column orders are the CSV_COLUMNS /
+EPSS_TRAJECTORY_COLUMNS contracts.
 
 See docs/REFACTOR_PLAN.md.
 """
@@ -9,6 +11,8 @@ import csv
 from pathlib import Path
 
 from ..models import EnrichedCve
+
+EPSS_TRAJECTORY_COLUMNS = ("cve_id", "date", "epss", "percentile")
 
 CSV_COLUMNS = [
     "cve_id",
@@ -94,3 +98,29 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                 ]
             )
 
+
+
+def write_epss_trajectory_csv(enriched: list[EnrichedCve], path: Path) -> None:
+    """Write the per-CVE, per-date EPSS trajectory as a sidecar CSV.
+
+    One row per (cve_id, date) entry in EnrichedCve.epss_trajectory; records
+    with an empty trajectory dict contribute zero rows (no noise). Rows are
+    sorted by (cve_id, date) for byte-stable output.
+    """
+    rows: list[tuple[str, str, float | None, float | None]] = []
+    for rec in enriched:
+        for d, payload in rec.epss_trajectory.items():
+            rows.append((rec.cve_id, d, payload.get("epss"), payload.get("percentile")))
+    rows.sort()
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+        writer.writerow(EPSS_TRAJECTORY_COLUMNS)
+        for cve_id, d, epss, pct in rows:
+            writer.writerow(
+                [
+                    cve_id,
+                    d,
+                    f"{epss:.4f}" if epss is not None else "",
+                    f"{pct:.4f}" if pct is not None else "",
+                ]
+            )
