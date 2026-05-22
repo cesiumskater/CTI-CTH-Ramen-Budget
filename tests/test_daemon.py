@@ -1,26 +1,28 @@
-"""Long-running daemon mode — Slice A coverage.
+"""Long-running daemon mode — Slices A–D coverage.
 
-Single-shot wiring: verifies the new `daemon` subcommand parses,
-audit-dispatches, resolves a YAML preset to an argv, and invokes
-`ramen_cve.main(argv)` exactly once before returning 0.
-
-Slices B (the actual `while + sleep + signal` loop), C (timestamped
-per-iteration output subdirs), and D (`--prune-after-days` history
-pruning) live in `tasks/todo.md` task 3 and add their own coverage
-when they land.
+Covers single-shot wiring (A), the `while + sleep + signal` loop (B),
+timestamped per-iteration output subdirs (C), and `--prune-after-days`
+history pruning (D). Slice E (systemd / launchd docs) is doc-only and
+carries no test surface. See `tasks/todo.md` task 3 for the full plan.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
+import time
 from unittest.mock import patch
 
 import pytest
 import yaml
 
 import ramen_cve
-from ramen_cve.daemon import _build_iteration_argv, _run_daemon
+from ramen_cve.daemon import (
+    _build_iteration_argv,
+    _prune_old_iterations,
+    _run_daemon,
+)
 from ramen_cve.models import OpmlError
 
 # ---------------------------------------------------------------------------
@@ -550,3 +552,154 @@ def test_daemon_out_dir_overrides_preset_via_explicit_cli_arg(preset_dir, tmp_pa
     injected = _out_dir_of(argv)
     assert pathlib.Path(injected).parent == base
     assert "/preset/declared/path" not in injected
+
+
+# ---------------------------------------------------------------------------
+# Slice D — --prune-after-days history pruning
+# ---------------------------------------------------------------------------
+
+
+def _make_iter_dir(base: pathlib.Path, name: str, age_days: float) -> pathlib.Path:
+    """Create a `<base>/<name>/` iteration dir whose mtime is `age_days` old.
+
+    A file is written inside *before* the `os.utime` so the dir's mtime is
+    set last (writing into a dir bumps its mtime); the file also proves
+    `shutil.rmtree` removes the tree recursively, not just an empty dir.
+    """
+    d = base / name
+    d.mkdir()
+    (d / "report.csv").write_text("data")
+    t = time.time() - age_days * 86400
+    os.utime(d, (t, t))
+    return d
+
+
+def test_prune_removes_only_dirs_older_than_threshold(tmp_path):
+    old = _make_iter_dir(tmp_path, "ramen-cve-20200101T000000000000", age_days=10)
+    recent = _make_iter_dir(tmp_path, "ramen-cve-20260101T000000000000", age_days=2)
+    removed = _prune_old_iterations(tmp_path, days=7)
+    assert removed == 1
+    assert not old.exists()       # 10 days > 7-day threshold → pruned
+    assert recent.is_dir()        # 2 days < threshold → kept
+
+
+def test_prune_disabled_when_days_is_zero(tmp_path):
+    old = _make_iter_dir(tmp_path, "ramen-cve-20200101T000000000000", age_days=999)
+    assert _prune_old_iterations(tmp_path, days=0) == 0
+    assert old.is_dir()
+
+
+def test_prune_disabled_when_days_is_negative(tmp_path):
+    old = _make_iter_dir(tmp_path, "ramen-cve-20200101T000000000000", age_days=999)
+    assert _prune_old_iterations(tmp_path, days=-5) == 0
+    assert old.is_dir()
+
+
+def test_prune_ignores_non_iteration_entries(tmp_path):
+    """Anything not a `ramen-cve-*` *directory* is left alone, even when
+    ancient — a user can safely point --out-dir at a populated directory."""
+    keep_dir = tmp_path / "my-important-data"
+    keep_dir.mkdir()
+    (keep_dir / "x").write_text("y")
+    # Prefix matches but it's a FILE, not a directory → must be skipped.
+    stray_file = tmp_path / "ramen-cve-not-a-dir.txt"
+    stray_file.write_text("z")
+    ancient = time.time() - 999 * 86400
+    os.utime(keep_dir, (ancient, ancient))
+    os.utime(stray_file, (ancient, ancient))
+
+    removed = _prune_old_iterations(tmp_path, days=7)
+    assert removed == 0
+    assert keep_dir.is_dir()
+    assert stray_file.is_file()
+
+
+def test_prune_nonexistent_base_returns_zero(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    assert _prune_old_iterations(missing, days=7) == 0
+
+
+def test_prune_failsoft_on_rmtree_error(tmp_path, caplog):
+    """An rmtree failure (permission, race) logs a WARNING and is skipped —
+    a prune error never crashes the daemon."""
+    import logging as _logging
+
+    old = _make_iter_dir(tmp_path, "ramen-cve-20200101T000000000000", age_days=10)
+    with (
+        patch("ramen_cve.daemon.shutil.rmtree", side_effect=OSError("denied")),
+        caplog.at_level(_logging.WARNING, logger="ramen_cve.daemon"),
+    ):
+        removed = _prune_old_iterations(tmp_path, days=7)
+    assert removed == 0                 # rmtree raised → nothing counted
+    assert old.is_dir()                 # still present (rmtree was mocked out)
+    assert any("could not prune" in r.message for r in caplog.records)
+
+
+def test_daemon_prunes_old_iteration_dirs(preset_dir, tmp_path):
+    """End-to-end: a pre-existing stale iteration dir is pruned during a
+    `--prune-after-days` run, while the fresh dir this run creates survives."""
+    base, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    stale = _make_iter_dir(base, "ramen-cve-20200101T000000000000", age_days=30)
+
+    seen_dirs: list[str] = []
+    with patch(
+        "ramen_cve.main",
+        side_effect=lambda argv: seen_dirs.append(_out_dir_of(argv)) or 0,
+    ):
+        args = _ns(
+            for_config="daily-cve", max_runs=1, out_dir=str(base), prune_after_days=7
+        )
+        rc = _run_daemon(args, cache=object(), api_key=None)
+
+    assert rc == 0
+    assert not stale.exists()                       # 30 days > 7 → pruned
+    fresh = pathlib.Path(seen_dirs[0])
+    assert fresh.is_dir() and fresh.parent == base  # this run's dir survived
+
+
+def test_daemon_no_pruning_by_default(preset_dir, tmp_path):
+    """Pruning is opt-in: with --prune-after-days omitted (getattr default 0),
+    even an ancient iteration dir is left untouched."""
+    base, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    stale = _make_iter_dir(base, "ramen-cve-20200101T000000000000", age_days=999)
+
+    with patch("ramen_cve.main", return_value=0):
+        # prune_after_days intentionally omitted from the namespace.
+        args = _ns(for_config="daily-cve", max_runs=1, out_dir=str(base))
+        rc = _run_daemon(args, cache=object(), api_key=None)
+
+    assert rc == 0
+    assert stale.is_dir()
+
+
+def test_daemon_prune_invoked_on_startup_and_each_iteration(preset_dir, tmp_path):
+    """Pruning runs once on startup plus once after every iteration, always
+    with the configured retention window."""
+    base, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    from ramen_cve import daemon as d_mod
+
+    prune_calls: list[int] = []
+    real_prune = d_mod._prune_old_iterations
+
+    def _spy_prune(b, days):
+        prune_calls.append(days)
+        return real_prune(b, days)
+
+    with (
+        patch("ramen_cve.main", return_value=0),
+        patch.object(d_mod, "_prune_old_iterations", _spy_prune),
+    ):
+        args = _ns(
+            for_config="daily-cve", max_runs=2, out_dir=str(base), prune_after_days=7
+        )
+        rc = _run_daemon(args, cache=object(), api_key=None)
+
+    assert rc == 0
+    # 1 startup + 2 post-iteration, each passed the configured 7-day window.
+    assert prune_calls == [7, 7, 7]

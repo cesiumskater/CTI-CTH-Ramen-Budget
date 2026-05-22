@@ -1,15 +1,10 @@
 """ramen_cve.daemon — long-running daemon subcommand (Layer-4).
 
-Slice A: single-shot wiring. Verifies the `daemon` subcommand is
-parsed, audit-dispatched, and resolves a YAML preset into a recursive
-`ramen_cve.main(...)` invocation that runs the configured pipeline
-once and exits.
-
-Slice B will add the actual `while + sleep + signal` loop with
-SIGTERM/SIGINT graceful shutdown; Slice C the timestamped per-iteration
-output subdirs; Slice D `--prune-after-days` history pruning; Slice E
-the documentation (systemd / launchd examples). See `tasks/todo.md`
-task 3 for the full plan.
+Loops a configured pipeline preset at a fixed interval in one
+long-lived process, with SIGTERM/SIGINT graceful shutdown, timestamped
+per-iteration output subdirs, and optional `--prune-after-days` history
+pruning. Slice E (the systemd / launchd documentation) is the only
+remaining piece. See `tasks/todo.md` task 3 for the full plan.
 """
 
 from __future__ import annotations
@@ -17,8 +12,10 @@ from __future__ import annotations
 import argparse
 import logging
 import random
+import shutil
 import signal
 import threading
+import time
 from pathlib import Path
 
 from .cache import Cache
@@ -26,6 +23,14 @@ from .config import load_yaml_config
 from .models import OpmlError, _utcnow
 
 _log = logging.getLogger(__name__)
+
+
+# Shared prefix for every per-iteration output subdir. The pruner only ever
+# removes directories matching this prefix, so the create-side and prune-side
+# MUST agree — keeping the literal in one place prevents drift that would let
+# `_prune_old_iterations` either miss real iteration dirs or (worse) delete an
+# unrelated directory a user keeps under the same `--out-dir` base.
+_ITERATION_DIR_PREFIX = "ramen-cve-"
 
 
 def _iteration_output_subdir(base: Path) -> Path:
@@ -39,13 +44,56 @@ def _iteration_output_subdir(base: Path) -> Path:
     `--interval 0` test loop) get distinct directories.
     """
     ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
-    subdir = base / f"ramen-cve-{ts}"
+    subdir = base / f"{_ITERATION_DIR_PREFIX}{ts}"
     n = 1
     while subdir.exists():
-        subdir = base / f"ramen-cve-{ts}-{n}"
+        subdir = base / f"{_ITERATION_DIR_PREFIX}{ts}-{n}"
         n += 1
     subdir.mkdir(parents=True)
     return subdir
+
+
+def _prune_old_iterations(base: Path, days: int) -> int:
+    """Remove iteration output subdirs older than `days` under `base`.
+
+    Walks `base` and ``shutil.rmtree``s every direct child directory whose
+    name starts with ``ramen-cve-`` (the iteration prefix) and whose mtime is
+    more than `days` days in the past. Returns the count removed.
+
+    Safety:
+      * Only ``ramen-cve-*`` directories are candidates, so pointing
+        ``--out-dir`` at a directory that also holds unrelated files never
+        deletes them.
+      * Age is compared in the POSIX clock domain (``time.time()`` vs.
+        ``st_mtime``) — deliberately NOT ``_utcnow().timestamp()``, which is a
+        *naive* UTC datetime and would be mis-converted in a non-UTC locale.
+      * Fail-soft: a child that can't be stat'd or removed (a race with
+        another process, a permission error) logs a WARNING and is skipped
+        rather than aborting the daemon.
+
+    ``days <= 0`` disables pruning (the default) and returns 0 without
+    touching the filesystem.
+    """
+    if days <= 0 or not base.is_dir():
+        return 0
+    cutoff = time.time() - days * 86400
+    removed = 0
+    # Sorted for deterministic prune/log ordering across platforms.
+    for child in sorted(base.iterdir()):
+        if not child.name.startswith(_ITERATION_DIR_PREFIX) or not child.is_dir():
+            continue
+        try:
+            if child.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(child)
+        except OSError as exc:
+            _log.warning("daemon: could not prune %s: %s", child, exc)
+            continue
+        removed += 1
+        _log.info(
+            "daemon: pruned output dir %s (older than %d day(s)).", child, days,
+        )
+    return removed
 
 # The four pipeline subcommands a daemon iteration may dispatch to.
 # (hunt / pir / trend / audit / schedule are deliberately out of
@@ -162,13 +210,18 @@ def _build_iteration_argv(preset_name: str) -> list[str]:
 def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
     """Loop the configured pipeline at fixed intervals until stopped.
 
+    Before the first iteration ``_prune_old_iterations`` runs once so a
+    freshly (re)started daemon clears stale history immediately, then:
+
     Loop body per iteration:
       1. ``ramen_cve.main(iter_argv)`` runs the inner pipeline once.
          Inner failures log a WARNING but don't abort the daemon —
          the next iteration retries.
-      2. If `--max-runs` is positive and we've hit it, exit.
-      3. If a SIGTERM/SIGINT has flipped `_should_stop`, exit.
-      4. ``_should_stop.wait(interval + jitter)`` — sleep until the
+      2. ``_prune_old_iterations`` removes output subdirs older than
+         ``--prune-after-days`` (a no-op when the flag is 0/unset).
+      3. If `--max-runs` is positive and we've hit it, exit.
+      4. If a SIGTERM/SIGINT has flipped `_should_stop`, exit.
+      5. ``_should_stop.wait(interval + jitter)`` — sleep until the
          next iteration OR until a signal wakes us, whichever comes
          first. This is what gives the daemon sub-second shutdown
          latency on a long interval.
@@ -198,6 +251,8 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
     interval = max(0, int(raw_int if raw_int is not None else 21600))
     raw_jit = getattr(args, "jitter", 0)
     jitter = max(0, int(raw_jit if raw_jit is not None else 0))
+    raw_prune = getattr(args, "prune_after_days", 0)
+    prune_after_days = max(0, int(raw_prune if raw_prune is not None else 0))
 
     # Base output directory: each iteration gets a fresh timestamped subdir
     # underneath it so successive runs accumulate instead of overwriting.
@@ -218,6 +273,10 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
         # monkeypatch protocol).
         import ramen_cve
 
+        # Startup housekeeping: clear out history left by earlier daemon
+        # lifetimes before we begin writing fresh iteration dirs.
+        _prune_old_iterations(base_out_dir, prune_after_days)
+
         while True:
             iterations += 1
             # Fresh timestamped output dir per iteration; appended as an
@@ -232,6 +291,14 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
                     "daemon: iteration %d returned rc=%d (will retry on the next interval).",
                     iterations, rc,
                 )
+
+            # Post-iteration housekeeping: keep a long-lived daemon from
+            # accumulating output beyond the retention window over its
+            # lifetime. The just-written subdir has a current mtime so it is
+            # never a prune candidate. The walk is O(#subdirs) and trivially
+            # cheap next to a real pipeline iteration, so no debounce is
+            # needed even at --interval 0.
+            _prune_old_iterations(base_out_dir, prune_after_days)
 
             if max_runs > 0 and iterations >= max_runs:
                 _log.info(

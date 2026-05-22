@@ -510,10 +510,32 @@ that.
    the three exact-argv asserts use a `_strip_out_dir` helper.
    Verification: 538 passed (535 + 3), ruff clean, golden
    byte-identical.
-4. **Slice D — pruning + UX.**
-   - On startup (and after every iteration, behind a debounce),
-     walk `out_dir` and remove subdirs older than
-     `--prune-after-days`.
+- [x] **Slice D — `--prune-after-days` history pruning.** New
+   `_prune_old_iterations(base, days)` helper walks the base output dir
+   and `shutil.rmtree`s any direct child whose name starts with the
+   shared `ramen-cve-` iteration prefix (hoisted to a
+   `_ITERATION_DIR_PREFIX` constant so create-side and prune-side can't
+   drift) AND whose mtime is older than `days`. Age is compared in the
+   POSIX clock domain (`time.time()` vs. `st_mtime`) — deliberately NOT
+   `_utcnow().timestamp()`, which is a *naive* UTC datetime and would
+   mis-convert in a non-UTC locale. `days <= 0` is a no-op (pruning is
+   opt-in). Fail-soft: an un-stat'able / un-removable child logs a
+   WARNING and is skipped, never crashing the daemon; only `ramen-cve-*`
+   *directories* are candidates so a user can safely point `--out-dir`
+   at a populated directory. `_run_daemon` calls it once on startup
+   (clears stale history from earlier daemon lifetimes) and once after
+   every iteration. Decision: **no debounce** — the directory walk is
+   O(#subdirs) and trivially cheap next to a real pipeline iteration, so
+   even at `--interval 0` per-iteration pruning is fine; the plan's
+   "behind a debounce" optimisation guards a sub-second-interval scenario
+   that doesn't exist in practice. +9 tests (prune removes only
+   over-threshold dirs, zero/negative days = no-op, non-iteration
+   entries + prefix-matching files ignored, nonexistent base, fail-soft
+   on rmtree OSError, plus three e2e via `_run_daemon`: stale dir pruned
+   while fresh survives, opt-in default leaves ancient dirs, and
+   startup+per-iteration invocation count). Verification: 547 passed
+   (538 + 9), ruff + F821/F822 clean, golden CSV+MD byte-identical to
+   anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
 5. **Slice E — docs.**
    - README: a `Running as a daemon` section (systemd unit example,
      macOS launchd example), security-warning about long-lived
