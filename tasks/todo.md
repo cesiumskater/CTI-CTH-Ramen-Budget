@@ -536,10 +536,28 @@ that.
    startup+per-iteration invocation count). Verification: 547 passed
    (538 + 9), ruff + F821/F822 clean, golden CSV+MD byte-identical to
    anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
-5. **Slice E — docs.**
-   - README: a `Running as a daemon` section (systemd unit example,
-     macOS launchd example), security-warning about long-lived
-     secrets in env.
+- [x] **Slice E — docs.** Added a `## Running as a daemon` section to
+   `README.md` (placed right after `## Scheduled / recurring runs`, which
+   it complements): when to choose `daemon` vs `schedule`, a two-step
+   save-preset-then-loop example, a full flag table (`--for-config`,
+   `--interval`, `--jitter`, `--max-runs`, `--out-dir`,
+   `--prune-after-days` with their real defaults), the graceful-shutdown
+   contract (SIGTERM/SIGINT finish the in-flight iteration; sub-second
+   latency via the interruptible wait), a copy-paste **systemd** unit
+   (with `Restart=on-failure` rationale), a **launchd** plist for macOS,
+   and a security callout: a long-lived daemon keeps `NVD_API_KEY` /
+   `RAMEN_SMTP_PASSWORD` / `SLACK_WEBHOOK_URL` resident for its whole
+   lifetime, so prefer an `EnvironmentFile` / launchd `EnvironmentVariables`
+   / container secret over a committed `.env`, `chmod 600` it, run as a
+   dedicated unprivileged user, and run one daemon per SQLite cache file.
+   Docs-only; no code/test change, gate unaffected.
+
+**Task 3 status: COMPLETE.** Long-running daemon mode is shipped
+end-to-end (subcommand scaffolding + `while/sleep/signal` loop with
+graceful SIGTERM/SIGINT shutdown + timestamped per-iteration output
+subdirs + `--prune-after-days` history pruning + README operator docs).
+PR #26 carries Slices A–E; opt-in via `ramen-cve daemon --for-config
+NAME`.
 
 **Test strategy.**
 - `tests/test_daemon.py`:

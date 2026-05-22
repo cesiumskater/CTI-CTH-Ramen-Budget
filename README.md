@@ -317,6 +317,119 @@ equivalent lives in `examples/github-actions-daily-triage.yml`.
 
 ---
 
+## Running as a daemon
+
+When you'd rather run **one long-lived process** than wire up an external
+scheduler, the `daemon` subcommand loops a saved preset at a fixed
+interval. It *complements* `schedule` (above): reach for `schedule` when
+you already have systemd / cron / Task Scheduler; reach for `daemon` when
+you want a single self-contained process — e.g. inside a container.
+
+```bash
+# 1. Save the recurring invocation once (any opml / url / cve / stix run).
+ramen-cve --save-config daily-opml opml ~/feeds --format all
+
+# 2. Loop it every 6 hours, preserving 30 days of timestamped history.
+ramen-cve daemon --for-config daily-opml --interval 21600 \
+    --out-dir ~/ramen-history --prune-after-days 30
+```
+
+`--for-config` is the only required flag and **must name a preset whose
+`subcommand` is `opml`, `url`, `cve`, or `stix`** — any preset saved from
+one of those invocations qualifies (`--save-config` records the
+subcommand for you).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--for-config NAME` | *(required)* | Saved preset (or YAML path) to loop each iteration. |
+| `--interval SECONDS` | `21600` (6 h) | Sleep between iterations. |
+| `--jitter SECONDS` | `0` | Uniform ±jitter added to the interval (spreads load across hosts sharing an upstream). |
+| `--max-runs N` | `-1` (unbounded) | Cap on iterations; mainly for testing. |
+| `--out-dir DIR` | current dir | Base for output. Each iteration writes to `<DIR>/ramen-cve-<UTC timestamp>/`, so history is never overwritten. |
+| `--prune-after-days N` | `0` (off) | Delete iteration subdirs older than `N` days. Runs on startup and after every iteration; only ever removes `ramen-cve-*` directories, so it's safe to point `--out-dir` at a populated directory. |
+
+**Graceful shutdown.** SIGTERM and SIGINT finish the in-flight iteration
+and then exit cleanly, so `systemctl stop` or Ctrl-C never leaves a
+half-written report. The inter-iteration wait is interruptible, so
+shutdown latency stays sub-second even on a 6-hour interval.
+
+### systemd (Linux)
+
+```ini
+# /etc/systemd/system/ramen-cve.service
+[Unit]
+Description=ramen-cve threat-intel triage daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ramen
+WorkingDirectory=/opt/ramen-cve
+ExecStart=/opt/ramen-cve/.venv/bin/ramen-cve daemon \
+    --for-config daily-opml --interval 21600 \
+    --out-dir /var/lib/ramen-cve --prune-after-days 30
+EnvironmentFile=/etc/ramen-cve/env      # NVD_API_KEY=..., RAMEN_SMTP_*, ...
+# on-failure (NOT always) so a crash-restart never races a second instance
+# against the SQLite cache.
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ramen-cve.service
+journalctl -u ramen-cve -f          # follow the logs
+```
+
+### launchd (macOS)
+
+```xml
+<!-- ~/Library/LaunchAgents/com.ramen-cve.daemon.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>            <string>com.ramen-cve.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/ramen-cve/.venv/bin/ramen-cve</string>
+    <string>daemon</string>
+    <string>--for-config</string>       <string>daily-opml</string>
+    <string>--interval</string>         <string>21600</string>
+    <string>--out-dir</string>          <string>/Users/Shared/ramen-cve</string>
+    <string>--prune-after-days</string> <string>30</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NVD_API_KEY</key> <string>…</string>
+  </dict>
+  <key>RunAtLoad</key>        <true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.ramen-cve.daemon.plist
+```
+
+> **Security — long-lived secrets.** Unlike the `schedule`/cron model
+> (each run is a fresh short-lived process), the daemon keeps
+> `NVD_API_KEY`, `RAMEN_SMTP_PASSWORD`, and `SLACK_WEBHOOK_URL` resident
+> in its environment for its **entire lifetime**. Prefer a systemd
+> `EnvironmentFile`, a launchd `EnvironmentVariables` block, or a
+> container/orchestrator secret over a committed `.env`; `chmod 600` that
+> file and run the daemon as a dedicated unprivileged user. Run **one
+> daemon per cache file** — the SQLite cache isn't built for concurrent
+> writers (this is why the unit uses `Restart=on-failure`, not `always`).
+
+---
+
 ## Bucket logic
 
 Every CVE lands in exactly one bucket, checked top to bottom:
