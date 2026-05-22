@@ -445,28 +445,119 @@ that.
 
 **Implementation slices.**
 
-1. **Slice A — subcommand scaffolding.**
-   - Add `daemon` to `cli.build_parser`; route via `_audit_dispatch`.
-   - New module `src/ramen_cve/daemon.py` (L4, mirrors
-     `schedule.py`).
-   - Implement `_run_daemon(args, cache, api_key)` with **only**
-     `--max-runs 1` working — i.e. it runs the pipeline once and
-     returns. Proves wiring without touching the loop.
-2. **Slice B — the loop + signal handling.**
-   - `while not _stop: run_pipeline_iteration(); jittered_sleep()`.
-   - SIGTERM/SIGINT handlers flip `_stop`.
-   - Reset `args._inventory_rows` and similar fields per iteration.
-3. **Slice C — timestamped output dirs.**
-   - Compute `out_subdir = out_dir / f"ramen-cve-{_utcnow().strftime(...)}"`
-     and pass that as the iteration's effective `--out-dir`.
-4. **Slice D — pruning + UX.**
-   - On startup (and after every iteration, behind a debounce),
-     walk `out_dir` and remove subdirs older than
-     `--prune-after-days`.
-5. **Slice E — docs.**
-   - README: a `Running as a daemon` section (systemd unit example,
-     macOS launchd example), security-warning about long-lived
-     secrets in env.
+- [x] **Slice A — subcommand scaffolding.** New
+   `src/ramen_cve/daemon.py` (L4, mirrors `schedule.py` style) with
+   `_build_iteration_argv(preset_name)` and `_run_daemon(args, cache,
+   api_key)`. The argv builder reads a YAML preset's `subcommand`
+   (opml/url/cve/stix) + positional and emits the argv that
+   `ramen_cve.main(...)` would parse, plus `--config <preset>` so the
+   preset's other flags flow through `apply_yaml_config`.
+   `_run_daemon` validates `--for-config`, resolves the iteration
+   argv, and runs the pipeline once via a deferred `import ramen_cve;
+   ramen_cve.main(iter_argv)` (avoids the cli<->daemon module-level
+   circular import; matches the §5.2 deferred-lookup pattern). The
+   daemon's own exit code is 0 once an iteration has executed —
+   inner-iteration failures log a WARNING but don't crash the
+   daemon (Slice B will retry on the next interval). Wired the
+   `daemon` subparser into `cli.build_parser` with `--for-config`
+   (required), `--interval`, `--jitter`, `--max-runs`,
+   `--prune-after-days`. Dispatch via `_audit_dispatch(cache,
+   "daemon", args, lambda: _run_daemon(args, cache, None))` —
+   `api_key=None` because the recursive inner `main()` resolves its
+   own. Façade re-exports `_build_iteration_argv` and `_run_daemon`;
+   `tests/test_facade.py` contract updated. +15 tests: 9 covering
+   `_build_iteration_argv` (each subcommand happy path + 4 error
+   paths), 5 covering `_run_daemon` (requires-for-config, invokes
+   main exactly once with resolved argv, returns 0 even when inner
+   main fails, unsupported `--max-runs` logs WARN but still runs,
+   bad preset → rc=2 without calling main), and 1 end-to-end via
+   `ramen_cve.main` proving the subparser routes through
+   `_audit_dispatch`. Verification: 529 passed (was 514 + 15), ruff
+   clean, golden byte-identical.
+- [x] **Slice B — the loop + signal handling.** Replaced Slice A's
+   single-shot call with a `while True` loop terminated by either
+   `--max-runs N` (iteration cap) or a SIGTERM/SIGINT-driven
+   `threading.Event`. The loop uses `_should_stop.wait(timeout=
+   interval + jitter)` so the daemon wakes immediately on signal
+   rather than after the full interval (sub-second shutdown
+   latency on a 6 h interval). `_install_signal_handlers()` saves
+   the prior handlers and the daemon's `finally` clause restores
+   them, so embedders don't lose their signal handling. Fixed an
+   `X or default` short-circuit bug surfaced during testing —
+   `interval=0` / `jitter=0` / `max_runs=0` are now honoured
+   verbatim instead of being silently coerced to defaults
+   (captured as `tasks/lessons.md` L8). +6 Slice-B tests
+   (max-runs N actually loops N times, unbounded run exits on
+   `_should_stop`, failed iterations don't abort the loop, signal
+   handler flips the event, restore-handlers works, jitter
+   modulates sleep, negative jitter clamps to zero). One Slice-A
+   test (`logs_warning_for_unsupported_max_runs`) rewritten as
+   `honours_max_runs_positive` since the loop now supports it.
+   Verification: 535 passed (515 + 21 daemon tests, run in 0.20s),
+   ruff clean, golden byte-identical.
+- [x] **Slice C — timestamped output dirs.** New
+   `_iteration_output_subdir(base)` creates a fresh
+   `<base>/ramen-cve-<UTC microsecond ts>/` per iteration (probing
+   `-N` suffixes for the rare same-microsecond collision), and the
+   loop appends `--out-dir <subdir>` to each iteration's argv. Because
+   the injected `--out-dir` comes after `--config`, it overrides any
+   `out_dir` the preset declares (explicit CLI arg beats
+   apply_yaml_config). New `--out-dir` daemon flag sets the base
+   (default = cwd). +3 tests (distinct subdir per iteration created on
+   disk + passed as --out-dir; default-to-cwd; preset out_dir
+   override). An autouse `_isolate_cwd` test fixture chdirs into
+   tmp_path so default-cwd subdir creation never pollutes the repo;
+   the three exact-argv asserts use a `_strip_out_dir` helper.
+   Verification: 538 passed (535 + 3), ruff clean, golden
+   byte-identical.
+- [x] **Slice D — `--prune-after-days` history pruning.** New
+   `_prune_old_iterations(base, days)` helper walks the base output dir
+   and `shutil.rmtree`s any direct child whose name starts with the
+   shared `ramen-cve-` iteration prefix (hoisted to a
+   `_ITERATION_DIR_PREFIX` constant so create-side and prune-side can't
+   drift) AND whose mtime is older than `days`. Age is compared in the
+   POSIX clock domain (`time.time()` vs. `st_mtime`) — deliberately NOT
+   `_utcnow().timestamp()`, which is a *naive* UTC datetime and would
+   mis-convert in a non-UTC locale. `days <= 0` is a no-op (pruning is
+   opt-in). Fail-soft: an un-stat'able / un-removable child logs a
+   WARNING and is skipped, never crashing the daemon; only `ramen-cve-*`
+   *directories* are candidates so a user can safely point `--out-dir`
+   at a populated directory. `_run_daemon` calls it once on startup
+   (clears stale history from earlier daemon lifetimes) and once after
+   every iteration. Decision: **no debounce** — the directory walk is
+   O(#subdirs) and trivially cheap next to a real pipeline iteration, so
+   even at `--interval 0` per-iteration pruning is fine; the plan's
+   "behind a debounce" optimisation guards a sub-second-interval scenario
+   that doesn't exist in practice. +9 tests (prune removes only
+   over-threshold dirs, zero/negative days = no-op, non-iteration
+   entries + prefix-matching files ignored, nonexistent base, fail-soft
+   on rmtree OSError, plus three e2e via `_run_daemon`: stale dir pruned
+   while fresh survives, opt-in default leaves ancient dirs, and
+   startup+per-iteration invocation count). Verification: 547 passed
+   (538 + 9), ruff + F821/F822 clean, golden CSV+MD byte-identical to
+   anchor (`CSV 3fd1ac95`, `MD e9779ffc`).
+- [x] **Slice E — docs.** Added a `## Running as a daemon` section to
+   `README.md` (placed right after `## Scheduled / recurring runs`, which
+   it complements): when to choose `daemon` vs `schedule`, a two-step
+   save-preset-then-loop example, a full flag table (`--for-config`,
+   `--interval`, `--jitter`, `--max-runs`, `--out-dir`,
+   `--prune-after-days` with their real defaults), the graceful-shutdown
+   contract (SIGTERM/SIGINT finish the in-flight iteration; sub-second
+   latency via the interruptible wait), a copy-paste **systemd** unit
+   (with `Restart=on-failure` rationale), a **launchd** plist for macOS,
+   and a security callout: a long-lived daemon keeps `NVD_API_KEY` /
+   `RAMEN_SMTP_PASSWORD` / `SLACK_WEBHOOK_URL` resident for its whole
+   lifetime, so prefer an `EnvironmentFile` / launchd `EnvironmentVariables`
+   / container secret over a committed `.env`, `chmod 600` it, run as a
+   dedicated unprivileged user, and run one daemon per SQLite cache file.
+   Docs-only; no code/test change, gate unaffected.
+
+**Task 3 status: COMPLETE.** Long-running daemon mode is shipped
+end-to-end (subcommand scaffolding + `while/sleep/signal` loop with
+graceful SIGTERM/SIGINT shutdown + timestamped per-iteration output
+subdirs + `--prune-after-days` history pruning + README operator docs).
+PR #26 carries Slices A–E; opt-in via `ramen-cve daemon --for-config
+NAME`.
 
 **Test strategy.**
 - `tests/test_daemon.py`:

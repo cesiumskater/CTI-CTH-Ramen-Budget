@@ -225,3 +225,45 @@ rule. Reviewed at session start and before major refactors (per
   "Actions CI red remains the L2 env limitation" — at the time of
   writing, the real cause was the 5 hardcoded-path tests now fixed
   in the same PR-21 cycle.
+
+
+---
+
+## L8 — `X or default` silently coerces falsy-but-valid values; prefer `X if X is not None else default`
+
+- **Failure mode:** Daemon Slice B set
+  `interval = max(0, int(getattr(args, "interval", 21600) or 21600))`
+  so that an unset/`None` interval falls back to 6 h. But the `or`
+  short-circuit also fires when `args.interval == 0`, silently
+  re-coercing it to `21600`. Tests passed `interval=0` (back-to-back
+  iterations) and instead got the daemon blocked on a 6-h
+  `Event.wait(21600)` — `timeout 5` delivered SIGTERM, the daemon's
+  own handler interpreted that as "operator wants me to stop", set
+  the `_should_stop` event, broke out cleanly, returned 0 — making
+  the test look like it succeeded *after one iteration* even though
+  `max_runs=3`. The bug only showed up because tests use
+  `timeout 5 pytest ...` and the SIGTERM rescue path masked the
+  underlying short-circuit. Same trap for `max_runs=0` and
+  `jitter=0`.
+- **Detection signal:** A flag whose `0` (or `""`, or `False`) value
+  is meaningful, combined with an `or default` fallback. Symptom
+  here was `rc=0 iters=1` from a `max_runs=3` test with no obvious
+  break path — the loop *was* breaking, but only because the test
+  harness sent SIGTERM after the fallback-coerced sleep started.
+- **Prevention rule:** When `0` / `""` / `False` is a legitimate
+  user value, write
+  ``raw = getattr(args, "x", default); val = raw if raw is not None
+  else default`` (or use `args.x` directly if argparse guarantees a
+  default). Reserve `... or default` for cases where the falsy
+  value would itself be invalid (e.g. an empty string filename).
+  Sweep test args for `=0` / `=""` / `=False` and confirm each is
+  honoured, not coerced.
+
+  **Bonus pitfall recorded here:** a signal-driven graceful-shutdown
+  path can MASK an inner-loop bug. The daemon's
+  `_install_signal_handlers()` correctly converts SIGTERM into a
+  clean break — which is the right production behaviour, but in a
+  test under `timeout N` it makes "test timed out" look like "test
+  passed cleanly". Verify loop termination via *expected iteration
+  count*, not just `rc == 0` — `assert len(calls) == max_runs`
+  is the canary that flushed this out.
