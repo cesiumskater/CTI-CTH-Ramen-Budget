@@ -495,9 +495,21 @@ that.
    `honours_max_runs_positive` since the loop now supports it.
    Verification: 535 passed (515 + 21 daemon tests, run in 0.20s),
    ruff clean, golden byte-identical.
-3. **Slice C — timestamped output dirs.**
-   - Compute `out_subdir = out_dir / f"ramen-cve-{_utcnow().strftime(...)}"`
-     and pass that as the iteration's effective `--out-dir`.
+- [x] **Slice C — timestamped output dirs.** New
+   `_iteration_output_subdir(base)` creates a fresh
+   `<base>/ramen-cve-<UTC microsecond ts>/` per iteration (probing
+   `-N` suffixes for the rare same-microsecond collision), and the
+   loop appends `--out-dir <subdir>` to each iteration's argv. Because
+   the injected `--out-dir` comes after `--config`, it overrides any
+   `out_dir` the preset declares (explicit CLI arg beats
+   apply_yaml_config). New `--out-dir` daemon flag sets the base
+   (default = cwd). +3 tests (distinct subdir per iteration created on
+   disk + passed as --out-dir; default-to-cwd; preset out_dir
+   override). An autouse `_isolate_cwd` test fixture chdirs into
+   tmp_path so default-cwd subdir creation never pollutes the repo;
+   the three exact-argv asserts use a `_strip_out_dir` helper.
+   Verification: 538 passed (535 + 3), ruff clean, golden
+   byte-identical.
 4. **Slice D — pruning + UX.**
    - On startup (and after every iteration, behind a debounce),
      walk `out_dir` and remove subdirs older than

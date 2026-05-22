@@ -19,12 +19,33 @@ import logging
 import random
 import signal
 import threading
+from pathlib import Path
 
 from .cache import Cache
 from .config import load_yaml_config
-from .models import OpmlError
+from .models import OpmlError, _utcnow
 
 _log = logging.getLogger(__name__)
+
+
+def _iteration_output_subdir(base: Path) -> Path:
+    """Return a fresh timestamped subdir under `base`, creating it.
+
+    Each daemon iteration writes into its own
+    ``<base>/ramen-cve-<UTC microsecond ts>/`` so history accumulates
+    instead of each run overwriting the last. Microsecond resolution
+    makes collisions essentially impossible, but we still probe `-N`
+    suffixes so two iterations within the same microsecond (e.g. a
+    `--interval 0` test loop) get distinct directories.
+    """
+    ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
+    subdir = base / f"ramen-cve-{ts}"
+    n = 1
+    while subdir.exists():
+        subdir = base / f"ramen-cve-{ts}-{n}"
+        n += 1
+    subdir.mkdir(parents=True)
+    return subdir
 
 # The four pipeline subcommands a daemon iteration may dispatch to.
 # (hunt / pir / trend / audit / schedule are deliberately out of
@@ -178,6 +199,11 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
     raw_jit = getattr(args, "jitter", 0)
     jitter = max(0, int(raw_jit if raw_jit is not None else 0))
 
+    # Base output directory: each iteration gets a fresh timestamped subdir
+    # underneath it so successive runs accumulate instead of overwriting.
+    raw_out = getattr(args, "out_dir", None)
+    base_out_dir = Path(raw_out) if raw_out is not None else Path.cwd()
+
     # Fresh state per call: tests rely on starting with a clear event.
     _should_stop.clear()
     restore_signals = _install_signal_handlers()
@@ -194,8 +220,13 @@ def _run_daemon(args: argparse.Namespace, cache: Cache, api_key: str | None) -> 
 
         while True:
             iterations += 1
-            _log.info("daemon: iteration %d via %s", iterations, iter_argv)
-            rc = ramen_cve.main(iter_argv)
+            # Fresh timestamped output dir per iteration; appended as an
+            # explicit --out-dir so it overrides any out_dir the preset
+            # set (an explicit CLI arg beats apply_yaml_config).
+            subdir = _iteration_output_subdir(base_out_dir)
+            this_argv = [*iter_argv, "--out-dir", str(subdir)]
+            _log.info("daemon: iteration %d via %s", iterations, this_argv)
+            rc = ramen_cve.main(this_argv)
             if rc != 0:
                 _log.warning(
                     "daemon: iteration %d returned rc=%d (will retry on the next interval).",

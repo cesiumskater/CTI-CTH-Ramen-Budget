@@ -496,6 +496,12 @@ def build_parser() -> argparse.ArgumentParser:
              "Slice A always runs exactly one iteration regardless.",
     )
     daemon_p.add_argument(
+        "--out-dir", type=_path_arg, default=None, metavar="DIR",
+        help="Base directory for per-iteration output. Each iteration writes "
+             "to a fresh timestamped subdir `<DIR>/ramen-cve-<UTC ts>/` so "
+             "history is preserved (default: current working directory).",
+    )
+    daemon_p.add_argument(
         "--prune-after-days", type=int, default=0, metavar="N",
         help="Delete per-iteration output subdirs older than N days "
              "(default 0 = no pruning). Active from Slice D.",

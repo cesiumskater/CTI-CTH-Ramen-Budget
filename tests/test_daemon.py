@@ -13,6 +13,7 @@ when they land.
 from __future__ import annotations
 
 import argparse
+import pathlib
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,14 @@ from ramen_cve.models import OpmlError
 # ---------------------------------------------------------------------------
 # Preset fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """chdir into the per-test tmp dir so the daemon's default
+    `--out-dir` (= cwd) creates its `ramen-cve-<ts>/` iteration subdirs
+    under tmp, never polluting the repo working tree."""
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture
@@ -40,6 +49,19 @@ def preset_dir(tmp_path, monkeypatch):
         (tmp_path / f"{name}.yaml").write_text(yaml.safe_dump(payload))
 
     return tmp_path, _write
+
+
+def _strip_out_dir(argv: list[str]) -> list[str]:
+    """Drop the daemon-injected `--out-dir <subdir>` tail for argv asserts.
+
+    Slice C appends a fresh `--out-dir <timestamped-subdir>` to every
+    iteration's argv; tests that assert the *resolved preset* argv strip
+    it so they stay focused on the preset-resolution contract.
+    """
+    if "--out-dir" in argv:
+        i = argv.index("--out-dir")
+        return argv[:i]
+    return list(argv)
 
 
 def _ns(**kw):
@@ -151,7 +173,9 @@ def test_run_daemon_invokes_main_once_with_resolved_argv(preset_dir):
     with patch("ramen_cve.main", _spy_main):
         rc = _run_daemon(args, cache=object(), api_key=None)
     assert rc == 0
-    assert calls == [["cve", "CVE-2024-0001", "--config", "daily-cve"]]
+    assert [_strip_out_dir(c) for c in calls] == [
+        ["cve", "CVE-2024-0001", "--config", "daily-cve"]
+    ]
 
 
 def test_run_daemon_returns_0_even_if_inner_main_failed(preset_dir):
@@ -178,8 +202,12 @@ def test_run_daemon_honours_max_runs_positive(preset_dir):
         rc = _run_daemon(args, cache=object(), api_key=None)
     assert rc == 0
     assert len(calls) == 3, calls
-    # Every iteration sees the same argv (the preset doesn't change mid-run).
-    assert all(c == ["cve", "CVE-2024-0001", "--config", "daily-cve"] for c in calls)
+    # Every iteration sees the same resolved preset argv (the preset doesn't
+    # change mid-run); only the appended --out-dir subdir differs.
+    assert all(
+        _strip_out_dir(c) == ["cve", "CVE-2024-0001", "--config", "daily-cve"]
+        for c in calls
+    )
 
 
 def test_run_daemon_surfaces_bad_preset_as_rc_2(preset_dir):
@@ -248,9 +276,12 @@ def test_cli_daemon_subcommand_dispatches_through_audit(preset_dir, tmp_path, mo
             ["daemon", "--for-config", "test-preset", "--max-runs", "1"]
         )
     assert rc == 0
-    # The inner main was invoked exactly once with the resolved argv.
+    # The inner main was invoked exactly once with the resolved argv
+    # (modulo the daemon-injected --out-dir tail).
     inner_argvs = [c for c in calls if c != "OUTER-PLACEHOLDER"]
-    assert inner_argvs == [["cve", "CVE-2024-0001", "--config", "test-preset"]]
+    assert [_strip_out_dir(c) for c in inner_argvs] == [
+        ["cve", "CVE-2024-0001", "--config", "test-preset"]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -434,3 +465,88 @@ def test_daemon_negative_jitter_clamps_to_zero(preset_dir):
         _run_daemon(args, cache=object(), api_key=None)
     # 10 + (-100) would be -90, but the clamp pins it at 0.0.
     assert sleep_calls == [0.0]
+
+
+# ---------------------------------------------------------------------------
+# Slice C — timestamped per-iteration output subdirs
+# ---------------------------------------------------------------------------
+
+
+def _out_dir_of(argv: list[str]) -> str | None:
+    """Extract the --out-dir value the daemon injected into an iteration argv."""
+    if "--out-dir" in argv:
+        return argv[argv.index("--out-dir") + 1]
+    return None
+
+
+def test_daemon_each_iteration_gets_distinct_output_subdir(preset_dir, tmp_path):
+    """Three iterations → three distinct `<base>/ramen-cve-<ts>` subdirs,
+    each created on disk and passed to the inner main as --out-dir."""
+    base, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    seen_dirs: list[str] = []
+    with patch(
+        "ramen_cve.main",
+        side_effect=lambda argv: seen_dirs.append(_out_dir_of(argv)) or 0,
+    ):
+        args = _ns(for_config="daily-cve", max_runs=3, out_dir=str(base))
+        rc = _run_daemon(args, cache=object(), api_key=None)
+
+    assert rc == 0
+    assert len(seen_dirs) == 3
+    # All three are distinct and were actually created under the base dir.
+    assert len(set(seen_dirs)) == 3, seen_dirs
+    for d in seen_dirs:
+        p = pathlib.Path(d)
+        assert p.is_dir(), f"iteration subdir not created: {d}"
+        assert p.parent == base
+        assert p.name.startswith("ramen-cve-")
+
+
+def test_daemon_out_dir_defaults_to_cwd(preset_dir, tmp_path):
+    """With no --out-dir, the base is the current working directory
+    (the autouse fixture chdir'd us into tmp_path)."""
+    _, write = preset_dir
+    write("daily-cve", {"subcommand": "cve", "cves": ["CVE-2024-0001"]})
+
+    seen_dirs: list[str] = []
+    with patch(
+        "ramen_cve.main",
+        side_effect=lambda argv: seen_dirs.append(_out_dir_of(argv)) or 0,
+    ):
+        args = _ns(for_config="daily-cve", max_runs=1, out_dir=None)
+        rc = _run_daemon(args, cache=object(), api_key=None)
+
+    assert rc == 0
+    assert len(seen_dirs) == 1
+    subdir = pathlib.Path(seen_dirs[0])
+    # cwd is tmp_path (autouse _isolate_cwd); subdir lives directly under it.
+    assert subdir.parent == tmp_path
+    assert subdir.is_dir()
+
+
+def test_daemon_out_dir_overrides_preset_via_explicit_cli_arg(preset_dir, tmp_path):
+    """The injected --out-dir is appended AFTER --config, so it wins over any
+    out_dir the preset declares (explicit CLI arg beats apply_yaml_config)."""
+    base, write = preset_dir
+    # Preset declares its own output dir; the daemon must override it.
+    write(
+        "daily-cve",
+        {"subcommand": "cve", "cves": ["CVE-2024-0001"],
+         "output": {"out_dir": "/preset/declared/path"}},
+    )
+
+    captured: list[list[str]] = []
+    with patch("ramen_cve.main", side_effect=lambda argv: captured.append(list(argv)) or 0):
+        args = _ns(for_config="daily-cve", max_runs=1, out_dir=str(base))
+        _run_daemon(args, cache=object(), api_key=None)
+
+    argv = captured[0]
+    # --config precedes --out-dir in the argv, and the --out-dir points under
+    # the daemon's base, NOT the preset's declared path.
+    assert "--config" in argv and "--out-dir" in argv
+    assert argv.index("--out-dir") > argv.index("--config")
+    injected = _out_dir_of(argv)
+    assert pathlib.Path(injected).parent == base
+    assert "/preset/declared/path" not in injected
