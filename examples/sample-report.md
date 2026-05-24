@@ -1,16 +1,17 @@
 # Ramen CVE Triage Report
 
-Generated: 2026-05-18 13:30 UTC  
-Total CVEs: **3**  
+Generated: 2026-01-15 09:00 UTC  
+Total CVEs: **5**  
 Total IOCs: **2** (2 defanged in source)  
 CVSS threshold: `7.0`  
 EPSS threshold: `0.1`  
 
 ## Sources
 
-- SANS ISC
 - Krebs on Security
-- Vendor Blog
+- CISA Alerts
+- abuse.ch Blog
+- BleepingComputer
 
 ## Summary
 
@@ -18,8 +19,8 @@ EPSS threshold: `0.1`
 | --- | --- | --- |
 | KEV Override (Patch Immediately) | 1 | CISA KEV listed; exploitation confirmed in the wild. |
 | Patch Now | 1 | high CVSS and high EPSS; likely exploitable and high impact. |
-| Watch Closely | 0 | low CVSS but high EPSS; active exploitation of a lower-impact flaw. |
-| Plan and Patch | 0 | high CVSS but low EPSS; exploit unlikely but impact severe. |
+| Watch Closely | 1 | low CVSS but high EPSS; active exploitation of a lower-impact flaw. |
+| Plan and Patch | 1 | high CVSS but low EPSS; exploit unlikely but impact severe. |
 | Deprioritize | 1 | low severity and low exploitation probability. |
 | Unknown / Insufficient Data | 0 | Insufficient data; manual review required. |
 
@@ -28,7 +29,8 @@ EPSS threshold: `0.1`
 | Technique | Name | CVEs |
 | --- | --- | --- |
 | T1059 | Command and Scripting Interpreter | 1 |
-| T1083 | File and Directory Discovery | 1 |
+| T1059.007 | Command and Scripting Interpreter: JavaScript | 1 |
+| T1083 | File and Directory Discovery | 2 |
 | T1090 | Proxy | 1 |
 | T1190 | Exploit Public-Facing Application | 2 |
 
@@ -36,16 +38,19 @@ EPSS threshold: `0.1`
 
 | Host | CVEs |
 | --- | --- |
+| app-05 | 1 |
 | mail-01 | 1 |
-| web-prod-03 | 1 |
-| web-prod-04 | 1 |
+| web-prod-01 | 1 |
+| web-prod-02 | 1 |
 
 ## Linked Adversaries
 
 | Actor | CVEs | Sectors Targeted |
 | --- | --- | --- |
-| APT41 | 1 | financial, healthcare, technology |
-| HAFNIUM | 2 | defense, government |
+| APT27 | 1 | defense, government, manufacturing, technology |
+| APT41 | 1 | financial, government, healthcare, technology, telecom |
+| Aquatic Panda | 1 | technology, telecom |
+| HAFNIUM | 2 | defense, government, legal, research |
 
 ## KEV Override (Patch Immediately)
 
@@ -55,20 +60,19 @@ EPSS threshold: `0.1`
 
 - **CVSS:** 10.0 (CRITICAL)
 - **EPSS:** 0.9757 (0.9997 pct)
-- **CWE:** CWE-502
+- **CWE:** CWE-502, CWE-917
 - **ATT&CK:** T1059 (Command and Scripting Interpreter), T1190 (Exploit Public-Facing Application)
-- **Exploit Status:** `exploit_db`
-- **Linked Actors:** APT41, HAFNIUM
+- **Linked Actors:** [APT41](https://attack.mitre.org/groups/G0096/), [HAFNIUM](https://attack.mitre.org/groups/G1011/), [Aquatic Panda](https://attack.mitre.org/groups/G0143/)
 - **Linked Malware:** Cobalt Strike
-- **Provenance:** TLP:AMBER · Admiralty B2
-- **Affected in your environment:** 2 host(s) — web-prod-03, web-prod-04
-- **Diamond Model:** Adversary=APT41 · Capability=exploit (CWE-502, T1190) · Infrastructure=*unknown infrastructure* · Victim=2 inventory host(s) · Kill Chain=exploitation
+- **Affected in your environment:** 2 host(s) — web-prod-01, web-prod-02
+- **Diamond Model:** Adversary=APT41 · Capability=exploit (CWE-502, T1059) · Infrastructure=*unknown infrastructure* · Victim=2 inventory host(s) · Kill Chain=exploitation
 - **NVD Published:** 2021-12-10
 - **CISA KEV — Affected:** Apache Log4j2
 - **CISA KEV — Due Date:** 2021-12-24 (OVERDUE)
 - **CISA KEV — Ransomware Use:** Known
-- **CISA KEV — Description:** Apache Log4j2 deserialization-of-untrusted-data RCE.
-- **Source:** SANS ISC
+- **CISA KEV — Required Action:** Apply updates per vendor instructions.
+- **CISA KEV — Description:** Apache Log4j2 contains a deserialization-of-untrusted-data vulnerability enabling remote code execution.
+- **Source:** Krebs on Security
 
 ## Patch Now
 
@@ -80,17 +84,39 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.9432 (0.9901 pct)
 - **CWE:** CWE-918
 - **ATT&CK:** T1090 (Proxy), T1190 (Exploit Public-Facing Application)
-- **Exploit Status:** `nuclei_template`
-- **Linked Actors:** HAFNIUM
+- **Linked Actors:** [HAFNIUM](https://attack.mitre.org/groups/G1011/), [APT27](https://attack.mitre.org/groups/G0027/)
 - **Linked Malware:** China Chopper
-- **Provenance:** TLP:GREEN · Admiralty A2
 - **Affected in your environment:** 1 host(s) — mail-01
-- **Diamond Model:** Adversary=HAFNIUM · Capability=capability · Infrastructure=*unknown infrastructure* · Victim=1 inventory host(s) · Kill Chain=exploitation
+- **Diamond Model:** Adversary=HAFNIUM · Capability=exploit (CWE-918, T1090) · Infrastructure=*unknown infrastructure* · Victim=1 inventory host(s) · Kill Chain=exploitation
 - **NVD Published:** 2021-03-02
-- **CISA KEV — Affected:** Microsoft Exchange Server
-- **CISA KEV — Due Date:** 2021-03-16 (OVERDUE)
-- **CISA KEV — Description:** Microsoft Exchange Server SSRF (ProxyLogon).
-- **Source:** Krebs on Security
+- **Source:** CISA Alerts
+
+## Watch Closely
+
+### CVE-2024-0003
+
+**Action:** Watch closely — low CVSS but high EPSS; active exploitation of a lower-impact flaw.
+
+- **CVSS:** 5.4 (MEDIUM)
+- **EPSS:** 0.6210 (0.9730 pct)
+- **CWE:** CWE-79
+- **ATT&CK:** T1059.007 (Command and Scripting Interpreter: JavaScript)
+- **NVD Published:** 2024-03-19
+- **Source:** BleepingComputer
+
+## Plan and Patch
+
+### CVE-2024-0002
+
+**Action:** Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe.
+
+- **CVSS:** 8.2 (HIGH)
+- **EPSS:** 0.0184 (0.7800 pct)
+- **CWE:** CWE-22
+- **ATT&CK:** T1083 (File and Directory Discovery)
+- **Affected in your environment:** 1 host(s) — app-05
+- **NVD Published:** 2024-02-11
+- **Source:** BleepingComputer
 
 ## Deprioritize
 
@@ -103,13 +129,13 @@ EPSS threshold: `0.1`
 - **CWE:** CWE-200
 - **ATT&CK:** T1083 (File and Directory Discovery)
 - **NVD Published:** 2024-01-05
-- **Source:** Vendor Blog
+- **Source:** BleepingComputer
 
 ## Indicators of Compromise
 
 ### URLs (1)
 
-- `https://evil.example.com` *(defanged in source)*
+- `https://evil.example.com/payload` *(defanged in source)* *(confidence 0.00)*
 
 ### SHA-256 Hashes (1)
 

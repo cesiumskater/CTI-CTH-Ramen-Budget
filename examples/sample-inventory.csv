@@ -1,0 +1,5 @@
+host,product,version,cpe,owner
+web-prod-01,Apache Log4j,2.14.1,cpe:2.3:a:apache:log4j,secops@example.com
+web-prod-02,Apache Log4j,2.14.1,cpe:2.3:a:apache:log4j,secops@example.com
+mail-01,Microsoft Exchange Server,2019,cpe:2.3:a:microsoft:exchange_server,mail@example.com
+app-05,ACME Gateway,5.2,cpe:2.3:a:acme:gateway,appowners@example.com
