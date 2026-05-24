@@ -266,7 +266,11 @@ def _fake_feedparser_parse(url: str) -> object:
 
 def _normalise_csv(data: bytes) -> bytes:
     # `enriched_at` is the only ISO datetime (has a 'T'); fixture dates don't.
-    return re.sub(rb"\d{4}-\d{2}-\d{2}T[\d:.]+", FROZEN_ENRICHED_AT.encode(), data)
+    data = re.sub(rb"\d{4}-\d{2}-\d{2}T[\d:.]+", FROZEN_ENRICHED_AT.encode(), data)
+    # Python's csv.writer emits CRLF; collapse to LF so the file stays stable
+    # under git's autocrlf normalisation (otherwise `--check` after a fresh
+    # checkout sees LF on disk vs CRLF from regen and reports false drift).
+    return data.replace(b"\r\n", b"\n")
 
 
 def _normalise_md(text: str) -> str:
