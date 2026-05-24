@@ -630,7 +630,50 @@ outside this session's push scope.
 
 ---
 
-### 5. Regenerate `examples/sample-output.csv` + `sample-report.md`
+### 5. Regenerate `examples/sample-output.csv` + `sample-report.md` — DONE
+
+**Outcome (2026-05-23).** Shipped `scripts/regen_examples.py`: a
+self-documented, deterministic regenerator that rebuilds the bundle from
+a fully self-contained inline fixture set. Investigation found the
+previously committed examples were **stale on multiple axes** (sources
+like "SANS ISC"/"Vendor Blog" that are absent from `examples/sample.opml`;
+fewer threat actors than the current bundled `associations.json` carries),
+so a faithful byte-reproduction from current inputs was impossible —
+Phase 1 option (b) ("design a new showcase set") was the only viable path.
+
+The regenerated showcase is **richer** than the previous file, not
+narrower: five CVEs spanning **every bucket** (one per bucket), two
+defanged IOCs (URL + SHA-256, refanged in render), a four-row inventory
+correlating three CVEs to hosts, and threat-actor links that reflect the
+*current* bundled associations (APT41 + HAFNIUM + Aquatic Panda for
+Log4Shell; HAFNIUM + APT27 for ProxyLogon). The two real CVEs
+(CVE-2021-44228, CVE-2021-26855) pick up actor / malware context from
+the bundle; the three `CVE-2024-000x` ids are deliberately synthetic
+placeholders so no real advisory is misrepresented.
+
+**Determinism details.**
+- All network is mocked: NVD, EPSS, and CISA-KEV via inline payloads in
+  the script; RSS feeds via a per-host fake `feedparser.parse`; exploit
+  + IOC enrichment disabled by flag so no un-mocked call is ever made.
+- The two live-clock fields — CSV `enriched_at` and Markdown
+  `Generated:` — are normalised to a frozen instant after the run, and
+  the Markdown `Command:` line's absolute OPML path is rewritten to
+  `examples/sample.opml`, so the bundle is portable across machines.
+- `scripts/regen_examples.py --check` regenerates into a temp dir and
+  diffs against the committed files (exit 1 on drift) — CI-friendly.
+
+**Files touched.** Added `scripts/regen_examples.py` (~250 LOC, fully
+documented), `examples/sample-inventory.csv` (new — committed example
+input). Replaced `examples/sample-output.csv` and `examples/sample-report.md`
+with the regenerator's output.
+
+**Verification.** ruff + F821/F822 clean; `pytest tests/ -q` 547 passed;
+golden byte-oracle byte-identical to anchor (CSV `3fd1ac95`, MD
+`e9779ffc`, 1069 B / 79 lines — the regen examples are independent of
+the smoke fixtures, so the oracle is unaffected); `regen --check`
+returns rc=0 after a fresh regen (idempotent).
+
+**Original goal + plan retained below for reference.**
 
 **Goal.** Refresh the bundled example bundle so it reflects a current
 post-refactor pipeline run. Today's committed files (1,426 B CSV
