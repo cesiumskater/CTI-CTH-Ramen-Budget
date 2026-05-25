@@ -213,3 +213,133 @@ def test_from_yaml_returns_a_bucket_policy_instance():
     assert isinstance(policy, BucketPolicy)
     for spec in policy.buckets.values():
         assert isinstance(spec, BucketSpec)
+
+
+# ---------------------------------------------------------------------------
+# Slice B — bucket_and_suggest(policy=…) backward-compat path.
+# ---------------------------------------------------------------------------
+
+
+def _enriched(*, cvss, epss, kev=False):
+    """Build a minimal EnrichedCve for the policy-routing tests."""
+    from datetime import date
+
+    from ramen_cve.models import EnrichedCve
+
+    return EnrichedCve(
+        cve_id="CVE-2024-9001",
+        source="t",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=cvss,
+        epss_score=epss,
+        kev_listed=kev,
+    )
+
+
+def test_bucket_and_suggest_default_call_uses_default_policy_actions():
+    """Calling with no policy → DEFAULT_BUCKET_POLICY actions land verbatim."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec])
+    assert rec.bucket == "patch_now"
+    assert rec.suggested_action == DEFAULT_BUCKET_POLICY.action("patch_now")
+
+
+def test_bucket_and_suggest_explicit_default_policy_is_identity():
+    """Passing `policy=DEFAULT_BUCKET_POLICY` matches the policy=None call."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    a = _enriched(cvss=9.0, epss=0.5)
+    b = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([a])
+    bucket_and_suggest([b], policy=DEFAULT_BUCKET_POLICY)
+    assert a.bucket == b.bucket == "patch_now"
+    assert a.suggested_action == b.suggested_action
+
+
+def test_bucket_and_suggest_legacy_threshold_args_still_steer_decision_tree():
+    """Legacy `cvss_thr`/`epss_thr` args (policy=None path) must still work."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    # 5.0/0.05 is "deprioritize" under defaults (cvss 7, epss 0.10) but
+    # "patch_now" under tighter thresholds.
+    rec = _enriched(cvss=5.0, epss=0.05)
+    bucket_and_suggest([rec], cvss_thr=4.0, epss_thr=0.04)
+    assert rec.bucket == "patch_now"
+
+
+def test_bucket_and_suggest_per_bucket_patch_now_thresholds_drive_pivot():
+    """A YAML override of patch_now.cvss/epss_threshold must steer the tree."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"cvss_threshold": 8.0, "epss_threshold": 0.20}
+    })
+
+    # CVSS 9.0 / EPSS 0.5 still qualifies as patch_now under the stricter pivot.
+    rec_high = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec_high], policy=policy)
+    assert rec_high.bucket == "patch_now"
+
+    # CVSS 7.5 / EPSS 0.5 is "watch_closely" now (CVSS below the 8.0 pivot,
+    # EPSS above the 0.20 pivot) — would have been patch_now under defaults.
+    rec_borderline = _enriched(cvss=7.5, epss=0.5)
+    bucket_and_suggest([rec_borderline], policy=policy)
+    assert rec_borderline.bucket == "watch_closely"
+
+
+def test_bucket_and_suggest_policy_action_text_overrides_default():
+    """Per-bucket `action` from YAML must reach `rec.suggested_action`."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"action": "Patch within 24 hours per security policy."}
+    })
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec], policy=policy)
+    assert rec.bucket == "patch_now"
+    assert rec.suggested_action == "Patch within 24 hours per security policy."
+
+
+def test_bucket_and_suggest_kev_always_wins_under_custom_policy():
+    """KEV precedence is non-configurable — a relabelled KEV bucket still wins."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    policy = BucketPolicy.from_yaml({
+        KEV_BUCKET_ID: {"label": "KEV — EMERGENCY", "action": "Drop everything."}
+    })
+    rec = _enriched(cvss=1.0, epss=0.01, kev=True)
+    bucket_and_suggest([rec], policy=policy)
+    assert rec.bucket == KEV_BUCKET_ID
+    assert rec.suggested_action == "Drop everything."
+
+
+def test_bucket_and_suggest_legacy_args_ignored_when_policy_supplied():
+    """When `policy` is passed, the legacy `cvss_thr`/`epss_thr` args are ignored."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"cvss_threshold": 8.0, "epss_threshold": 0.20}
+    })
+    # If the legacy args were honoured, the policy=None branch would
+    # produce a wider net and this would be patch_now. With policy
+    # supplied, the pivot is 8.0/0.20 and this record is deprioritized.
+    rec = _enriched(cvss=4.5, epss=0.05)
+    bucket_and_suggest([rec], cvss_thr=4.0, epss_thr=0.04, policy=policy)
+    assert rec.bucket == "deprioritize"
+
+
+def test_bucket_and_suggest_unknown_when_score_missing_under_custom_policy():
+    """Missing CVSS/EPSS still routes to `unknown` regardless of policy."""
+    from ramen_cve.analyze import bucket_and_suggest
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"cvss_threshold": 8.0, "epss_threshold": 0.20},
+        "unknown": {"action": "Triage manually within 1 business day."},
+    })
+    rec = _enriched(cvss=None, epss=0.5)
+    bucket_and_suggest([rec], policy=policy)
+    assert rec.bucket == "unknown"
+    assert rec.suggested_action == "Triage manually within 1 business day."
