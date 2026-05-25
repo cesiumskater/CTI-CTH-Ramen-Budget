@@ -1,0 +1,215 @@
+"""Tests for `ramen_cve.bucket_policy` — the leaf module that backs
+Task 7's configurable bucket labels / thresholds.
+
+Slice A scope: pure data only — `BucketSpec`, `BucketPolicy`,
+`DEFAULT_BUCKET_POLICY`, `BucketPolicy.from_yaml`. No integration with
+`bucket_and_suggest` or `write_markdown` yet (slices B / D).
+"""
+from __future__ import annotations
+
+import pytest
+
+from ramen_cve.bucket_policy import (
+    BUCKET_IDS,
+    DEFAULT_BUCKET_POLICY,
+    KEV_BUCKET_ID,
+    BucketPolicy,
+    BucketSpec,
+)
+from ramen_cve.constants import (
+    BUCKET_ACTIONS,
+    DEFAULT_CVSS_THRESHOLD,
+    DEFAULT_EPSS_THRESHOLD,
+)
+
+# ---------------------------------------------------------------------------
+# Sanity: the leaf shape itself.
+# ---------------------------------------------------------------------------
+
+
+def test_bucket_ids_match_bucket_actions_keys():
+    """The six reserved ids must agree with the existing constants table.
+
+    A future hand-edit that adds a key to BUCKET_ACTIONS without bumping
+    BUCKET_IDS would silently break `from_yaml` validation; lock that
+    coupling here.
+    """
+    assert set(BUCKET_IDS) == set(BUCKET_ACTIONS.keys())
+
+
+def test_kev_bucket_id_is_in_bucket_ids():
+    assert KEV_BUCKET_ID in BUCKET_IDS
+
+
+def test_bucket_spec_is_frozen():
+    """BucketSpec must be immutable — slices B/D treat specs as values."""
+    spec = BucketSpec(id="patch_now", label="L", action="A", order=1)
+    with pytest.raises((AttributeError, TypeError)):
+        spec.label = "x"  # type: ignore[misc]
+
+
+def test_bucket_policy_is_frozen():
+    with pytest.raises((AttributeError, TypeError)):
+        DEFAULT_BUCKET_POLICY.default_cvss_threshold = 9.9  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_BUCKET_POLICY: must mirror today's hardcoded behaviour byte-for-byte.
+# ---------------------------------------------------------------------------
+
+
+def test_default_policy_thresholds_match_constants():
+    assert DEFAULT_BUCKET_POLICY.default_cvss_threshold == DEFAULT_CVSS_THRESHOLD
+    assert DEFAULT_BUCKET_POLICY.default_epss_threshold == DEFAULT_EPSS_THRESHOLD
+
+
+def test_default_policy_carries_every_reserved_bucket():
+    assert set(DEFAULT_BUCKET_POLICY.buckets.keys()) == set(BUCKET_IDS)
+
+
+def test_default_policy_actions_match_constants_table():
+    """Each bucket's action prose must equal today's BUCKET_ACTIONS entry."""
+    for bid in BUCKET_IDS:
+        assert DEFAULT_BUCKET_POLICY.action(bid) == BUCKET_ACTIONS[bid]
+
+
+def test_default_policy_display_order_matches_markdown_order():
+    """display_order() must mirror output.markdown.BUCKET_ORDER exactly.
+
+    A reordering here would shift the Markdown report's section sequence
+    — the byte-oracle would catch it later, but lock the contract now.
+    """
+    from ramen_cve.output.markdown import BUCKET_ORDER as MARKDOWN_ORDER
+
+    assert DEFAULT_BUCKET_POLICY.display_order() == list(MARKDOWN_ORDER)
+
+
+def test_default_policy_labels_match_markdown_display():
+    """spec.label per bucket must equal today's BUCKET_DISPLAY entry."""
+    from ramen_cve.output.markdown import BUCKET_DISPLAY as MARKDOWN_DISPLAY
+
+    for bid in BUCKET_IDS:
+        assert DEFAULT_BUCKET_POLICY.label(bid) == MARKDOWN_DISPLAY[bid]
+
+
+def test_default_policy_has_no_per_bucket_threshold_overrides():
+    """v0 default behaviour uses one shared threshold pair, not per-bucket."""
+    for bid in BUCKET_IDS:
+        spec = DEFAULT_BUCKET_POLICY.spec(bid)
+        assert spec.cvss_threshold is None
+        assert spec.epss_threshold is None
+
+
+def test_threshold_fallback_returns_policy_default_when_spec_unset():
+    """`cvss_threshold_for` / `epss_threshold_for` fall back to the policy default."""
+    assert DEFAULT_BUCKET_POLICY.cvss_threshold_for("patch_now") == DEFAULT_CVSS_THRESHOLD
+    assert DEFAULT_BUCKET_POLICY.epss_threshold_for("patch_now") == DEFAULT_EPSS_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# BucketPolicy.from_yaml — the YAML-merge contract.
+# ---------------------------------------------------------------------------
+
+
+def test_from_yaml_none_returns_default_policy_identity():
+    """An absent `buckets:` block must produce the literal default singleton."""
+    assert BucketPolicy.from_yaml(None) is DEFAULT_BUCKET_POLICY
+
+
+def test_from_yaml_empty_dict_returns_default_policy_identity():
+    """An empty `buckets:` block is "nothing overridden" — same as missing."""
+    assert BucketPolicy.from_yaml({}) is DEFAULT_BUCKET_POLICY
+
+
+def test_from_yaml_overrides_one_bucket_label_keeps_others_default():
+    """Partial overrides must merge over the default — untouched buckets unchanged."""
+    policy = BucketPolicy.from_yaml({"patch_now": {"label": "URGENT"}})
+
+    # Overridden bucket picks up the new label, keeps default action/order.
+    spec = policy.spec("patch_now")
+    assert spec.label == "URGENT"
+    assert spec.action == BUCKET_ACTIONS["patch_now"]
+    assert spec.order == DEFAULT_BUCKET_POLICY.spec("patch_now").order
+
+    # Untouched buckets identical to default.
+    for bid in BUCKET_IDS:
+        if bid == "patch_now":
+            continue
+        assert policy.spec(bid) == DEFAULT_BUCKET_POLICY.spec(bid)
+
+
+def test_from_yaml_overrides_per_bucket_thresholds():
+    """A YAML override of cvss_threshold/epss_threshold must reach the spec."""
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"cvss_threshold": 8.5, "epss_threshold": 0.20}
+    })
+
+    assert policy.cvss_threshold_for("patch_now") == 8.5
+    assert policy.epss_threshold_for("patch_now") == 0.20
+    # Other buckets still use the policy default.
+    assert policy.cvss_threshold_for("watch_closely") == DEFAULT_CVSS_THRESHOLD
+    assert policy.epss_threshold_for("watch_closely") == DEFAULT_EPSS_THRESHOLD
+
+
+def test_from_yaml_overrides_action_text_and_order():
+    policy = BucketPolicy.from_yaml({
+        "watch_closely": {"action": "Custom action prose.", "order": 99},
+    })
+    spec = policy.spec("watch_closely")
+    assert spec.action == "Custom action prose."
+    assert spec.order == 99
+
+    # The reordering propagates to display_order().
+    assert policy.display_order()[-1] == "watch_closely"
+
+
+def test_from_yaml_unknown_bucket_id_raises():
+    """A typo'd bucket id must fail loudly — silent no-op is a foot-gun."""
+    with pytest.raises(ValueError, match="Unknown bucket id"):
+        BucketPolicy.from_yaml({"patch_immediately": {"label": "X"}})
+
+
+def test_from_yaml_non_mapping_top_level_raises():
+    with pytest.raises(ValueError, match="must be a YAML mapping"):
+        BucketPolicy.from_yaml(["patch_now"])  # type: ignore[arg-type]
+
+
+def test_from_yaml_non_mapping_bucket_entry_raises():
+    with pytest.raises(ValueError, match=r"buckets\.patch_now must be a YAML mapping"):
+        BucketPolicy.from_yaml({"patch_now": "URGENT"})
+
+
+def test_from_yaml_can_override_kev_metadata_but_id_stays_reserved():
+    """KEV bucket label/action are configurable; the bucket id itself is not.
+
+    Slice B will enforce the rule that KEV records *always* land in the
+    KEV bucket (kev_listed precedence) regardless of label customisation.
+    """
+    policy = BucketPolicy.from_yaml({
+        KEV_BUCKET_ID: {"label": "KEV — EMERGENCY", "action": "Drop everything."}
+    })
+    assert policy.label(KEV_BUCKET_ID) == "KEV — EMERGENCY"
+    assert policy.action(KEV_BUCKET_ID) == "Drop everything."
+
+
+def test_from_yaml_coerces_yaml_numeric_strings_to_float():
+    """YAML can emit '0.15' as a string in edge cases; from_yaml must coerce."""
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"cvss_threshold": "8.5", "epss_threshold": "0.15"}
+    })
+    assert policy.cvss_threshold_for("patch_now") == 8.5
+    assert policy.epss_threshold_for("patch_now") == 0.15
+
+
+def test_from_yaml_blank_threshold_collapses_to_none_override():
+    """An empty-string threshold means 'no override' (fall back to default)."""
+    policy = BucketPolicy.from_yaml({"patch_now": {"cvss_threshold": ""}})
+    assert policy.cvss_threshold_for("patch_now") == DEFAULT_CVSS_THRESHOLD
+
+
+def test_from_yaml_returns_a_bucket_policy_instance():
+    """Light type-check guard for downstream `isinstance` uses."""
+    policy = BucketPolicy.from_yaml({"patch_now": {"label": "X"}})
+    assert isinstance(policy, BucketPolicy)
+    for spec in policy.buckets.values():
+        assert isinstance(spec, BucketSpec)

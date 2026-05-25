@@ -15,6 +15,46 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
 
 ## In progress
 
+### Task 7 — Configurable bucket labels / thresholds (Slice A in progress)
+
+- [ ] **Slice A — `BucketPolicy` leaf + façade lock.** New
+      `src/ramen_cve/bucket_policy.py` (L1, depends only on
+      `constants`): `BucketSpec` (frozen dataclass: id, label, action,
+      order, optional per-bucket cvss/epss thresholds), `BucketPolicy`
+      (frozen dataclass with `default_cvss_threshold`,
+      `default_epss_threshold`, `buckets: dict[str, BucketSpec]`),
+      `DEFAULT_BUCKET_POLICY` mirroring today's hardcoded
+      `BUCKET_ACTIONS`/`BUCKET_DISPLAY`/`BUCKET_ORDER`, and
+      `BucketPolicy.from_yaml(dict)` (merges user overrides over
+      defaults; degrades to defaults when block absent). Re-export via
+      `__init__.py`; `test_facade.py` PUBLIC_API extended; new
+      `tests/test_bucket_policy.py` covering default identity, partial
+      YAML overrides, KEV-bucket immutability, unknown-bucket rejection,
+      per-bucket threshold fallback. No integration change yet — golden
+      byte-oracle must remain identical.
+- [ ] **Slice B — `bucket_and_suggest(policy=…)` backward-compat.**
+      `analyze.bucket_and_suggest` gains an optional `policy:
+      BucketPolicy | None = None` kw arg. When None, construct an
+      ad-hoc policy from the existing `cvss_thr`/`epss_thr` args
+      (preserves byte-identical fallback). When a policy is supplied,
+      use its per-bucket thresholds. Four existing CLI call sites
+      unchanged. Golden oracle must remain identical.
+- [ ] **Slice C — YAML loader integration.** `apply_yaml_config`
+      reads the optional `buckets:` block and stamps
+      `args.bucket_policy: BucketPolicy`. New tests for a preset with
+      custom buckets.
+- [ ] **Slice D — output integration.** `write_markdown` accepts
+      optional `policy: BucketPolicy | None`; when supplied, iterates
+      `policy.display_order()` for sectioning and uses `spec.label` /
+      `spec.action`. CLI threads `args.bucket_policy` through. CSV
+      unchanged (bucket id is what's serialised, not the label).
+      Golden oracle remains identical when no `buckets:` block is
+      present.
+- [ ] **Slice E — `aggressive.yaml` showcase preset.** Under
+      `src/ramen_cve/config/presets/`: stricter per-bucket thresholds
+      and rewritten action prose, demonstrating end-to-end
+      customisation. Loaded via `--config aggressive`.
+
 ### Task 1 — EPSS trajectory mode (Slice A landed; B/C/D pending)
 
 - [x] **Slice A — model + per-date fetch loop + CLI plumbing.** Added
