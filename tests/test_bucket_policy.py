@@ -451,3 +451,107 @@ def test_apply_yaml_config_buckets_threaded_through_decision_tree():
     bucket_and_suggest([rec], policy=args.bucket_policy)
     assert rec.bucket == "patch_now"
     assert rec.suggested_action == "Emergency patch protocol engaged."
+
+
+# ---------------------------------------------------------------------------
+# Slice D — write_markdown(policy=…) consumption.
+# ---------------------------------------------------------------------------
+
+
+def _md_run_metadata():
+    """Minimal run_metadata dict accepted by write_markdown."""
+    return {
+        "version": "test-0",
+        "command": "test",
+        "args": "",
+        "cvss_threshold": 7.0,
+        "epss_threshold": 0.10,
+    }
+
+
+def test_write_markdown_default_policy_produces_pre_task7_section_labels(tmp_path):
+    """policy=None must produce the same section headings as today."""
+    from ramen_cve.analyze import bucket_and_suggest
+    from ramen_cve.output.markdown import write_markdown
+
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec])
+    md_path = tmp_path / "out.md"
+    write_markdown([rec], md_path, _md_run_metadata())
+    body = md_path.read_text(encoding="utf-8")
+    assert "## Patch Now" in body  # default BUCKET_DISPLAY label
+    assert "## Critical - Patch Now" not in body  # not the custom label
+
+
+def test_write_markdown_custom_policy_changes_section_heading_and_summary(tmp_path):
+    """A `buckets.patch_now.label` override must propagate to ## heading + summary table."""
+    from ramen_cve.analyze import bucket_and_suggest
+    from ramen_cve.output.markdown import write_markdown
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"label": "Critical - Patch Now",
+                      "action": "Patch within 24 hours per security policy."}
+    })
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec], policy=policy)
+
+    md_path = tmp_path / "out.md"
+    write_markdown([rec], md_path, _md_run_metadata(), policy=policy)
+    body = md_path.read_text(encoding="utf-8")
+
+    # The section heading uses the custom label.
+    assert "## Critical - Patch Now" in body
+    assert "## Patch Now\n" not in body  # the default-label heading is gone
+
+    # The per-record Action line uses the custom action prose.
+    assert "Patch within 24 hours per security policy." in body
+
+    # The summary table row uses the custom label.
+    assert "| Critical - Patch Now | 1 |" in body
+
+
+def test_write_markdown_custom_policy_reorders_sections(tmp_path):
+    """An `order` override on `unknown` must reshuffle the section sequence."""
+    from ramen_cve.analyze import bucket_and_suggest
+    from ramen_cve.output.markdown import write_markdown
+
+    # Pull `unknown` to the front by giving it the lowest order.
+    policy = BucketPolicy.from_yaml({
+        "unknown": {"order": -1},
+    })
+
+    a = _enriched(cvss=None, epss=0.5)  # → unknown
+    b = _enriched(cvss=9.0, epss=0.5)   # → patch_now
+    bucket_and_suggest([a, b], policy=policy)
+
+    md_path = tmp_path / "out.md"
+    write_markdown([a, b], md_path, _md_run_metadata(), policy=policy)
+    body = md_path.read_text(encoding="utf-8")
+
+    unknown_pos = body.find("## Unknown / Insufficient Data")
+    patch_now_pos = body.find("## Patch Now")
+    assert unknown_pos > 0 and patch_now_pos > 0
+    assert unknown_pos < patch_now_pos
+
+
+def test_write_markdown_threads_through_pipeline_output(tmp_path):
+    """End-to-end via pipeline._output: args.bucket_policy reaches the MD file."""
+    import argparse
+
+    from ramen_cve.analyze import bucket_and_suggest
+    from ramen_cve.pipeline import _output
+
+    policy = BucketPolicy.from_yaml({
+        "patch_now": {"label": "URGENT-PATCH"}
+    })
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec], policy=policy)
+
+    args = argparse.Namespace(
+        out_dir=tmp_path, basename="test", format="md",
+        allow_tlp_red=False, bucket_policy=policy,
+    )
+    metadata = _md_run_metadata()
+    paths = _output([rec], args, metadata)
+    md_text = paths["md"].read_text(encoding="utf-8")
+    assert "## URGENT-PATCH" in md_text

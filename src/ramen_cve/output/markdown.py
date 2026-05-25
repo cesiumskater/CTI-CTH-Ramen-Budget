@@ -9,9 +9,9 @@ import re
 from datetime import date
 from pathlib import Path
 
+from ..bucket_policy import DEFAULT_BUCKET_POLICY, BucketPolicy
 from ..constants import (
     ATTACK_TECHNIQUE_NAMES,
-    BUCKET_ACTIONS,
     DEFAULT_CVSS_THRESHOLD,
     DEFAULT_EPSS_THRESHOLD,
 )
@@ -85,6 +85,7 @@ def write_markdown(
     path: Path,
     run_metadata: dict,
     iocs: list[IocRecord] | None = None,
+    policy: BucketPolicy | None = None,
 ) -> None:
     """Write a human-readable Markdown triage report.
 
@@ -94,8 +95,18 @@ def write_markdown(
 
     If `iocs` is non-empty, an additional "Indicators of Compromise" section is
     rendered at the end of the report, grouped by IOC type.
+
+    `policy=None` falls back to `DEFAULT_BUCKET_POLICY` — whose
+    display order / labels / action prose mirror today's hardcoded
+    `BUCKET_ORDER` / `BUCKET_DISPLAY` / `BUCKET_ACTIONS` byte-for-byte,
+    so the no-policy call path remains byte-identical to pre-Task-7.
+    A populated `policy` (typically `args.bucket_policy` from the YAML
+    `buckets:` block) routes section ordering and headings through the
+    policy.
     """
     iocs = iocs or []
+    policy = policy or DEFAULT_BUCKET_POLICY
+    display_order = policy.display_order()
     lines: list[str] = []
     now = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     total = len(enriched)
@@ -127,17 +138,17 @@ def write_markdown(
             lines.append(f"- {_md_safe(src)}")
         lines.append("")
 
-    by_bucket: dict[str, list[EnrichedCve]] = {b: [] for b in BUCKET_ORDER}
+    by_bucket: dict[str, list[EnrichedCve]] = {b: [] for b in display_order}
     for rec in enriched:
         bucket = rec.bucket if rec.bucket in by_bucket else "unknown"
         by_bucket[bucket].append(rec)
 
     lines += ["## Summary", "", "| Bucket | Count | Action |", "| --- | --- | --- |"]
-    for bucket in BUCKET_ORDER:
+    for bucket in display_order:
         count = len(by_bucket[bucket])
-        raw = BUCKET_ACTIONS[bucket]
+        raw = policy.action(bucket)
         action = raw.split("—")[-1].strip() if "—" in raw else raw
-        lines.append(f"| {BUCKET_DISPLAY[bucket]} | {count} | {action} |")
+        lines.append(f"| {policy.label(bucket)} | {count} | {action} |")
     lines.append("")
 
     technique_rollup: dict[str, list[str]] = {}
@@ -198,11 +209,11 @@ def write_markdown(
         lines += ["## No CVEs found", "", "No CVEs matched the current filters.", ""]
 
     today = date.today()
-    for bucket in BUCKET_ORDER:
+    for bucket in display_order:
         recs = by_bucket[bucket]
         if not recs:
             continue
-        lines += [f"## {BUCKET_DISPLAY[bucket]}", ""]
+        lines += [f"## {policy.label(bucket)}", ""]
         for rec in recs:
             lines.append(f"### {rec.cve_id}")
             lines.append("")

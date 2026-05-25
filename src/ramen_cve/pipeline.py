@@ -295,7 +295,13 @@ def _output(
     if args.format in ("md", "both", "all"):
         md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
         _log.info("Writing Markdown report → %s", md_path)
-        write_markdown(enriched, md_path, metadata, iocs=iocs)
+        write_markdown(
+            enriched,
+            md_path,
+            metadata,
+            iocs=iocs,
+            policy=getattr(args, "bucket_policy", None),
+        )
         print(str(md_path))
         paths["md"] = md_path
 
