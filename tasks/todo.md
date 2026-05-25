@@ -221,7 +221,7 @@ during triage.
 
 ---
 
-### 2. Multi-page URL crawling (`--depth 1`)
+### 2. Multi-page URL crawling (`--depth 1`) — DONE (PR #25, merged)
 
 **Goal.** When the `url` input mode is given `--depth 1`, follow
 **same-host links one hop** from the seed page and extract CVEs/IOCs
@@ -371,7 +371,7 @@ subcommand.
 
 ---
 
-### 3. Long-running daemon mode
+### 3. Long-running daemon mode — DONE (PR #26, merged)
 
 **Goal.** Add a `daemon` subcommand that runs the pipeline at fixed
 intervals (e.g., every 6 h) in a single long-lived process. Today
@@ -741,7 +741,7 @@ script + commit: 2–3 h).
 
 ---
 
-### 6. HTML quadrant chart output
+### 6. HTML quadrant chart output — DONE
 
 **Goal.** Add `--format html` (or `--format quadrant`) that emits a
 self-contained HTML file with a CVSS-by-EPSS scatter, points
