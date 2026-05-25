@@ -33,6 +33,9 @@ PUBLIC_API: tuple[str, ...] = (
     "IOC_CSV_COLUMNS", "BUCKET_ACTIONS", "DEFAULT_CACHE_PATH",
     "DEFAULT_ASSOCIATIONS_PATH", "DEFAULT_HUNT_DIR", "DEFAULT_PIR_DIR",
     "DEFAULT_CONFIG_TEMPLATE",
+    # bucket_policy.py
+    "BUCKET_IDS", "KEV_BUCKET_ID", "DEFAULT_BUCKET_POLICY",
+    "BucketPolicy", "BucketSpec",
     # cache.py
     "Cache",
     # extract.py / decay.py

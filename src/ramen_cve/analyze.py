@@ -7,10 +7,11 @@ the constants/models leaves. See docs/REFACTOR_PLAN.md.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date
 
+from .bucket_policy import DEFAULT_BUCKET_POLICY, BucketPolicy
 from .constants import (
-    BUCKET_ACTIONS,
     CWE_TO_ATTACK,
     DEFAULT_CVSS_THRESHOLD,
     DEFAULT_EPSS_THRESHOLD,
@@ -121,6 +122,8 @@ def bucket_and_suggest(
     enriched: list[EnrichedCve],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
     epss_thr: float = DEFAULT_EPSS_THRESHOLD,
+    *,
+    policy: BucketPolicy | None = None,
 ) -> list[EnrichedCve]:
     """Assign a bucket and suggested action to each enriched CVE.
 
@@ -130,27 +133,57 @@ def bucket_and_suggest(
     untouched.
 
     Precedence:
-      1. kev_listed=True → kev_override (always wins)
+      1. kev_listed=True → kev_override (always wins, non-configurable)
       2. CVSS >= thr AND EPSS >= thr → patch_now
       3. CVSS >= thr AND EPSS < thr  → plan_and_patch
       4. CVSS < thr  AND EPSS >= thr → watch_closely
       5. CVSS < thr  AND EPSS < thr  → deprioritize
       Missing CVSS or EPSS           → unknown
+
+    The pivot thresholds (`thr` above) default to the legacy single
+    CVSS/EPSS pair (cvss_thr/epss_thr args). When `policy` is supplied,
+    the `patch_now` bucket's per-bucket thresholds override the pivot —
+    falling back to the policy default when the bucket doesn't set its
+    own — so user-configured `buckets.patch_now.cvss_threshold` /
+    `epss_threshold` actually steer the decision tree. The suggested-
+    action prose stamped onto each record always comes from
+    `policy.action(bucket_id)` so YAML customisation flows through.
+
+    When `policy=None` (legacy callers), the function builds an ad-hoc
+    policy from the cvss_thr/epss_thr args so the default-args call is
+    byte-identical to the pre-Task-7 behaviour.
     """
+    if policy is None:
+        if cvss_thr == DEFAULT_CVSS_THRESHOLD and epss_thr == DEFAULT_EPSS_THRESHOLD:
+            policy = DEFAULT_BUCKET_POLICY
+        else:
+            policy = replace(
+                DEFAULT_BUCKET_POLICY,
+                default_cvss_threshold=cvss_thr,
+                default_epss_threshold=epss_thr,
+            )
+
+    # The patch_now bucket's thresholds drive the four-quadrant decision
+    # tree (high/low × high/low). A user-configured per-bucket override on
+    # patch_now wins over the policy default; otherwise the policy default
+    # applies — which matches today's single-threshold behaviour exactly.
+    pivot_cvss = policy.cvss_threshold_for("patch_now")
+    pivot_epss = policy.epss_threshold_for("patch_now")
+
     for rec in enriched:
         if rec.kev_listed:
             rec.bucket = "kev_override"
         elif rec.cvss_score is None or rec.epss_score is None:
             rec.bucket = "unknown"
-        elif rec.cvss_score >= cvss_thr and rec.epss_score >= epss_thr:
+        elif rec.cvss_score >= pivot_cvss and rec.epss_score >= pivot_epss:
             rec.bucket = "patch_now"
-        elif rec.cvss_score >= cvss_thr:
+        elif rec.cvss_score >= pivot_cvss:
             rec.bucket = "plan_and_patch"
-        elif rec.epss_score >= epss_thr:
+        elif rec.epss_score >= pivot_epss:
             rec.bucket = "watch_closely"
         else:
             rec.bucket = "deprioritize"
-        rec.suggested_action = BUCKET_ACTIONS[rec.bucket]
+        rec.suggested_action = policy.action(rec.bucket)
     return enriched
 
 

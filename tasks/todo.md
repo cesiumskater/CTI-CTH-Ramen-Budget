@@ -15,6 +15,84 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
 
 ## In progress
 
+### Task 7 — Configurable bucket labels / thresholds
+
+- [x] **Slice A — `BucketPolicy` leaf + façade lock.** New
+      `src/ramen_cve/bucket_policy.py` (L1, depends only on
+      `constants`): `BucketSpec` (frozen dataclass: id, label, action,
+      order, optional per-bucket cvss/epss thresholds), `BucketPolicy`
+      (frozen dataclass with `default_cvss_threshold`,
+      `default_epss_threshold`, `buckets: dict[str, BucketSpec]`),
+      `DEFAULT_BUCKET_POLICY` mirroring today's hardcoded
+      `BUCKET_ACTIONS`/`BUCKET_DISPLAY`/`BUCKET_ORDER`, and
+      `BucketPolicy.from_yaml(dict)` (merges user overrides over
+      defaults; degrades to defaults when block absent — returns the
+      DEFAULT_BUCKET_POLICY singleton by identity). Re-exports via
+      `__init__.py` (`BUCKET_IDS`, `KEV_BUCKET_ID`,
+      `DEFAULT_BUCKET_POLICY`, `BucketPolicy`, `BucketSpec`);
+      `test_facade.py` PUBLIC_API extended. +23 tests in
+      `tests/test_bucket_policy.py` covering frozen-ness, default
+      identity vs constants, partial YAML overrides, per-bucket
+      threshold fallback, KEV-bucket metadata override allowed,
+      unknown-bucket / non-mapping rejection, YAML numeric-string
+      coercion. Verification: 582 passed (559 + 23 new), ruff clean,
+      golden CSV+MD byte-oracle byte-identical to anchor.
+- [x] **Slice B — `bucket_and_suggest(policy=…)` backward-compat.**
+      `analyze.bucket_and_suggest` gains an optional `policy:
+      BucketPolicy | None = None` kw arg. When None and the legacy
+      `cvss_thr`/`epss_thr` are at defaults → uses
+      `DEFAULT_BUCKET_POLICY` (byte-identical fallback). When None
+      with custom legacy thresholds → constructs an ad-hoc policy via
+      `dataclasses.replace(DEFAULT_BUCKET_POLICY, ...)`. When a policy
+      is supplied → patch_now's per-bucket thresholds (with fallback
+      to the policy default) drive the four-quadrant decision-tree
+      pivot, and `policy.action(bucket_id)` supplies the
+      suggested-action prose. KEV precedence is non-configurable; only
+      the label/action are user-editable. Four existing CLI call sites
+      unchanged in signature. +8 new tests. Verification: 590 passed
+      (582 + 8), ruff clean, golden byte-oracle byte-identical.
+- [x] **Slice C — YAML loader integration.** `config.apply_yaml_config`
+      reads the optional top-level `buckets:` block via
+      `BucketPolicy.from_yaml` and stamps `args.bucket_policy:
+      BucketPolicy` on the namespace. A pre-set `args.bucket_policy`
+      is preserved (matches the CLI-wins-over-YAML heuristic used for
+      every other flat key). Absent block leaves the attribute unset
+      so downstream `getattr(args, "bucket_policy", None)` resolves
+      cleanly. +6 new tests. Verification: 596 passed (590 + 6), ruff
+      clean, golden byte-oracle byte-identical.
+- [x] **Slice D — output integration.** `output/markdown.write_markdown`
+      gains an optional `policy: BucketPolicy | None = None` kwarg;
+      when None falls back to `DEFAULT_BUCKET_POLICY` (byte-identical
+      to pre-Task-7). When supplied, the summary table, the per-bucket
+      `## Heading` lines, and the section ordering all flow from
+      `policy.display_order()` / `policy.label(bucket)` /
+      `policy.action(bucket)`. `pipeline._output` threads
+      `getattr(args, "bucket_policy", None)` through to write_markdown.
+      Four `bucket_and_suggest` call sites in `cli.py` thread the same
+      value into the policy kwarg. Module-level `BUCKET_ORDER` and
+      `BUCKET_DISPLAY` constants kept (locked by `test_facade.py` and
+      used as the default-policy reference). +4 new tests.
+      Verification: 600 passed (596 + 4), ruff clean, golden
+      byte-oracle byte-identical, `regen --check` rc=0.
+- [x] **Slice E — `aggressive.yaml` showcase preset + template docs.**
+      Bundled `src/ramen_cve/config/presets/aggressive.yaml`:
+      stricter pivot thresholds (CVSS 8.0 / EPSS 0.15) and rewritten
+      per-bucket action prose with concrete SLAs (4 h / 24 h / next
+      maintenance window). `config/config.yaml` template documents
+      the optional `buckets:` block with every supported key per
+      bucket id. +3 new tests covering preset loading via
+      `load_yaml_config("aggressive")` → `apply_yaml_config` →
+      `bucket_and_suggest` end-to-end (a 7.5/0.50 CVE is `patch_now`
+      under defaults, `watch_closely` under the aggressive preset).
+      Verification: 603 passed (600 + 3), ruff clean, golden
+      byte-oracle byte-identical, `regen --check` rc=0.
+
+**Task 7 status: COMPLETE.** Configurable bucket policy ships end-to-
+end (L1 leaf + façade lock + decision-tree policy threading + YAML
+loader + Markdown consumption + showcase preset + template docs).
+Opt-in via the YAML `buckets:` block; no-config runs remain
+byte-identical to pre-Task-7.
+
 ### Task 1 — EPSS trajectory mode (Slice A landed; B/C/D pending)
 
 - [x] **Slice A — model + per-date fetch loop + CLI plumbing.** Added

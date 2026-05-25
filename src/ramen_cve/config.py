@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from .bucket_policy import BucketPolicy
 from .cliutil import _parse_iso_date, _strip_path_quotes
 from .constants import DEFAULT_LAST_OPML_PATH, DEFAULT_PRESETS_DIR
 from .models import _utcnow
@@ -230,6 +231,16 @@ def apply_yaml_config(args: argparse.Namespace, config: dict) -> None:
             args.quiet = True
         elif log_level == "verbose":
             args.verbose = True
+
+    # Bucket policy: read the optional `buckets:` block via
+    # `BucketPolicy.from_yaml` and stamp it on `args.bucket_policy`. An
+    # absent / empty block yields DEFAULT_BUCKET_POLICY by identity, so
+    # callers can rely on `getattr(args, "bucket_policy", None)` always
+    # being either None (no YAML loaded) or a real policy instance —
+    # never a "partially merged" placeholder.
+    buckets = config.get("buckets")
+    if buckets is not None and not getattr(args, "bucket_policy", None):
+        args.bucket_policy = BucketPolicy.from_yaml(buckets)
 
     # Email section → RAMEN_SMTP_* env vars so EmailDispatcher.from_env()
     # picks them up. Plaintext SMTP passwords in YAML are flagged in the

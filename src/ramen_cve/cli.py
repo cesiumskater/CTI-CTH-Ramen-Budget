@@ -814,7 +814,12 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
-    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    enriched = bucket_and_suggest(
+        enriched,
+        args.cvss_threshold,
+        args.epss_threshold,
+        policy=getattr(args, "bucket_policy", None),
+    )
     _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -955,7 +960,12 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
-    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    enriched = bucket_and_suggest(
+        enriched,
+        args.cvss_threshold,
+        args.epss_threshold,
+        policy=getattr(args, "bucket_policy", None),
+    )
     _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1069,7 +1079,12 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
-    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    enriched = bucket_and_suggest(
+        enriched,
+        args.cvss_threshold,
+        args.epss_threshold,
+        policy=getattr(args, "bucket_policy", None),
+    )
     _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
@@ -1133,7 +1148,12 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     if not args.no_exploit_lookup:
         enrich_with_exploit_status(enriched, cache, _get_github_token())
     _maybe_correlate_inventory(args, enriched)
-    enriched = bucket_and_suggest(enriched, args.cvss_threshold, args.epss_threshold)
+    enriched = bucket_and_suggest(
+        enriched,
+        args.cvss_threshold,
+        args.epss_threshold,
+        policy=getattr(args, "bucket_policy", None),
+    )
     _record_runs(cache, enriched)
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)

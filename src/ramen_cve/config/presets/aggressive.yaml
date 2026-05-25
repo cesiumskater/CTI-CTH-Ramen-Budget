@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# aggressive — showcase preset for Task 7 (configurable bucket policy)
+# ---------------------------------------------------------------------------
+#
+# A stricter triage stance suitable for high-blast-radius environments
+# (regulated industries, internet-facing critical infrastructure). Tightens
+# the pivot thresholds so a CVE has to clear a higher bar before it lands
+# in `patch_now`, and rewrites every bucket's action prose with concrete
+# SLAs that an on-call engineer can act on without consulting an external
+# runbook.
+#
+# Usage:
+#   ramen-cve opml ~/feeds --config aggressive
+#
+# CLI flags still override YAML values (see config.yaml for the precedence
+# rules). Loading this preset is byte-identical on every key OTHER than the
+# `buckets:` block to a no-config run.
+# ---------------------------------------------------------------------------
+
+# A multi-source intel run against the bundled sample feeds is a sensible
+# default that lets a fresh user `--config aggressive` and immediately see
+# the rebrand without first picking inputs.
+subcommand: opml
+opml_path: ""   # users supply --opml-path / --config aggressive opml ~/feeds
+
+output:
+  out_dir: ""
+  basename: ""
+  format: both
+
+filters:
+  # Keep the legacy single-pair fallback at the conservative defaults; the
+  # buckets: block below carries the real per-bucket overrides.
+  cvss_threshold: 7.0
+  epss_threshold: 0.10
+  date_mode: feed
+
+buckets:
+  kev_override:
+    label: "KEV — Emergency Response"
+    action: "Patch within 4 hours. CISA KEV-listed; exploitation confirmed in the wild."
+    order: 0
+  patch_now:
+    label: "Critical — Patch Now"
+    # Stricter pivot: a CVE has to be both more severe AND more likely
+    # to be exploited before earning the "patch now" label.
+    cvss_threshold: 8.0
+    epss_threshold: 0.15
+    action: "Patch within 24 hours. High CVSS plus elevated EPSS — treat as actively exploitable."
+    order: 1
+  watch_closely:
+    label: "Watch — Daily Re-score"
+    action: "Re-score every 24 hours; pre-stage a patch. EPSS is elevated; severity is moderate."
+    order: 2
+  plan_and_patch:
+    label: "Plan — Next Maintenance Window"
+    action: "Schedule into the next maintenance window (≤ 7 days). High impact, low current exploitation."
+    order: 3
+  deprioritize:
+    label: "Deprioritize"
+    action: "Track via standard patch cadence. Low severity and low exploitation probability."
+    order: 4
+  unknown:
+    label: "Unknown — Manual Triage"
+    action: "Insufficient data. Assign to an analyst for manual review within 1 business day."
+    order: 5

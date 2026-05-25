@@ -118,3 +118,48 @@ email:
 logging:
   # One of: quiet | normal | verbose
   level: normal
+
+# ----- Bucket policy (optional) -------------------------------------------
+# Customise the per-bucket display label, suggested-action prose, ordering,
+# and per-bucket CVSS/EPSS thresholds. Omitting the block (or leaving it
+# empty) is byte-identical to today's hardcoded defaults.
+#
+# Bucket ids are reserved: only the six below can be overridden — defining a
+# new id raises an error. KEV-listed CVEs always route to `kev_override`
+# (the precedence rule is non-configurable); you may relabel the bucket but
+# not the rule.
+#
+# The patch_now bucket's cvss_threshold / epss_threshold are the *pivot*
+# thresholds for the four-quadrant decision tree (high/low × high/low). The
+# other buckets' per-bucket thresholds are accepted for forward compatibility
+# but the v1 tree only consults patch_now's pivot.
+#
+# Every key inside a bucket is optional. Omit a key to keep its default.
+#
+# buckets:
+#   kev_override:
+#     label: "KEV Override (Patch Immediately)"
+#     action: "Patch immediately — CISA KEV listed; exploitation confirmed in the wild."
+#     order: 0
+#   patch_now:
+#     label: "Patch Now"
+#     cvss_threshold: 7.0
+#     epss_threshold: 0.10
+#     action: "Patch now — high CVSS and high EPSS; likely exploitable and high impact."
+#     order: 1
+#   watch_closely:
+#     label: "Watch Closely"
+#     action: "Watch closely — low CVSS but high EPSS; active exploitation of a lower-impact flaw."
+#     order: 2
+#   plan_and_patch:
+#     label: "Plan and Patch"
+#     action: "Plan and patch — high CVSS but low EPSS; exploit unlikely but impact severe."
+#     order: 3
+#   deprioritize:
+#     label: "Deprioritize"
+#     action: "Deprioritize — low severity and low exploitation probability."
+#     order: 4
+#   unknown:
+#     label: "Unknown / Insufficient Data"
+#     action: "Insufficient data; manual review required."
+#     order: 5
