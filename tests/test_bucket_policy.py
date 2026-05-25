@@ -343,3 +343,111 @@ def test_bucket_and_suggest_unknown_when_score_missing_under_custom_policy():
     bucket_and_suggest([rec], policy=policy)
     assert rec.bucket == "unknown"
     assert rec.suggested_action == "Triage manually within 1 business day."
+
+
+# ---------------------------------------------------------------------------
+# Slice C — apply_yaml_config(buckets=…) integration.
+# ---------------------------------------------------------------------------
+
+
+def _bare_args():
+    """Build a minimal argparse.Namespace `apply_yaml_config` accepts."""
+    import argparse
+
+    return argparse.Namespace(
+        subcommand=None, out_dir=None, basename=None, format=None,
+        cvss_threshold=None, epss_threshold=None, no_cache=False,
+        quiet=False, verbose=False, dispatch=False, digest=False,
+        no_exploit_lookup=False, no_enrich_iocs=False, sector=None,
+        ioc_confidence_floor=None, start=None, end=None, date_mode=None,
+        path=None, url=None, cves=None, taxii_url=None,
+        taxii_collection=None, inventory=None, allow_tlp_red=False,
+    )
+
+
+def test_apply_yaml_config_no_buckets_block_leaves_namespace_untouched():
+    """A config without `buckets:` must not stamp a `bucket_policy` attr."""
+    from ramen_cve import apply_yaml_config
+
+    args = _bare_args()
+    apply_yaml_config(args, {"subcommand": "opml"})
+    assert getattr(args, "bucket_policy", None) is None
+
+
+def test_apply_yaml_config_empty_buckets_block_yields_default_policy():
+    """`buckets: {}` is interpreted as 'all defaults' → the default singleton."""
+    from ramen_cve import apply_yaml_config
+
+    args = _bare_args()
+    apply_yaml_config(args, {"buckets": {}})
+    assert args.bucket_policy is DEFAULT_BUCKET_POLICY
+
+
+def test_apply_yaml_config_populated_buckets_block_reaches_namespace():
+    """Per-bucket overrides reach `args.bucket_policy` as a real `BucketPolicy`."""
+    from ramen_cve import apply_yaml_config
+
+    args = _bare_args()
+    apply_yaml_config(args, {
+        "buckets": {
+            "patch_now": {
+                "label": "Critical - Patch Now",
+                "cvss_threshold": 8.0,
+                "epss_threshold": 0.15,
+                "action": "Patch within 24 hours",
+                "order": 1,
+            },
+        },
+    })
+    assert isinstance(args.bucket_policy, BucketPolicy)
+    spec = args.bucket_policy.spec("patch_now")
+    assert spec.label == "Critical - Patch Now"
+    assert spec.action == "Patch within 24 hours"
+    assert spec.cvss_threshold == 8.0
+    assert spec.epss_threshold == 0.15
+    assert spec.order == 1
+    # Untouched buckets remain at default.
+    assert args.bucket_policy.spec("watch_closely") == DEFAULT_BUCKET_POLICY.spec("watch_closely")
+
+
+def test_apply_yaml_config_cli_set_bucket_policy_is_preserved():
+    """A pre-set `bucket_policy` on args is preserved — same heuristic as other CLI-wins keys."""
+    from ramen_cve import apply_yaml_config
+
+    args = _bare_args()
+    cli_policy = BucketPolicy.from_yaml({"patch_now": {"label": "CLI-WINS"}})
+    args.bucket_policy = cli_policy
+
+    apply_yaml_config(args, {"buckets": {"patch_now": {"label": "YAML-LOSES"}}})
+    assert args.bucket_policy is cli_policy
+    assert args.bucket_policy.label("patch_now") == "CLI-WINS"
+
+
+def test_apply_yaml_config_buckets_block_unknown_id_raises():
+    """A typo in a bucket id surfaces from `apply_yaml_config` as ValueError."""
+    from ramen_cve import apply_yaml_config
+
+    args = _bare_args()
+    with pytest.raises(ValueError, match="Unknown bucket id"):
+        apply_yaml_config(args, {"buckets": {"patch_immediately": {"label": "X"}}})
+
+
+def test_apply_yaml_config_buckets_threaded_through_decision_tree():
+    """End-to-end: YAML → apply → bucket_and_suggest(policy=args.bucket_policy)."""
+    from ramen_cve import apply_yaml_config
+    from ramen_cve.analyze import bucket_and_suggest
+
+    args = _bare_args()
+    apply_yaml_config(args, {
+        "buckets": {
+            "patch_now": {
+                "cvss_threshold": 8.0,
+                "epss_threshold": 0.20,
+                "action": "Emergency patch protocol engaged.",
+            }
+        }
+    })
+    rec = _enriched(cvss=9.0, epss=0.5)
+    bucket_and_suggest([rec], policy=args.bucket_policy)
+    assert rec.bucket == "patch_now"
+    assert rec.suggested_action == "Emergency patch protocol engaged."
