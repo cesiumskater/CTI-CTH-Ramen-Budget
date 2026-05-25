@@ -555,3 +555,50 @@ def test_write_markdown_threads_through_pipeline_output(tmp_path):
     paths = _output([rec], args, metadata)
     md_text = paths["md"].read_text(encoding="utf-8")
     assert "## URGENT-PATCH" in md_text
+
+
+# ---------------------------------------------------------------------------
+# Slice E — the bundled `aggressive.yaml` showcase preset.
+# ---------------------------------------------------------------------------
+
+
+def test_aggressive_preset_loads_through_load_yaml_config():
+    """`load_yaml_config("aggressive")` resolves to the bundled preset on disk."""
+    from ramen_cve import load_yaml_config
+
+    data = load_yaml_config("aggressive")
+    # Sanity-check the YAML shape — the bucket policy is the showcase axis.
+    assert isinstance(data, dict)
+    assert "buckets" in data
+    assert "patch_now" in data["buckets"]
+
+
+def test_aggressive_preset_applies_stricter_pivot_thresholds():
+    """Loading aggressive.yaml tightens the patch_now pivot to (8.0, 0.15)."""
+    from ramen_cve import apply_yaml_config, load_yaml_config
+
+    args = _bare_args()
+    apply_yaml_config(args, load_yaml_config("aggressive"))
+    assert isinstance(args.bucket_policy, BucketPolicy)
+    spec = args.bucket_policy.spec("patch_now")
+    assert spec.cvss_threshold == 8.0
+    assert spec.epss_threshold == 0.15
+    assert spec.label == "Critical — Patch Now"
+
+
+def test_aggressive_preset_changes_bucket_assignment_under_real_decision_tree():
+    """A 7.5/0.50 CVE is patch_now under defaults, watch_closely under aggressive."""
+    from ramen_cve import apply_yaml_config, load_yaml_config
+    from ramen_cve.analyze import bucket_and_suggest
+
+    rec_default = _enriched(cvss=7.5, epss=0.5)
+    bucket_and_suggest([rec_default])
+    assert rec_default.bucket == "patch_now"
+
+    args = _bare_args()
+    apply_yaml_config(args, load_yaml_config("aggressive"))
+
+    rec_strict = _enriched(cvss=7.5, epss=0.5)
+    bucket_and_suggest([rec_strict], policy=args.bucket_policy)
+    assert rec_strict.bucket == "watch_closely"
+    assert "Re-score every 24 hours" in rec_strict.suggested_action
