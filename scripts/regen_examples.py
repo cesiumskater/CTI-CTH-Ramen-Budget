@@ -58,6 +58,7 @@ EXAMPLES = REPO / "examples"
 SAMPLE_OPML = EXAMPLES / "sample.opml"
 OUT_CSV = EXAMPLES / "sample-output.csv"
 OUT_MD = EXAMPLES / "sample-report.md"
+OUT_HTML = EXAMPLES / "sample-quadrant.html"
 OUT_INVENTORY = EXAMPLES / "sample-inventory.csv"
 
 # Frozen clock values substituted into the volatile output fields.
@@ -298,6 +299,7 @@ def _generate(workdir: Path) -> dict[str, bytes]:
         patch("ramen_cve.time.sleep"),
         patch("feedparser.parse", side_effect=_fake_feedparser_parse),
     ):
+        # CSV + Markdown in one run...
         rc = ramen_cve.main(
             [
                 "opml", str(SAMPLE_OPML),
@@ -306,19 +308,39 @@ def _generate(workdir: Path) -> dict[str, bytes]:
                 "--no-exploit-lookup", "--no-enrich-iocs", "--no-cache",
             ]
         )
-    if rc != 0:
-        raise SystemExit(f"pipeline returned rc={rc}")
+        if rc != 0:
+            raise SystemExit(f"pipeline (csv+md) returned rc={rc}")
+        # ...then the HTML quadrant chart in a second run (separate
+        # --format so we don't pull in sigma/yara/stix artefacts that
+        # aren't part of the showcase bundle).
+        rc = ramen_cve.main(
+            [
+                "opml", str(SAMPLE_OPML),
+                "--out-dir", str(out_dir), "--format", "html",
+                "--inventory", str(inv_path),
+                "--no-exploit-lookup", "--no-enrich-iocs", "--no-cache",
+            ]
+        )
+        if rc != 0:
+            raise SystemExit(f"pipeline (html) returned rc={rc}")
 
     csv_path = sorted(out_dir.glob("ramen-cve-*.csv"))[0]
     md_path = sorted(out_dir.glob("ramen-cve-*.md"))[0]
+    html_path = sorted(out_dir.glob("ramen-cve-*.html"))[0]
     return {
         OUT_INVENTORY.name: INVENTORY_TEXT.encode("utf-8"),
         OUT_CSV.name: _normalise_csv(csv_path.read_bytes()),
         OUT_MD.name: _normalise_md(md_path.read_text(encoding="utf-8")).encode("utf-8"),
+        OUT_HTML.name: html_path.read_bytes(),
     }
 
 
-_TARGETS = {OUT_INVENTORY.name: OUT_INVENTORY, OUT_CSV.name: OUT_CSV, OUT_MD.name: OUT_MD}
+_TARGETS = {
+    OUT_INVENTORY.name: OUT_INVENTORY,
+    OUT_CSV.name: OUT_CSV,
+    OUT_MD.name: OUT_MD,
+    OUT_HTML.name: OUT_HTML,
+}
 
 
 def main(argv: list[str] | None = None) -> int:

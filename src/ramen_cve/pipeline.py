@@ -19,6 +19,7 @@ from .enrich.inventory import correlate_inventory, load_inventory
 from .enrich.iocs import enrich_iocs
 from .models import EnrichedCve, IocRecord, OpmlError, _utcnow
 from .output.csv_writer import write_csv, write_epss_trajectory_csv
+from .output.html_quadrant import write_quadrant_html
 from .output.markdown import write_markdown
 from .output.sigma import write_sigma_stubs
 from .output.stix import write_iocs_csv, write_stix
@@ -251,7 +252,7 @@ def _output(
 
     paths: dict[str, Path | None] = {
         "csv": None, "iocs_csv": None, "epss_trajectory_csv": None, "md": None,
-        "stix": None, "sigma_dir": None, "yara_dir": None,
+        "stix": None, "sigma_dir": None, "yara_dir": None, "html": None,
     }
 
     if args.format in ("csv", "both", "all"):
@@ -329,5 +330,13 @@ def _output(
                 "No kev_override / patch_now CVEs with linked malware; "
                 "no YARA stubs written."
             )
+
+    if args.format in ("html", "all"):
+        html_path = _unique_output_path(out_dir, ts, "html", basename=basename)
+        _log.info("Writing HTML quadrant report → %s", html_path)
+        write_quadrant_html(enriched, html_path, metadata)
+        print(str(html_path))
+        paths["html"] = html_path
+
     return paths
 

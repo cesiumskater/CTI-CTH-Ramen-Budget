@@ -223,6 +223,11 @@ from .output.csv_writer import (  # noqa: F401
     write_csv,
     write_epss_trajectory_csv,
 )
+from .output.html_quadrant import (  # noqa: F401
+    BUCKET_COLOURS,
+    _render_quadrant_svg,
+    write_quadrant_html,
+)
 from .output.markdown import (  # noqa: F401
     BUCKET_DISPLAY,
     BUCKET_ORDER,
@@ -524,6 +529,7 @@ __all__ = [
     "write_epss_trajectory_csv",
     "write_iocs_csv",
     "write_markdown",
+    "write_quadrant_html",
     "write_sigma_stubs",
     "write_stix",
     "write_yara_stubs",

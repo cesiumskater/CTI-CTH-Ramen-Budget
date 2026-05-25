@@ -60,6 +60,7 @@ PUBLIC_API: tuple[str, ...] = (
     "_extract_iocs_from_pattern", "_sigma_level_for", "_build_sigma_stub",
     "write_sigma_stubs", "_yara_safe_name", "_yara_string_escape",
     "_build_yara_stub", "write_yara_stubs",
+    "BUCKET_COLOURS", "_render_quadrant_svg", "write_quadrant_html",
     # dispatch/*
     "SlackWebhookDispatcher", "GenericWebhookDispatcher", "EmailDispatcher",
     "dispatch_records", "_group_records_by_owner", "_build_digest_body",

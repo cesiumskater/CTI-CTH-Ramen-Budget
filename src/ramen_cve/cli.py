@@ -136,12 +136,13 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--format",
-        choices=["csv", "md", "both", "stix", "sigma", "yara", "all"],
+        choices=["csv", "md", "both", "stix", "sigma", "yara", "html", "all"],
         default="both",
         help=(
             "Output format. 'both' = CSV + Markdown; 'sigma' = Sigma stubs only; "
             "'yara' = YARA stubs only (one per linked malware family); "
-            "'all' = CSV + Markdown + STIX + Sigma + YARA."
+            "'html' = self-contained CVSS x EPSS quadrant chart; "
+            "'all' = CSV + Markdown + STIX + Sigma + YARA + HTML."
         ),
     )
     parser.add_argument("--no-cache", action="store_true")
