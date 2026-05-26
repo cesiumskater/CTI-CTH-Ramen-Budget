@@ -60,6 +60,7 @@ from .cli import (  # noqa: F401
     _run_opml,
     _run_stix,
     _run_url,
+    _run_web,
     _shared_flags,
     _validate_args,
     build_parser,
@@ -222,6 +223,7 @@ from .models import (  # noqa: F401
     OpmlError,
     Pir,
     ThreatActor,
+    WebUiError,
     _utcnow,
 )
 from .output.csv_writer import (  # noqa: F401
@@ -305,6 +307,10 @@ from .trend import (  # noqa: F401
     _record_runs,
     _run_trend,
     _sparkline,
+)
+from .web.builder import (  # noqa: F401
+    WEB_DEFAULT_MAX_RUNS_ON_HOME,
+    build_site,
 )
 from .wizard import (  # noqa: F401
     _run_wizard,
@@ -393,6 +399,8 @@ __all__ = [
     "VERSION",
     "VIRUSTOTAL_API_BASE",
     "VirusTotalEnricher",
+    "WEB_DEFAULT_MAX_RUNS_ON_HOME",
+    "WebUiError",
     "YARA_ELIGIBLE_BUCKETS",
     "_AUDIT_SENSITIVE_KEYS",
     "_DEFANG_DETECT",
@@ -473,6 +481,7 @@ __all__ = [
     "_run_stix",
     "_run_trend",
     "_run_url",
+    "_run_web",
     "_run_wizard",
     "_safe_basename",
     "_safe_url_for_log",
@@ -502,6 +511,7 @@ __all__ = [
     "args_to_yaml_payload",
     "bucket_and_suggest",
     "build_parser",
+    "build_site",
     "correlate_inventory",
     "delete_yaml_preset",
     "dispatch_records",

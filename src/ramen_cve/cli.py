@@ -75,6 +75,7 @@ from .models import (
     FeedEntry,
     IocRecord,
     OpmlError,
+    WebUiError,
 )
 from .output.stix import (
     parse_stix_bundle,
@@ -96,6 +97,7 @@ from .trend import (
     _record_runs,
     _run_trend,
 )
+from .web.builder import build_site
 from .wizard import _run_wizard
 
 _log = logging.getLogger(__name__)
@@ -510,6 +512,25 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_p.add_argument("--quiet", action="store_true")
     daemon_p.add_argument("--verbose", action="store_true")
 
+    # web subcommand: static-HTML triage navigator over the SQLite cache
+    # (Task 8). Slice A: --site-dir only; later slices add --out-dir,
+    # --config, --max-runs-on-home, --cache. See docs/web_ui_design.md.
+    web_p = sub.add_parser(
+        "web",
+        help="Render a static-HTML site over the SQLite runs history "
+             "(Slice A: minimal index.html + empty stylesheet; Slices B-G "
+             "add per-run + per-CVE pages, bucket-policy threading, and "
+             "the showcase regen).",
+    )
+    web_p.add_argument(
+        "--site-dir", type=_path_arg, required=True, metavar="DIR",
+        help="Required. Site is written to <DIR>/index.html + "
+             "<DIR>/static/style.css. No default — explicit by design "
+             "(no surprise overwrites; see docs/web_ui_design.md §D5).",
+    )
+    web_p.add_argument("--quiet", action="store_true")
+    web_p.add_argument("--verbose", action="store_true")
+
     # stix subcommand: ingest a STIX 2.1 bundle from disk or via TAXII 2.1
     stix_p = sub.add_parser("stix", help="Ingest a STIX 2.1 bundle (file or TAXII).")
     stix_p.add_argument("path", nargs="?", type=_path_arg, help="Path to a STIX bundle JSON file.")
@@ -678,6 +699,15 @@ def main(argv: list[str] | None = None) -> int:
         cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
         return _audit_dispatch(
             cache, "daemon", args, lambda: _run_daemon(args, cache, None)
+        )
+
+    # web subcommand: static-HTML renderer over the SQLite cache. No API
+    # key needed (no network) — dispatch alongside daemon, before the
+    # key-resolution block below. See docs/web_ui_design.md.
+    if args.subcommand == "web":
+        cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
+        return _audit_dispatch(
+            cache, "web", args, lambda: _run_web(args, cache, None)
         )
 
     _validate_args(args, parser)
@@ -1174,5 +1204,29 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     output_paths = _output(enriched, args, metadata, iocs=iocs)
     _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
+    return 0
+
+
+def _run_web(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:
+    """Render the static-HTML Web UI to `args.site_dir` (Task 8).
+
+    Slice A: minimal `index.html` (H1 + "N runs recorded.") plus an
+    empty `static/style.css`. Slices B-G extend per
+    `docs/web_ui_design.md`.
+
+    Returns rc=1 when the cache's `runs` table is empty — there's
+    nothing to render, and the empty-state landing page would obscure
+    the misconfiguration that led here (design-doc §D11). `api_key`
+    is accepted to match the standard `_run_<name>` signature but
+    unused; the Web UI never touches the network.
+    """
+    del api_key
+    try:
+        paths = build_site(cache, args.site_dir)
+    except WebUiError as exc:
+        _log.warning("%s", exc)
+        return 1
+    for path in paths.values():
+        print(str(path))
     return 0
 

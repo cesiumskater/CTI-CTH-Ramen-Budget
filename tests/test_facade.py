@@ -26,8 +26,8 @@ import ramen_cve
 # --- the locked public surface -------------------------------------------
 PUBLIC_API: tuple[str, ...] = (
     # exceptions + dataclasses (models.py)
-    "OpmlError", "FeedEntry", "CveRecord", "ThreatActor", "Campaign",
-    "Malware", "Hunt", "Pir", "IocRecord", "EnrichedCve",
+    "OpmlError", "WebUiError", "FeedEntry", "CveRecord", "ThreatActor",
+    "Campaign", "Malware", "Hunt", "Pir", "IocRecord", "EnrichedCve",
     # constants / data tables (constants.py)
     "CWE_TO_ATTACK", "ATTACK_TECHNIQUE_NAMES", "CSV_COLUMNS",
     "IOC_CSV_COLUMNS", "BUCKET_ACTIONS", "DEFAULT_CACHE_PATH",
@@ -89,6 +89,8 @@ PUBLIC_API: tuple[str, ...] = (
     "_parse_schedule_time", "_quote_for_task_scheduler", "_emit_cron_line",
     "_emit_windows_task_xml", "_run_schedule",
     "_run_daemon", "_build_iteration_argv",
+    # web/builder.py (Task 8)
+    "build_site", "WEB_DEFAULT_MAX_RUNS_ON_HOME", "_run_web",
     # cli.py
     "build_parser", "main",
 )

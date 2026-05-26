@@ -34,6 +34,14 @@ class OpmlError(Exception):
     """Raised when an OPML file is missing or malformed."""
 
 
+class WebUiError(Exception):
+    """Raised when the static-HTML Web UI builder cannot render a site.
+
+    The dominant case is an empty `runs` table (nothing to render); see
+    `web.builder.build_site` and the Task-8 design doc §D11.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------

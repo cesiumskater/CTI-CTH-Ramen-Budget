@@ -210,6 +210,18 @@ class Cache:
         )
         self._conn.commit()
 
+    def list_run_timestamps(self) -> list[str]:
+        """Return distinct `ts_iso` values in the `runs` table, newest first.
+
+        Used by the Web UI (Task 8) to enumerate every pipeline invocation
+        that has touched the cache. Each `ts_iso` groups all CVE rows from
+        a single `_record_runs` call (one shared second-precision stamp).
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT ts_iso FROM runs ORDER BY ts_iso DESC"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def get_runs(self, cve_id: str) -> list[dict]:
         """Return every recorded run for `cve_id` in chronological order."""
         rows = self._conn.execute(

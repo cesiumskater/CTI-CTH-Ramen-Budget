@@ -15,6 +15,56 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
 
 ## In progress
 
+### Task 8 — Web UI (Slice A landed; B–G pending)
+
+- [x] **Slice A — `web/builder.py` skeleton + `ramen-cve web --site-dir`
+      subcommand + façade lock.** New L4 module
+      `src/ramen_cve/web/builder.py` with `build_site(cache, site_dir,
+      *, policy=None, max_runs_on_home=WEB_DEFAULT_MAX_RUNS_ON_HOME) ->
+      dict[str, Path]`. Writes a minimal `<site-dir>/index.html`
+      (HTML5 doctype + UTF-8 charset + `<meta name="generator">` +
+      linked `static/style.css` + `<h1>Ramen CVE Triage</h1>` +
+      `<p>N run(s) recorded.</p>`) and a placeholder
+      `<site-dir>/static/style.css` (real styling lands in Slice G).
+      Raises `WebUiError` (new in `models.py`) when the cache's `runs`
+      table is empty — fail-fast per design-doc §D11. New
+      `Cache.list_run_timestamps()` returns distinct `ts_iso` in
+      reverse chronological order. CLI handler `_run_web(args, cache,
+      api_key=None)` lives in `cli.py` alongside the other `_run_<name>`
+      runners; the `web` subparser declares only `--site-dir`
+      (required), `--quiet`, `--verbose`; dispatch via
+      `_audit_dispatch(cache, "web", args, ...)`. HTML interpolation
+      passes through `html.escape(..., quote=True)` unconditionally
+      (§D10). Façade re-exports `build_site`,
+      `WEB_DEFAULT_MAX_RUNS_ON_HOME`, `WebUiError`, `_run_web`;
+      `test_facade.py` PUBLIC_API extended. +27 tests in
+      `tests/test_web_ui.py` covering pure-function `_render_index`
+      output, `build_site` integration (empty cache → WebUiError +
+      no files written; populated cache → both files written; nested
+      site-dir; byte-stable second build; reserved kwargs accepted),
+      `_run_web` rc=0/1 semantics + WARNING log + path-printing,
+      argparse `--site-dir` required + parse-success. Verification:
+      630 passed (was 603 + 27 new), ruff clean, golden CSV+MD
+      byte-oracle byte-identical to anchor, `regen --check` rc=0,
+      manual smoke against a populated cache produces a valid
+      `index.html` (157 runs found).
+- [ ] **Slice B — `run_artefacts` SQLite table + `pipeline._output`
+      wiring** (design-doc §D9 + §3.2). New table
+      `(ts_iso PK, disk_stamp, out_dir)`; `Cache.record_artefacts`
+      writer; `pipeline._output` stamps a row after every successful
+      write.
+- [ ] **Slice C — `_discover_runs` + run-history strip + per-run
+      summary page** (design-doc §5.1, §5.2 minus diff block).
+- [ ] **Slice D — Per-CVE detail page §§1-3** (header, NVD summary,
+      trajectory chart reusing Task-6's `_render_quadrant_svg`).
+- [ ] **Slice E — Per-CVE detail page §§4-7** (exploit-status,
+      associations, IOCs, affected hosts — the "RICH" content).
+- [ ] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /
+      reclassified since previous run).
+- [ ] **Slice G — Bucket-policy threading** (`--config NAME` →
+      `args.bucket_policy` → every label in every page) **+ showcase
+      regen extension** (`examples/_web-sample/` committed bundle).
+
 ### Task 7 — Configurable bucket labels / thresholds
 
 - [x] **Slice A — `BucketPolicy` leaf + façade lock.** New
