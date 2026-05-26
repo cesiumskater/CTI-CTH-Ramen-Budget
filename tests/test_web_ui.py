@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -462,3 +463,444 @@ def test_output_out_dir_stored_absolute(tmp_path):
     # _resolve_out_dir on an explicit absolute tmp_path returns it
     # unchanged; the value stamped should equal tmp_path verbatim.
     assert row[0] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Slice C — `_discover_runs` + per-run summary pages + index strip.
+# ---------------------------------------------------------------------------
+
+
+def _seed_run(cache, ts_iso, *, cve_ids, artefacts=None):
+    """Seed `runs` rows for one ts_iso, plus optional `run_artefacts` row.
+
+    `artefacts` is `(disk_stamp, out_dir)` when present, None otherwise
+    (the LEFT-JOIN-miss case the discovery helper has to handle).
+    """
+    for cve_id in cve_ids:
+        cache._conn.execute(
+            "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (cve_id, ts_iso, "patch_now", 9.0, 0.5),
+        )
+    if artefacts is not None:
+        disk_stamp, out_dir = artefacts
+        cache._conn.execute(
+            "INSERT OR IGNORE INTO run_artefacts (ts_iso, disk_stamp, out_dir) "
+            "VALUES (?, ?, ?)",
+            (ts_iso, disk_stamp, str(out_dir)),
+        )
+    cache._conn.commit()
+
+
+def _make_artefact_files(out_dir, disk_stamp, *, kinds=("csv", "md", "stix", "html")):
+    """Create empty placeholder artefact files for the given kinds.
+
+    Filenames mirror what `pipeline._output` writes. Used to exercise
+    the best-effort link branch (file present → `<a>`; absent → "—").
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix_for = {
+        "csv": ".csv", "md": ".md", "stix": ".stix.json", "html": ".html",
+    }
+    dir_for = {"sigma": "-sigma", "yara": "-yara"}
+    for kind in kinds:
+        if kind in suffix_for:
+            (out_dir / f"ramen-cve-{disk_stamp}{suffix_for[kind]}").write_text("")
+        elif kind in dir_for:
+            (out_dir / f"ramen-cve-{disk_stamp}{dir_for[kind]}").mkdir()
+
+
+# ---- `_slugify_ts` --------------------------------------------------------
+
+
+def test_slugify_ts_replaces_colons_with_dashes():
+    from ramen_cve.web.builder import _slugify_ts
+
+    assert _slugify_ts("2026-05-26T14:03:11") == "2026-05-26T14-03-11"
+
+
+def test_slugify_ts_handles_tz_suffix():
+    """The direct-insert path in test helpers carries a `+00:00` tail —
+    must remain filesystem-safe after slugification."""
+    from ramen_cve.web.builder import _slugify_ts
+
+    assert _slugify_ts("2024-01-01T00:00:00+00:00") == "2024-01-01T00-00-00+00-00"
+
+
+# ---- `_discover_runs` ----------------------------------------------------
+
+
+def test_discover_runs_returns_empty_list_when_runs_table_empty(tmp_path):
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    assert _discover_runs(cache) == []
+
+
+def test_discover_runs_one_row_per_distinct_ts_iso(tmp_path):
+    """Three runs with 1, 2, 1 CVEs respectively → three rows."""
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-2024-0001"])
+    _seed_run(cache, "2026-05-25T11:00:00",
+              cve_ids=["CVE-2024-0002", "CVE-2024-0003"])
+    _seed_run(cache, "2026-05-25T12:00:00", cve_ids=["CVE-2024-0004"])
+
+    rows = _discover_runs(cache)
+    assert len(rows) == 3
+
+
+def test_discover_runs_is_descending_by_ts_iso(tmp_path):
+    """Newest first — matches `Cache.list_run_timestamps` ordering."""
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    _seed_run(cache, "2026-05-25T12:00:00", cve_ids=["CVE-B"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-C"])
+
+    rows = _discover_runs(cache)
+    assert [r.ts_iso for r in rows] == [
+        "2026-05-25T12:00:00",
+        "2026-05-25T11:00:00",
+        "2026-05-25T10:00:00",
+    ]
+
+
+def test_discover_runs_counts_distinct_cves_per_run(tmp_path):
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00",
+              cve_ids=["CVE-A", "CVE-B", "CVE-C"])
+    rows = _discover_runs(cache)
+    assert rows[0].cve_count == 3
+
+
+def test_discover_runs_attaches_artefacts_when_row_present(tmp_path):
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"],
+              artefacts=("20260525T100000123456", "/tmp/out"))
+    row = _discover_runs(cache)[0]
+    assert row.disk_stamp == "20260525T100000123456"
+    assert row.out_dir == "/tmp/out"
+
+
+def test_discover_runs_left_join_miss_returns_none_for_disk_stamp(tmp_path):
+    """A `runs` ts with no matching `run_artefacts` row → None disk_stamp + out_dir."""
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])  # no artefacts
+    row = _discover_runs(cache)[0]
+    assert row.disk_stamp is None
+    assert row.out_dir is None
+
+
+def test_discover_runs_mixes_with_and_without_artefacts(tmp_path):
+    """Real-world: some runs predate Slice B (no artefacts row), some have one."""
+    from ramen_cve.web.builder import _discover_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])  # missing
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-B"],
+              artefacts=("20260525T110000222222", "/tmp/out"))
+    rows = _discover_runs(cache)
+    # Newest first.
+    assert rows[0].disk_stamp == "20260525T110000222222"
+    assert rows[1].disk_stamp is None
+
+
+# ---- Per-run page emission -----------------------------------------------
+
+
+def test_build_site_emits_one_run_page_per_ts_iso(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-B"])
+    _seed_run(cache, "2026-05-25T12:00:00", cve_ids=["CVE-C"])
+
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    pages = sorted(p.name for p in (site_dir / "runs").iterdir())
+    assert pages == [
+        "2026-05-25T10-00-00.html",
+        "2026-05-25T11-00-00.html",
+        "2026-05-25T12-00-00.html",
+    ]
+
+
+def test_build_site_run_page_filename_uses_slugified_ts(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    assert (site_dir / "runs" / "2026-05-26T14-03-11.html").is_file()
+
+
+def test_run_page_contains_h1_with_ts_iso(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "<h1>Run 2026-05-26T14:03:11</h1>" in body
+
+
+def test_run_page_reports_cve_count_singular(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "<p>1 CVE in this run.</p>" in body
+
+
+def test_run_page_reports_cve_count_plural(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X", "CVE-Y", "CVE-Z"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "<p>3 CVEs in this run.</p>" in body
+
+
+def test_run_page_lists_all_six_artefact_kinds(tmp_path):
+    """The 6 mainline artefact kinds appear as labels regardless of presence."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    for label in ("CSV", "MD", "STIX", "HTML", "Sigma", "YARA"):
+        assert f"<th>{label}</th>" in body
+
+
+def test_run_page_renders_dash_when_artefacts_row_missing(tmp_path):
+    """No `run_artefacts` row → all 6 cells render "—"."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])  # no artefacts
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    # 6 dashes — once per artefact row.
+    assert body.count("<td>—</td>") == 6
+
+
+def test_run_page_links_present_artefacts(tmp_path):
+    """When the row + the files exist, the page renders `<a href>` links."""
+    out_dir = tmp_path / "run-out"
+    _make_artefact_files(out_dir, "20260526T140311000000",
+                         kinds=("csv", "md", "stix", "html", "sigma", "yara"))
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"],
+              artefacts=("20260526T140311000000", out_dir))
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "ramen-cve-20260526T140311000000.csv" in body
+    assert "ramen-cve-20260526T140311000000.md" in body
+    assert "ramen-cve-20260526T140311000000.stix.json" in body
+    assert "ramen-cve-20260526T140311000000.html" in body
+    assert "ramen-cve-20260526T140311000000-sigma" in body
+    assert "ramen-cve-20260526T140311000000-yara" in body
+
+
+def test_run_page_renders_dash_for_missing_files_when_row_present(tmp_path):
+    """A row exists, but only CSV + MD files actually exist on disk —
+    the other four cells must render "—" without erroring."""
+    out_dir = tmp_path / "run-out"
+    _make_artefact_files(out_dir, "20260526T140311000000", kinds=("csv", "md"))
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"],
+              artefacts=("20260526T140311000000", out_dir))
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    # csv + md cells contain hrefs; stix + html + sigma + yara → 4 dashes.
+    assert body.count("<td>—</td>") == 4
+
+
+def test_run_page_uses_relative_artefact_hrefs(tmp_path):
+    """Artefact `href`s never carry protocol prefixes (file://, http://)."""
+    out_dir = tmp_path / "run-out"
+    _make_artefact_files(out_dir, "20260526T140311000000", kinds=("csv",))
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"],
+              artefacts=("20260526T140311000000", out_dir))
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "file://" not in body
+    assert "http://" not in body
+    assert "https://" not in body
+
+
+def test_run_page_css_link_is_relative_to_parent(tmp_path):
+    """Per-run pages live one level deeper than `static/`."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert '<link rel="stylesheet" href="../static/style.css">' in body
+
+
+def test_run_page_has_no_javascript(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T14-03-11.html").read_text("utf-8")
+    assert "<script" not in body
+
+
+# ---- Index run-history strip ---------------------------------------------
+
+
+def test_index_includes_run_history_strip(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    assert "<h2>Run history</h2>" in body
+
+
+def test_index_strip_is_reverse_chronological(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    _seed_run(cache, "2026-05-25T12:00:00", cve_ids=["CVE-B"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-C"])
+
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    pos_newest = body.find("2026-05-25T12:00:00")
+    pos_middle = body.find("2026-05-25T11:00:00")
+    pos_oldest = body.find("2026-05-25T10:00:00")
+    assert 0 < pos_newest < pos_middle < pos_oldest
+
+
+def test_index_strip_caps_at_max_runs_on_home(tmp_path):
+    """5 runs with max_runs_on_home=2 → only the 2 newest appear in the strip."""
+    cache = Cache(tmp_path / ".cache.db")
+    for i in range(5):
+        _seed_run(cache, f"2026-05-25T1{i}:00:00", cve_ids=[f"CVE-{i}"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir, max_runs_on_home=2)
+    body = (site_dir / "index.html").read_text("utf-8")
+    # Newest two present.
+    assert "2026-05-25T14:00:00" in body
+    assert "2026-05-25T13:00:00" in body
+    # Older three absent from the index (still reachable via runs/<slug>.html).
+    assert "2026-05-25T12:00:00" not in body
+    assert "2026-05-25T11:00:00" not in body
+    assert "2026-05-25T10:00:00" not in body
+
+
+def test_index_strip_links_to_per_run_page(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    assert 'href="runs/2026-05-26T14-03-11.html"' in body
+
+
+def test_index_strip_renders_dash_when_artefacts_missing(tmp_path):
+    """A run with no `run_artefacts` row → 6 dashes on its strip row."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    assert body.count("<td>—</td>") == 6
+
+
+def test_index_strip_links_present_artefacts_relatively(tmp_path):
+    """Index lives at the site root, so its artefact links use `../<out_dir>/…`
+    rather than `runs/../<out_dir>/…`."""
+    out_dir = tmp_path / "run-out"
+    _make_artefact_files(out_dir, "20260526T140311000000", kinds=("csv",))
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"],
+              artefacts=("20260526T140311000000", out_dir))
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    # The link text is the filename; the href is a relative path.
+    assert "ramen-cve-20260526T140311000000.csv" in body
+    assert "file://" not in body
+    assert "https://" not in body
+
+
+def test_empty_strip_when_runs_is_empty_does_not_emit_h2(tmp_path):
+    """Defensive: the strip renderer returns "" for an empty list, so the
+    index has no orphan `<h2>Run history</h2>` if every run got filtered out.
+    (Cannot reach via `build_site` — empty runs raises — but the helper is
+    independently callable.)"""
+    from ramen_cve.web.builder import _render_strip
+
+    out = _render_strip([], tmp_path / "site", cap=30)
+    assert out == ""
+
+
+def test_strip_row_includes_cve_count(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11",
+              cve_ids=["CVE-A", "CVE-B", "CVE-C", "CVE-D"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "index.html").read_text("utf-8")
+    # The strip's second column for this run holds the count.
+    assert "<td>4</td>" in body
+
+
+# ---- `build_site` return + byte stability with Slice C additions ---------
+
+
+def test_build_site_returns_run_page_paths_in_dict(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-B"])
+    site_dir = tmp_path / "site"
+    paths = build_site(cache, site_dir)
+    # Index + css + 2 run pages = 4 entries.
+    assert len(paths) == 4
+    assert paths["run/2026-05-25T10-00-00"] == (
+        site_dir / "runs" / "2026-05-25T10-00-00.html"
+    )
+    assert paths["run/2026-05-25T11-00-00"] == (
+        site_dir / "runs" / "2026-05-25T11-00-00.html"
+    )
+
+
+def test_build_site_byte_stable_with_strip_and_run_pages(tmp_path):
+    """The Slice C additions don't break the design-doc §6 byte-stability gate."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-B"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    first_index = (site_dir / "index.html").read_bytes()
+    first_run1 = (site_dir / "runs" / "2026-05-25T10-00-00.html").read_bytes()
+    first_run2 = (site_dir / "runs" / "2026-05-25T11-00-00.html").read_bytes()
+    build_site(cache, site_dir)
+    assert (site_dir / "index.html").read_bytes() == first_index
+    assert (site_dir / "runs" / "2026-05-25T10-00-00.html").read_bytes() == first_run1
+    assert (site_dir / "runs" / "2026-05-25T11-00-00.html").read_bytes() == first_run2
+
+
+def test_run_web_prints_run_page_paths(tmp_path, capsys):
+    """`_run_web`'s path-printing now surfaces per-run page paths too."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T14:03:11", cve_ids=["CVE-X"])
+    rc = _run_web(_site_args(tmp_path / "site"), cache, None)
+    assert rc == 0
+    stdout = capsys.readouterr().out.splitlines()
+    assert any(line.endswith("2026-05-26T14-03-11.html") for line in stdout)
