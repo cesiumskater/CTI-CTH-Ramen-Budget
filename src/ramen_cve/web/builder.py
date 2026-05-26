@@ -8,20 +8,27 @@ Slice C: adds `_discover_runs` (LEFT JOIN against `run_artefacts`),
 per-run summary pages at `<site-dir>/runs/<slug>.html`, and a run-history
 strip on the index. The slug is `ts_iso` with colons replaced by hyphens.
 
-Slice D (this update): per-CVE detail pages at `<site-dir>/cve/<CVE-ID>.html`
-with §§1-3 of design-doc §5.3 — header (CVE id + most-recent bucket +
-linked NVD URL), summary (description + CVSS + EPSS + KEV), and a
-trajectory chart that reuses Task-6's `_render_quadrant_svg_from_points`
-in single-CVE multi-snapshot mode (sparkline fallback below 2 snapshots,
-200-snapshot cap with "+N earlier" footer).
+Slice D: per-CVE detail pages at `<site-dir>/cve/<CVE-ID>.html` with
+§§1-3 of design-doc §5.3 — header (CVE id + most-recent bucket + linked
+NVD URL), summary (description + CVSS + EPSS + KEV), and a trajectory
+chart that reuses Task-6's `_render_quadrant_svg_from_points` in single-
+CVE multi-snapshot mode (sparkline fallback below 2 snapshots, 200-
+snapshot cap with "+N earlier" footer).
 
-Slices E-G extend per `docs/web_ui_design.md`:
-  - E: per-CVE detail page §§4-7 (exploit-status, actors, IOCs, hosts)
+Slice E (this update): per-CVE detail page §§4, 5, 7 — exploit status,
+actor / campaign / malware associations, and affected hosts. All three
+read from the most-recent run's main CVE CSV on disk (snapshot-consistent
+with §§1-3). §6 (IOCs) is deferred to a follow-up that first extends
+`output/stix.py:IOC_CSV_COLUMNS` with a `cve_id` column so per-CVE
+filtering becomes possible.
+
+Slices F-G extend per `docs/web_ui_design.md`:
   - F: "what changed" diff block on per-run pages
   - G: bucket-policy threading + showcase regen extension
 """
 from __future__ import annotations
 
+import csv
 import html
 import logging
 import os.path
@@ -385,24 +392,126 @@ def _render_cve_trajectory(runs_history: list[dict]) -> str:
     return f"<h2>Trajectory</h2>\n{svg}{footer}"
 
 
+_EXPLOIT_STATUS_LABELS: dict[str, str] = {
+    "exploit_db": "Public exploit (ExploitDB)",
+    "nuclei_template": "Nuclei detection template",
+    "github_poc": "GitHub PoC",
+    "none": "None observed",
+    "": "None observed",
+}
+
+
+def _find_run_csv_for_cve(cache: Cache, cve_id: str) -> Path | None:
+    """Path to the most-recent run's main CVE CSV that contains `cve_id`.
+
+    Joins `runs` to `run_artefacts` so pre-Slice-B runs (LEFT JOIN miss)
+    are silently skipped — they have no on-disk sidecar to read. Returns
+    None when no qualifying row exists or the file is missing on disk
+    (best-effort §3.2 contract).
+    """
+    row = cache._conn.execute(
+        "SELECT run_artefacts.disk_stamp, run_artefacts.out_dir "
+        "FROM runs JOIN run_artefacts USING (ts_iso) "
+        "WHERE runs.cve_id = ? "
+        "ORDER BY runs.ts_iso DESC LIMIT 1",
+        (cve_id,),
+    ).fetchone()
+    if not row:
+        return None
+    disk_stamp, out_dir = row
+    csv_path = Path(out_dir) / f"ramen-cve-{disk_stamp}.csv"
+    return csv_path if csv_path.exists() else None
+
+
+def _read_cve_csv_row(csv_path: Path, cve_id: str) -> dict | None:
+    """Return the row dict for `cve_id` from the run's main CVE CSV, or None.
+
+    Defensive: missing/malformed files just return None and the caller
+    renders "—" for §§4-5-7. Never raises — the offline Web UI shouldn't
+    crash because an artefact got mangled.
+    """
+    try:
+        with csv_path.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                if row.get("cve_id") == cve_id:
+                    return row
+    except OSError:
+        return None
+    return None
+
+
+def _render_exploit_status(row: dict | None) -> str:
+    """§4: render the exploit_status column as a humanized one-liner."""
+    if row is None:
+        body = "—"
+    else:
+        raw = (row.get("exploit_status") or "").strip()
+        label = _EXPLOIT_STATUS_LABELS.get(raw, raw or "—")
+        body = html.escape(label, quote=True)
+    return f"<h2>Exploit status</h2>\n<p>{body}</p>\n"
+
+
+def _render_associations_list(joined: str) -> str:
+    """Helper for §5 sub-blocks: semicolon-joined names → `<ul>` or "—"."""
+    names = [n.strip() for n in (joined or "").split(";") if n.strip()]
+    if not names:
+        return "—"
+    items = "".join(
+        f"<li>{html.escape(n, quote=True)}</li>" for n in names
+    )
+    return f"<ul>{items}</ul>"
+
+
+def _render_associations(row: dict | None) -> str:
+    """§5: actor / campaign / malware names from the run's CSV row.
+
+    Names only (semicolon-split) — rich linking (URLs, ATT&CK IDs) is
+    a deliberate v1 omission documented in the design-doc lockdown.
+    """
+    if row is None:
+        actors = campaigns = malware = "—"
+    else:
+        actors = _render_associations_list(row.get("linked_actors", ""))
+        campaigns = _render_associations_list(row.get("linked_campaigns", ""))
+        malware = _render_associations_list(row.get("linked_malware", ""))
+    return (
+        "<h2>Associations</h2>\n"
+        "<dl class=\"cve-associations\">\n"
+        f"<dt>Threat actors</dt><dd>{actors}</dd>\n"
+        f"<dt>Campaigns</dt><dd>{campaigns}</dd>\n"
+        f"<dt>Malware</dt><dd>{malware}</dd>\n"
+        "</dl>\n"
+    )
+
+
+def _render_affected_hosts(row: dict | None) -> str:
+    """§7: affected_hosts from the run's CSV row, semicolon-split into a list."""
+    body = "—" if row is None else _render_associations_list(
+        row.get("affected_hosts", "")
+    )
+    return f"<h2>Affected hosts</h2>\n{body}\n"
+
+
 def _render_cve_page(
     cve_id: str,
     cache: Cache,
     version: str,
     policy: BucketPolicy,
 ) -> str:
-    """Render one `cve/<CVE-ID>.html` per-CVE detail page (§§1-3).
+    """Render one `cve/<CVE-ID>.html` per-CVE detail page (§§1-5, 7).
 
     §1 Header: H1 with the CVE id + most-recent bucket label + linked
     NVD URL. The most-recent bucket comes from the final `runs` row
     (chronologically). Unknown buckets fall back to the raw id.
 
     §2 Summary: delegated to `_render_cve_summary`.
-
     §3 Trajectory: delegated to `_render_cve_trajectory`.
+    §4 Exploit status / §5 Associations / §7 Affected hosts: read the
+    most-recent run's main CVE CSV from disk (snapshot-consistent with
+    §§1-3). Missing artefacts or rows → "—" per the best-effort contract.
 
-    Slice E adds §§4-7 (exploit status, actors, IOCs, hosts) onto the
-    same page below the trajectory chart.
+    §6 (IOCs) is deferred to a follow-up slice that first extends
+    `IOC_CSV_COLUMNS` with a `cve_id` column.
     """
     runs_history = cache.get_runs(cve_id)
     latest_bucket = (
@@ -418,6 +527,9 @@ def _render_cve_page(
     kev_catalog = cache.get_kev_catalog_raw() or {}
     kev_row = kev_catalog.get(cve_id)
 
+    csv_path = _find_run_csv_for_cve(cache, cve_id)
+    csv_row = _read_cve_csv_row(csv_path, cve_id) if csv_path else None
+
     cve_escaped = html.escape(cve_id, quote=True)
     bucket_label_escaped = html.escape(bucket_label, quote=True)
     nvd_url = _NVD_URL_TEMPLATE.format(cve_id=cve_id)
@@ -425,6 +537,9 @@ def _render_cve_page(
 
     summary = _render_cve_summary(nvd, epss, kev_row)
     trajectory = _render_cve_trajectory(runs_history)
+    exploit = _render_exploit_status(csv_row)
+    associations = _render_associations(csv_row)
+    hosts = _render_affected_hosts(csv_row)
 
     return (
         "<!doctype html>\n"
@@ -440,6 +555,9 @@ def _render_cve_page(
         f'<p><a href="{nvd_url_escaped}">{nvd_url_escaped}</a></p>\n'
         f"{summary}"
         f"{trajectory}"
+        f"{exploit}"
+        f"{associations}"
+        f"{hosts}"
         "</body>\n"
         "</html>\n"
     )

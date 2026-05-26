@@ -1293,3 +1293,363 @@ def test_web_trajectory_cap_is_200():
     from ramen_cve.web.builder import WEB_TRAJECTORY_CAP
 
     assert WEB_TRAJECTORY_CAP == 200
+
+
+# ---------------------------------------------------------------------------
+# Slice E — per-CVE detail page §§4-5, 7 (exploit status, associations,
+# affected hosts). All three read from the most-recent run's main CVE CSV
+# on disk. §6 (IOCs) is deferred until `IOC_CSV_COLUMNS` gains a `cve_id`
+# column for per-CVE filtering.
+# ---------------------------------------------------------------------------
+
+
+_CSV_HEADER = (
+    "cve_id,source,first_seen,first_seen_type,cvss_score,cvss_severity,"
+    "epss_score,epss_percentile,kev_listed,kev_due_date,"
+    "kev_known_ransomware_use,kev_vendor_project,kev_product,bucket,"
+    "suggested_action,cwe,attack_techniques,exploit_status,linked_actors,"
+    "linked_campaigns,linked_malware,tlp,admiralty,affected_hosts,"
+    "kill_chain_phase,diamond_capability,diamond_adversary,"
+    "diamond_infrastructure,diamond_victim,nvd_published,enriched_at"
+)
+
+
+def _write_run_csv(out_dir, disk_stamp, rows):
+    """Write a `ramen-cve-<stamp>.csv` with the header + supplied rows.
+
+    `rows` is `[(cve_id, exploit_status, linked_actors, linked_campaigns,
+    linked_malware, affected_hosts), ...]` — only the columns Slice E
+    reads are populated; the rest are blank to mirror real-world thin
+    runs.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"ramen-cve-{disk_stamp}.csv"
+    lines = [_CSV_HEADER]
+    for cve_id, exploit, actors, campaigns, malware, hosts in rows:
+        # Quote any field that contains a comma. csv-correct quoting via
+        # the stdlib would be nicer but the test fixtures stay free of
+        # commas, so this minimal join is enough.
+        lines.append(
+            f"{cve_id},,,,,,,,,,,,,,,,,{exploit},{actors},{campaigns},"
+            f"{malware},,,{hosts},,,,,,,"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _seed_run_with_csv(cache, ts_iso, disk_stamp, out_dir, csv_rows):
+    """Insert runs+run_artefacts pointers + write a real CSV on disk.
+
+    Mirrors what Slice B's `_output(cache=…)` does at the end of a real
+    pipeline run, so the Web UI's reader exercises the live shape.
+    """
+    for cve_id, *_ in csv_rows:
+        cache._conn.execute(
+            "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (cve_id, ts_iso, "patch_now", 9.0, 0.5),
+        )
+    cache._conn.commit()
+    cache.record_artefacts(ts_iso, disk_stamp, str(out_dir))
+    _write_run_csv(out_dir, disk_stamp, csv_rows)
+
+
+# ---- `_find_run_csv_for_cve` ---------------------------------------------
+
+
+def test_find_run_csv_for_cve_returns_none_when_no_artefacts(tmp_path):
+    """A run exists but `run_artefacts` is empty (pre-Slice-B history)."""
+    from ramen_cve.web.builder import _find_run_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    assert _find_run_csv_for_cve(cache, "CVE-X") is None
+
+
+def test_find_run_csv_for_cve_returns_none_when_file_missing(tmp_path):
+    """Artefacts row points at a path that's been deleted from disk."""
+    from ramen_cve.web.builder import _find_run_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    cache.record_artefacts(
+        "2026-05-25T10:00:00", "20260525T100000000000", str(tmp_path / "gone"),
+    )
+    assert _find_run_csv_for_cve(cache, "CVE-X") is None
+
+
+def test_find_run_csv_for_cve_returns_path_when_file_exists(tmp_path):
+    from ramen_cve.web.builder import _find_run_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache,
+        "2026-05-25T10:00:00",
+        "20260525T100000000000",
+        tmp_path / "out",
+        [("CVE-X", "none", "", "", "", "")],
+    )
+    csv_path = _find_run_csv_for_cve(cache, "CVE-X")
+    assert csv_path == tmp_path / "out" / "ramen-cve-20260525T100000000000.csv"
+
+
+def test_find_run_csv_for_cve_picks_most_recent_with_artefacts(tmp_path):
+    """A more-recent run lacking artefacts is skipped — the older artefacted
+    run wins (INNER JOIN semantics)."""
+    from ramen_cve.web.builder import _find_run_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache,
+        "2026-05-25T10:00:00",
+        "20260525T100000000000",
+        tmp_path / "out",
+        [("CVE-X", "exploit_db", "", "", "", "")],
+    )
+    _seed_run(cache, "2026-05-26T10:00:00", cve_ids=["CVE-X"])  # newer, no artefacts
+    csv_path = _find_run_csv_for_cve(cache, "CVE-X")
+    assert csv_path.name == "ramen-cve-20260525T100000000000.csv"
+
+
+# ---- `_read_cve_csv_row` -------------------------------------------------
+
+
+def test_read_cve_csv_row_returns_dict_for_match(tmp_path):
+    from ramen_cve.web.builder import _read_cve_csv_row
+
+    path = _write_run_csv(tmp_path, "x", [("CVE-X", "github_poc", "", "", "", "")])
+    row = _read_cve_csv_row(path, "CVE-X")
+    assert row is not None
+    assert row["exploit_status"] == "github_poc"
+
+
+def test_read_cve_csv_row_returns_none_for_missing_cve(tmp_path):
+    from ramen_cve.web.builder import _read_cve_csv_row
+
+    path = _write_run_csv(tmp_path, "x", [("CVE-A", "none", "", "", "", "")])
+    assert _read_cve_csv_row(path, "CVE-B") is None
+
+
+def test_read_cve_csv_row_returns_none_when_file_missing(tmp_path):
+    from ramen_cve.web.builder import _read_cve_csv_row
+
+    assert _read_cve_csv_row(tmp_path / "nope.csv", "CVE-X") is None
+
+
+# ---- `_render_exploit_status` (§4) --------------------------------------
+
+
+def test_render_exploit_status_dash_when_no_row():
+    from ramen_cve.web.builder import _render_exploit_status
+
+    out = _render_exploit_status(None)
+    assert "<h2>Exploit status</h2>" in out
+    assert "—" in out
+
+
+def test_render_exploit_status_humanizes_each_known_value():
+    from ramen_cve.web.builder import _render_exploit_status
+
+    for raw, label in [
+        ("exploit_db", "Public exploit (ExploitDB)"),
+        ("nuclei_template", "Nuclei detection template"),
+        ("github_poc", "GitHub PoC"),
+        ("none", "None observed"),
+    ]:
+        out = _render_exploit_status({"exploit_status": raw})
+        assert label in out
+
+
+def test_render_exploit_status_empty_string_renders_none_observed():
+    from ramen_cve.web.builder import _render_exploit_status
+
+    out = _render_exploit_status({"exploit_status": ""})
+    assert "None observed" in out
+
+
+def test_render_exploit_status_escapes_unexpected_value():
+    """An unrecognised status falls through escaped — never raw."""
+    from ramen_cve.web.builder import _render_exploit_status
+
+    out = _render_exploit_status({"exploit_status": "<script>"})
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+# ---- `_render_associations_list` helper ----------------------------------
+
+
+def test_render_associations_list_dash_when_empty():
+    from ramen_cve.web.builder import _render_associations_list
+
+    assert _render_associations_list("") == "—"
+    assert _render_associations_list(";  ;  ") == "—"
+
+
+def test_render_associations_list_renders_bulleted_list():
+    from ramen_cve.web.builder import _render_associations_list
+
+    out = _render_associations_list("APT41;Aquatic Panda")
+    assert "<ul>" in out
+    assert "<li>APT41</li>" in out
+    assert "<li>Aquatic Panda</li>" in out
+
+
+def test_render_associations_list_escapes_each_name():
+    """A semicolon-injected `<script>` must be defanged item-by-item."""
+    from ramen_cve.web.builder import _render_associations_list
+
+    out = _render_associations_list("Hi;<script>alert(1)</script>")
+    assert "<script>" not in out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+
+
+# ---- `_render_associations` (§5) ----------------------------------------
+
+
+def test_render_associations_dash_everywhere_when_no_row():
+    from ramen_cve.web.builder import _render_associations
+
+    out = _render_associations(None)
+    assert "<h2>Associations</h2>" in out
+    assert "<dt>Threat actors</dt><dd>—</dd>" in out
+    assert "<dt>Campaigns</dt><dd>—</dd>" in out
+    assert "<dt>Malware</dt><dd>—</dd>" in out
+
+
+def test_render_associations_full_row():
+    from ramen_cve.web.builder import _render_associations
+
+    out = _render_associations({
+        "linked_actors": "APT41;Aquatic Panda",
+        "linked_campaigns": "Operation CuckooBees",
+        "linked_malware": "ShadowPad;PlugX",
+    })
+    assert "<li>APT41</li>" in out
+    assert "<li>Aquatic Panda</li>" in out
+    assert "<li>Operation CuckooBees</li>" in out
+    assert "<li>ShadowPad</li>" in out
+    assert "<li>PlugX</li>" in out
+
+
+def test_render_associations_mixed_populated_and_empty():
+    """Actors populated, campaigns + malware blank → exactly one list, two dashes."""
+    from ramen_cve.web.builder import _render_associations
+
+    out = _render_associations({
+        "linked_actors": "APT41",
+        "linked_campaigns": "",
+        "linked_malware": "",
+    })
+    assert "<li>APT41</li>" in out
+    # Two of three sub-blocks remain "—".
+    assert out.count("<dd>—</dd>") == 2
+
+
+# ---- `_render_affected_hosts` (§7) --------------------------------------
+
+
+def test_render_affected_hosts_dash_when_no_row():
+    from ramen_cve.web.builder import _render_affected_hosts
+
+    out = _render_affected_hosts(None)
+    assert "<h2>Affected hosts</h2>" in out
+    assert "—" in out
+
+
+def test_render_affected_hosts_renders_list():
+    from ramen_cve.web.builder import _render_affected_hosts
+
+    out = _render_affected_hosts({
+        "affected_hosts": "web-01.example;db-prod-04.example",
+    })
+    assert "<li>web-01.example</li>" in out
+    assert "<li>db-prod-04.example</li>" in out
+
+
+def test_render_affected_hosts_empty_column_renders_dash():
+    from ramen_cve.web.builder import _render_affected_hosts
+
+    out = _render_affected_hosts({"affected_hosts": ""})
+    assert "<h2>Affected hosts</h2>" in out
+    assert "—" in out
+
+
+# ---- End-to-end per-CVE page integration ---------------------------------
+
+
+def test_cve_page_renders_all_three_section_headers(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "<h2>Exploit status</h2>" in body
+    assert "<h2>Associations</h2>" in body
+    assert "<h2>Affected hosts</h2>" in body
+
+
+def test_cve_page_section_4_5_7_dash_when_no_csv_artefact(tmp_path):
+    """Slice C-style fixtures (no on-disk CSV) → all three sections "—"."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # §4: "—". §5: three dashes in the dl. §7: "—".
+    assert body.count("<dd>—</dd>") >= 3  # §5 sub-blocks
+
+
+def test_cve_page_renders_sections_from_csv_when_present(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache,
+        "2026-05-25T10:00:00",
+        "20260525T100000000000",
+        tmp_path / "out",
+        [("CVE-X", "exploit_db", "APT41", "Operation CuckooBees", "ShadowPad",
+          "web-01.example")],
+    )
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "Public exploit (ExploitDB)" in body
+    assert "<li>APT41</li>" in body
+    assert "<li>Operation CuckooBees</li>" in body
+    assert "<li>ShadowPad</li>" in body
+    assert "<li>web-01.example</li>" in body
+
+
+def test_cve_page_byte_stable_with_full_sections(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache,
+        "2026-05-25T10:00:00",
+        "20260525T100000000000",
+        tmp_path / "out",
+        [("CVE-X", "nuclei_template", "APT41", "", "PlugX",
+          "web-01;web-02")],
+    )
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    first = (site_dir / "cve" / "CVE-X.html").read_bytes()
+    build_site(cache, site_dir)
+    assert (site_dir / "cve" / "CVE-X.html").read_bytes() == first
+
+
+def test_cve_page_picks_most_recent_artefacted_run(tmp_path):
+    """Newer run with no artefacts is skipped; older run with CSV wins."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache,
+        "2026-05-25T10:00:00",
+        "20260525T100000000000",
+        tmp_path / "out",
+        [("CVE-X", "exploit_db", "APT41", "", "", "")],
+    )
+    _seed_run(cache, "2026-05-26T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # The older run's exploit status flows through, not "—".
+    assert "Public exploit (ExploitDB)" in body

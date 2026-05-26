@@ -195,8 +195,63 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       every field populated and an HTML-escaped description, and a
       trajectory SVG with 3 circles where the last is `cve-latest`
       with `stroke-width="2"` + `r="8"`.
-- [ ] **Slice E — Per-CVE detail page §§4-7** (exploit-status,
-      associations, IOCs, affected hosts — the "RICH" content).
+- [x] **Slice E — Per-CVE detail page §§4-5, 7** (exploit-status,
+      associations, affected hosts). **§6 IOCs explicitly deferred**
+      (filed below as **Slice E.5**) — the existing IOC CSV
+      (`<stamp>-iocs.csv`) has no per-CVE column so per-CVE filtering
+      isn't possible without first extending
+      `output/stix.py:IOC_CSV_COLUMNS`. Slice E hides the gap by
+      shipping §§4-5-7 only; Slice E.5 will do the schema bump + the
+      §6 render together. New helpers in `web/builder.py`:
+      `_EXPLOIT_STATUS_LABELS` (the four exploit-status enum strings
+      → humanized labels; empty string aliased to "None observed");
+      `_find_run_csv_for_cve(cache, cve_id)` — `SELECT ... FROM runs
+      JOIN run_artefacts USING (ts_iso) WHERE runs.cve_id = ? ORDER BY
+      runs.ts_iso DESC LIMIT 1` (INNER JOIN so pre-Slice-B runs with
+      no artefacts are silently skipped; returns Path-or-None);
+      `_read_cve_csv_row(csv_path, cve_id)` — `csv.DictReader` scan,
+      returns dict-or-None, swallows OSError so a deleted/malformed
+      CSV degrades to "—" rather than crashing the build;
+      `_render_exploit_status(row)` (§4) — single H2 + p with the
+      humanized label, HTML-escapes unknown values;
+      `_render_associations_list(joined)` — semicolon-split into a
+      `<ul>` of HTML-escaped `<li>` items, "—" when empty (defends
+      against ";;;"-only input by stripping);
+      `_render_associations(row)` (§5) — `<dl>` with three subblocks
+      (Threat actors / Campaigns / Malware) each independently "—"-able;
+      `_render_affected_hosts(row)` (§7) — `<ul>` of hosts or "—".
+      `_render_cve_page` now calls `_find_run_csv_for_cve` +
+      `_read_cve_csv_row` once per CVE; missing row → all three new
+      sections render "—". +25 tests in `tests/test_web_ui.py`
+      covering: `_find_run_csv_for_cve` (no artefacts row, file
+      missing on disk, file exists, most-recent-with-artefacts wins
+      when newer run lacks them); `_read_cve_csv_row` (match, missing
+      CVE, missing file); `_render_exploit_status` (dash; each of the
+      four enum values; empty-string aliased; HTML-escape on unknown);
+      `_render_associations_list` (dash on empty, dash on ";;;"-only,
+      bulleted list, per-item escape); `_render_associations` (full-
+      dash when row is None, all-populated, mixed populated/empty
+      counts dashes correctly); `_render_affected_hosts` (dash, list,
+      empty column); per-CVE page integration (all three H2s present;
+      "—" cascade when no CSV; full rendering when CSV is on disk;
+      byte-stability across two builds; most-recent-artefacted-run
+      wins over a newer artefactless one). Verification: 725 passed
+      (was 700 + 25 new), ruff clean, golden CSV+MD byte-oracle byte-
+      identical to anchor, `regen --check` rc=0, manual smoke against
+      a seeded run with a real `CSV_COLUMNS`-shape CSV on disk renders
+      §4 "Public exploit (ExploitDB)", §5 three bulleted lists with
+      HTML-escaped names (including a `<script>X</script>` payload
+      defanged), and §7 a bulleted list of two hosts.
+- [ ] **Slice E.5 — IOC schema bump + §6 render** (deferred from E).
+      Add `cve_id` to `output/stix.py:IOC_CSV_COLUMNS` + the writer
+      row tuple (IocRecord already has `cve_id: str` — just plumb it
+      through). Round-trip test reads `IOC_CSV_COLUMNS` dynamically so
+      it auto-adapts; no golden IOC CSV in `examples/` so the byte
+      oracle is unaffected. Then add `_read_iocs_for_cve(out_dir,
+      disk_stamp, cve_id)` + `_render_iocs(rows)` (§6) on the per-CVE
+      page — cap at 50 rows, ordered by `first_seen` desc, defang IOC
+      values via the existing helper so the page can't be weaponised
+      against analyst clipboards.
 - [ ] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /
       reclassified since previous run).
 - [ ] **Slice G — Bucket-policy threading** (`--config NAME` →
