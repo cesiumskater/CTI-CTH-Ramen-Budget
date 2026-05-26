@@ -867,7 +867,7 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs, cache=cache)
     _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
 
@@ -1015,7 +1015,7 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs, cache=cache)
     _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
     return 0
@@ -1129,7 +1129,7 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         "cvss_threshold": args.cvss_threshold,
         "epss_threshold": args.epss_threshold,
     }
-    _output(enriched, args, metadata)
+    _output(enriched, args, metadata, cache=cache)
     return 0
 
 
@@ -1201,7 +1201,7 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
     _maybe_enrich_iocs(args, iocs, cache)
     iocs = _decay_and_filter_iocs(args, iocs)
     enriched = _maybe_filter_by_sector(args, enriched)
-    output_paths = _output(enriched, args, metadata, iocs=iocs)
+    output_paths = _output(enriched, args, metadata, iocs=iocs, cache=cache)
     _maybe_digest(args, enriched, output_paths)
     _maybe_dispatch(args, enriched)
     return 0

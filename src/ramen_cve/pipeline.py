@@ -208,13 +208,15 @@ def _output(
     args: argparse.Namespace,
     metadata: dict,
     iocs: list[IocRecord] | None = None,
+    cache: Cache | None = None,
 ) -> dict[str, Path | None]:
     """Write CSV and/or Markdown output based on --format flag.
 
     Returns a dict mapping output kind ('csv', 'iocs_csv', 'md', 'stix',
-    'sigma_dir', 'yara_dir') to the Path that was written, or None for the
-    kinds that --format didn't ask for. Callers use that dict to attach the
-    rendered files in downstream pushes (see _maybe_digest).
+    'sigma_dir', 'yara_dir', 'html') to the Path that was written, or
+    None for the kinds that --format didn't ask for. Callers use that
+    dict to attach the rendered files in downstream pushes (see
+    _maybe_digest).
 
     When `iocs` is non-empty and --format includes csv, an additional
     `<basename>-iocs.csv` file is written next to the main CVE CSV. The
@@ -222,12 +224,24 @@ def _output(
 
     TLP:RED records are stripped from the output unless --allow-tlp-red was
     passed; the count of stripped records is logged at WARNING.
+
+    `cache` (Task 8 Slice B): when provided AND at least one file was
+    written, stamps a row into `run_artefacts(ts_iso, disk_stamp,
+    out_dir)` so the Web UI can join the never-purged `runs` history to
+    the actual on-disk artefacts. `cache=None` is the back-compat path
+    used by tests that monkeypatch `_output` (no cache reach-through).
     """
     # Microsecond resolution makes single-process collisions essentially
     # impossible; the -N suffix loop in _unique_output_path covers
     # cross-process collisions and any clock that lacks sub-second
-    # resolution.
-    ts = _utcnow().strftime("%Y%m%dT%H%M%S%f")
+    # resolution. The same _utcnow() instant supplies both the disk
+    # stamp (`ts`) and the second-precision `ts_iso` used by Slice B's
+    # run_artefacts row — so the JOIN against `runs.ts_iso` works
+    # literally (modulo the rare second-boundary cross, which the LEFT
+    # JOIN handles by rendering an empty artefact link per design-doc).
+    _now = _utcnow()
+    ts = _now.strftime("%Y%m%dT%H%M%S%f")
+    ts_iso = _now.isoformat(timespec="seconds")
     # Resolve --out-dir = None / '' / '.' to the actual cwd so the on-disk
     # path is unambiguous (no leading-period surprises on Windows).
     out_dir: Path = _resolve_out_dir(getattr(args, "out_dir", None))
@@ -343,6 +357,15 @@ def _output(
         write_quadrant_html(enriched, html_path, metadata)
         print(str(html_path))
         paths["html"] = html_path
+
+    # Slice B: stamp the run_artefacts row only if a cache is plumbed
+    # through AND we actually wrote at least one file. A run that
+    # produces no artefacts (e.g., all records TLP:RED-stripped under
+    # --format csv, or a format whose writer skipped — see Sigma /
+    # YARA "no eligible records" branches) is left out so the Web UI's
+    # discovery LEFT JOIN doesn't surface ghost entries.
+    if cache is not None and any(p is not None for p in paths.values()):
+        cache.record_artefacts(ts_iso, ts, str(out_dir))
 
     return paths
 

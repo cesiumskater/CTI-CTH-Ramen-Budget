@@ -48,11 +48,39 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       byte-oracle byte-identical to anchor, `regen --check` rc=0,
       manual smoke against a populated cache produces a valid
       `index.html` (157 runs found).
-- [ ] **Slice B — `run_artefacts` SQLite table + `pipeline._output`
+- [x] **Slice B — `run_artefacts` SQLite table + `pipeline._output`
       wiring** (design-doc §D9 + §3.2). New table
-      `(ts_iso PK, disk_stamp, out_dir)`; `Cache.record_artefacts`
-      writer; `pipeline._output` stamps a row after every successful
-      write.
+      `run_artefacts(ts_iso TEXT PRIMARY KEY, disk_stamp TEXT NOT NULL,
+      out_dir TEXT NOT NULL)` added to `cache._SCHEMA` via
+      `CREATE TABLE IF NOT EXISTS` (idempotent on existing cache
+      files — verified by `test_run_artefacts_schema_upgrade_idempotent_on_existing_cache`).
+      New `Cache.record_artefacts(ts_iso, disk_stamp, out_dir)` writer
+      uses `INSERT OR IGNORE` (design-doc §D25 — silent skip on
+      same-second collision; the earlier row wins). New
+      `Cache.get_artefacts(ts_iso)` reader for the Slice C JOIN.
+      `pipeline._output` gains an optional `cache: Cache | None = None`
+      kwarg (§D24 — back-compat for tests that monkeypatch `_output`).
+      A single `_utcnow()` call at the top supplies both the disk_stamp
+      (microsecond) and the second-precision `ts_iso` so the JOIN
+      against `runs.ts_iso` is literal-equal in the same-second case.
+      The `record_artefacts` call is **conditional** (§D26): fires only
+      when `cache is not None` AND at least one path in the returned
+      dict is non-None. A `--format sigma` run with no kev_override /
+      patch_now CVEs (sigma stub writer returns empty → all paths None)
+      correctly skips the row. Four `_output(...)` call sites in
+      `cli.py` thread `cache=cache`. +10 tests in
+      `tests/test_web_ui.py` covering: `record_artefacts` insert;
+      `get_artefacts` returns None when absent; `INSERT OR IGNORE`
+      collision behaviour (earlier row preserved); schema upgrade
+      idempotent across two `Cache(...)` opens; `_output(cache=None)`
+      back-compat path; `_output(cache=cache)` writes the row; the
+      "no files written → no row" gate; `ts_iso` format matches
+      `Cache.record_run`'s naive ISO seconds via a frozen-`_utcnow`
+      determinism test; single row per `_output` invocation regardless
+      of `--format all` multi-file output; `out_dir` stored absolute.
+      Verification: 640 passed (was 630 + 10 new), ruff clean, golden
+      CSV+MD byte-oracle byte-identical to anchor, `regen --check`
+      rc=0.
 - [ ] **Slice C — `_discover_runs` + run-history strip + per-run
       summary page** (design-doc §5.1, §5.2 minus diff block).
 - [ ] **Slice D — Per-CVE detail page §§1-3** (header, NVD summary,
