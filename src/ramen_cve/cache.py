@@ -67,6 +67,11 @@ class Cache:
             epss_score  REAL,
             PRIMARY KEY (cve_id, ts_iso)
         );
+        CREATE TABLE IF NOT EXISTS run_artefacts (
+            ts_iso      TEXT PRIMARY KEY,
+            disk_stamp  TEXT NOT NULL,
+            out_dir     TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS audit_log (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_iso          TEXT NOT NULL,
@@ -221,6 +226,41 @@ class Cache:
             "SELECT DISTINCT ts_iso FROM runs ORDER BY ts_iso DESC"
         ).fetchall()
         return [r[0] for r in rows]
+
+    def record_artefacts(self, ts_iso: str, disk_stamp: str, out_dir: str) -> None:
+        """Record the on-disk artefacts produced by one pipeline invocation.
+
+        `ts_iso` joins to `runs.ts_iso` (second-precision ISO from
+        `_record_runs`). `disk_stamp` is the microsecond stamp embedded
+        in artefact filenames by `pipeline._output`. `out_dir` is the
+        absolute directory those files were written to.
+
+        Uses `INSERT OR IGNORE` (design-doc §D25): a second invocation
+        sharing a second with an earlier one silently keeps the earlier
+        row. Realistic only under daemon mode at sub-second intervals,
+        which is not a supported configuration; the Web UI's LEFT JOIN
+        against `runs` still works either way.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO run_artefacts (ts_iso, disk_stamp, out_dir) "
+            "VALUES (?, ?, ?)",
+            (ts_iso, disk_stamp, out_dir),
+        )
+        self._conn.commit()
+
+    def get_artefacts(self, ts_iso: str) -> dict | None:
+        """Return the `run_artefacts` row for `ts_iso`, or None if absent.
+
+        Used by the Web UI's discovery step to attach disk-artefact
+        links to each run from the canonical `runs.ts_iso` set.
+        """
+        row = self._conn.execute(
+            "SELECT ts_iso, disk_stamp, out_dir FROM run_artefacts WHERE ts_iso = ?",
+            (ts_iso,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"ts_iso": row[0], "disk_stamp": row[1], "out_dir": row[2]}
 
     def get_runs(self, cve_id: str) -> list[dict]:
         """Return every recorded run for `cve_id` in chronological order."""

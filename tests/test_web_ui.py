@@ -274,3 +274,191 @@ def test_built_index_has_no_script_tag(tmp_path):
     build_site(cache, site_dir)
     body = (site_dir / "index.html").read_text(encoding="utf-8")
     assert "<script" not in body
+
+
+# ---------------------------------------------------------------------------
+# Slice B — `run_artefacts` table + `Cache.record_artefacts` writer
+# + `pipeline._output(cache=...)` integration.
+# ---------------------------------------------------------------------------
+
+
+def test_record_artefacts_inserts_a_row(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    cache.record_artefacts(
+        "2026-05-25T13:25:01", "20260525T132501478665", "/tmp/out"
+    )
+    row = cache.get_artefacts("2026-05-25T13:25:01")
+    assert row == {
+        "ts_iso": "2026-05-25T13:25:01",
+        "disk_stamp": "20260525T132501478665",
+        "out_dir": "/tmp/out",
+    }
+
+
+def test_get_artefacts_returns_none_when_absent(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    assert cache.get_artefacts("never-recorded") is None
+
+
+def test_record_artefacts_insert_or_ignore_skips_collision(tmp_path):
+    """Second insert with same ts_iso must NOT overwrite the first (design-doc §D25)."""
+    cache = Cache(tmp_path / ".cache.db")
+    cache.record_artefacts("2026-05-25T13:25:01", "first-stamp", "/tmp/A")
+    cache.record_artefacts("2026-05-25T13:25:01", "second-stamp", "/tmp/B")
+    row = cache.get_artefacts("2026-05-25T13:25:01")
+    assert row["disk_stamp"] == "first-stamp"
+    assert row["out_dir"] == "/tmp/A"
+
+
+def test_run_artefacts_schema_upgrade_idempotent_on_existing_cache(tmp_path):
+    """Opening an existing cache file twice keeps the run_artefacts table intact."""
+    db = tmp_path / ".cache.db"
+    cache1 = Cache(db)
+    cache1.record_artefacts("2026-05-25T13:25:01", "stamp", "/tmp/out")
+    # Drop the connection; re-open. CREATE TABLE IF NOT EXISTS must
+    # leave the existing row intact rather than recreating empty.
+    cache1._conn.close()
+    cache2 = Cache(db)
+    row = cache2.get_artefacts("2026-05-25T13:25:01")
+    assert row is not None
+    assert row["disk_stamp"] == "stamp"
+
+
+def _output_args(tmp_path, fmt="csv"):
+    """Minimal argparse.Namespace accepted by pipeline._output."""
+    import argparse
+
+    return argparse.Namespace(
+        format=fmt, out_dir=tmp_path, basename="run-x",
+        allow_tlp_red=False,
+    )
+
+
+def _patch_record(rec_cls, **fields):
+    """Helper to build an EnrichedCve with cve_id 'CVE-2024-0001' by default."""
+    from datetime import date
+
+    defaults = {
+        "cve_id": "CVE-2024-0001", "source": "test",
+        "first_seen": date(2024, 1, 1), "first_seen_type": "feed_pub",
+        "cvss_score": 9.0, "epss_score": 0.5, "bucket": "patch_now",
+    }
+    defaults.update(fields)
+    return rec_cls(**defaults)
+
+
+def test_output_no_cache_kwarg_skips_artefacts_write(tmp_path):
+    """Back-compat path: cache=None must not touch any table."""
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    rec = _patch_record(EnrichedCve)
+    paths = _output([rec], _output_args(tmp_path), {"version": "0.1"})
+    # Sanity: file was written.
+    assert paths["csv"] is not None
+    # The point of the test: no exception (no cache provided), no row
+    # could possibly have been written. Nothing to assert beyond clean
+    # completion.
+
+
+def test_output_with_cache_writes_run_artefacts_row(tmp_path):
+    """When cache is plumbed through, _output stamps an artefacts row."""
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    cache = Cache(tmp_path / ".cache.db")
+    rec = _patch_record(EnrichedCve)
+    paths = _output([rec], _output_args(tmp_path), {"version": "0.1"}, cache=cache)
+    assert paths["csv"] is not None
+
+    rows = cache._conn.execute(
+        "SELECT ts_iso, disk_stamp, out_dir FROM run_artefacts"
+    ).fetchall()
+    assert len(rows) == 1
+    ts_iso, disk_stamp, out_dir = rows[0]
+    assert ts_iso  # naive ISO seconds, format "YYYY-MM-DDTHH:MM:SS"
+    assert "T" in ts_iso and ts_iso.count(":") == 2
+    assert "+" not in ts_iso  # naive, per design-doc §D27
+    assert len(disk_stamp) == 21  # YYYYMMDDTHHMMSS + 6 microseconds
+    assert disk_stamp.startswith(ts_iso[:4])  # year prefix matches
+    assert str(tmp_path) in out_dir
+
+
+def test_output_with_cache_skips_artefacts_row_when_no_files_written(tmp_path):
+    """When TLP:RED stripping leaves no records and no format produces a file,
+    _output must NOT stamp a row (design-doc §D26: conditional record)."""
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    cache = Cache(tmp_path / ".cache.db")
+    # Sigma-only format + a record with no kev_override / patch_now ↔
+    # write_sigma_stubs returns empty → paths["sigma_dir"] stays None.
+    rec = _patch_record(EnrichedCve, bucket="deprioritize")
+    paths = _output([rec], _output_args(tmp_path, fmt="sigma"), {"version": "0.1"},
+                    cache=cache)
+    assert all(p is None for p in paths.values())
+    row_count = cache._conn.execute(
+        "SELECT COUNT(*) FROM run_artefacts"
+    ).fetchone()[0]
+    assert row_count == 0
+
+
+def test_output_ts_iso_format_matches_record_run(tmp_path):
+    """Slice B's run_artefacts.ts_iso must literal-equal what Cache.record_run
+    writes today, so the Web UI's LEFT JOIN finds the row (design-doc §D27)."""
+    from datetime import datetime
+    from unittest.mock import patch
+
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    cache = Cache(tmp_path / ".cache.db")
+    rec = _patch_record(EnrichedCve)
+
+    # Freeze the clock to a fixed naive UTC instant so both writers
+    # produce identical second-precision strings.
+    frozen = datetime(2026, 5, 25, 13, 25, 1, 478665)
+    with patch("ramen_cve.models._utcnow", return_value=frozen), \
+         patch("ramen_cve.cache._utcnow", return_value=frozen), \
+         patch("ramen_cve.pipeline._utcnow", return_value=frozen):
+        cache.record_run("CVE-2024-0001", "patch_now", 9.0, 0.5)
+        _output([rec], _output_args(tmp_path), {"version": "0.1"}, cache=cache)
+
+    runs_ts = cache._conn.execute("SELECT DISTINCT ts_iso FROM runs").fetchone()[0]
+    artefacts_ts = cache._conn.execute(
+        "SELECT ts_iso FROM run_artefacts"
+    ).fetchone()[0]
+    assert runs_ts == artefacts_ts == "2026-05-25T13:25:01"
+
+
+def test_output_stamps_one_row_per_invocation(tmp_path):
+    """Multi-file format (csv+md+stix+sigma+yara+html via --format all) →
+    still exactly one run_artefacts row per _output call."""
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    cache = Cache(tmp_path / ".cache.db")
+    rec = _patch_record(EnrichedCve, bucket="kev_override", kev_listed=True)
+    args = _output_args(tmp_path, fmt="all")
+    _output([rec], args, {"version": "0.1"}, cache=cache)
+    row_count = cache._conn.execute(
+        "SELECT COUNT(*) FROM run_artefacts"
+    ).fetchone()[0]
+    assert row_count == 1
+
+
+def test_output_out_dir_stored_absolute(tmp_path):
+    """Stored `out_dir` should be the resolved absolute path so the Web UI
+    can locate artefacts regardless of cwd at render time."""
+    from ramen_cve.models import EnrichedCve
+    from ramen_cve.pipeline import _output
+
+    cache = Cache(tmp_path / ".cache.db")
+    rec = _patch_record(EnrichedCve)
+    _output([rec], _output_args(tmp_path), {"version": "0.1"}, cache=cache)
+    row = cache._conn.execute(
+        "SELECT out_dir FROM run_artefacts"
+    ).fetchone()
+    # _resolve_out_dir on an explicit absolute tmp_path returns it
+    # unchanged; the value stamped should equal tmp_path verbatim.
+    assert row[0] == str(tmp_path)
