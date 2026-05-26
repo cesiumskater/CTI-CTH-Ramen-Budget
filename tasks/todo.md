@@ -242,16 +242,58 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       §4 "Public exploit (ExploitDB)", §5 three bulleted lists with
       HTML-escaped names (including a `<script>X</script>` payload
       defanged), and §7 a bulleted list of two hosts.
-- [ ] **Slice E.5 — IOC schema bump + §6 render** (deferred from E).
-      Add `cve_id` to `output/stix.py:IOC_CSV_COLUMNS` + the writer
-      row tuple (IocRecord already has `cve_id: str` — just plumb it
-      through). Round-trip test reads `IOC_CSV_COLUMNS` dynamically so
-      it auto-adapts; no golden IOC CSV in `examples/` so the byte
-      oracle is unaffected. Then add `_read_iocs_for_cve(out_dir,
-      disk_stamp, cve_id)` + `_render_iocs(rows)` (§6) on the per-CVE
-      page — cap at 50 rows, ordered by `first_seen` desc, defang IOC
-      values via the existing helper so the page can't be weaponised
-      against analyst clipboards.
+- [x] **Slice E.5 — IOC schema bump + §6 render**. Plumbed CVE
+      attribution through the IOC pipeline (the Slice-E survey had it
+      wrong: IocRecord didn't actually have a cve_id field; the real
+      fix is a multi-file thread, not a one-line column append). New
+      field: `IocRecord.cve_ids: list[str]` (plural, because one feed-
+      item text can mention multiple CVEs); default empty list (back-
+      compat with existing call sites). `extract_iocs` gains a
+      `cve_ids: list[str] | None = None` kwarg that the emit-closure
+      stamps onto every IOC extracted from the text, with caller-side
+      deduplication preserving order. `cli.py` feed loop captures
+      `extract_cves(...)` once, threads
+      `cve_ids=[r.cve_id for r in item_cves]` into `extract_iocs(...)`
+      so IOCs from the same blob get all co-occurring CVE ids.
+      `_dedupe_iocs` unions cve_ids across feed-item observations of
+      the same (type, value) (order-preserving union). `IOC_CSV_COLUMNS`
+      gains a `cve_ids` column at the tail; `write_iocs_csv` serializes
+      as `";".join(rec.cve_ids)`. New Web UI helpers in
+      `web/builder.py`: `WEB_IOC_CAP = 50`,
+      `_find_iocs_csv_for_cve(cache, cve_id)` (same join semantics as
+      `_find_run_csv_for_cve` but composes the `-iocs.csv` sidecar
+      path), `_read_iocs_for_cve(iocs_path, cve_id, cap)` (DictReader
+      scan, splits row `cve_ids` on `;` and exact-matches `cve_id` so
+      `CVE-A` doesn't match `CVE-AB`, sorts by `first_seen` DESC,
+      caps at `cap`, swallows OSError), `_render_iocs(rows, total)`
+      (`<table>` with Type / Value / Source / First seen / Confidence
+      columns; every cell HTML-escaped; **no `<a href>` wrappers** per
+      the design's "must not be one-click clickable" contract; "+N more
+      IOCs not shown" footer when `total > len(rows)`).
+      `_render_cve_page` reads `_find_iocs_csv_for_cve` +
+      `_read_iocs_for_cve` once per CVE (with `cap=10_000` to count
+      totals, then slices to `WEB_IOC_CAP` for display); §6 slots
+      between §5 (associations) and §7 (affected hosts) per the
+      design ordering. +26 tests in `tests/test_web_ui.py` covering:
+      IocRecord cve_ids default empty; extract_iocs propagates +
+      dedupes input cve_ids; dedupe unions across feed items + dedupes
+      within union; IOC_CSV_COLUMNS has cve_ids; write_iocs_csv
+      serializes semicolon-joined + empty-string when list is empty;
+      `_find_iocs_csv_for_cve` (no artefacts, no sidecar, file exists);
+      `_read_iocs_for_cve` (substring filter, exact-match defends
+      against CVE-A vs CVE-AB, sort DESC, cap at 50, None-path returns
+      empty); `_render_iocs` (dash on empty, table+escape, no
+      `<a href>`, truncation footer, no footer when not truncated);
+      per-CVE page integration (dash when no sidecar, table renders
+      with CVE-Y IOC excluded, "+25 more" when 75 IOCs in sidecar,
+      byte-stability); `WEB_IOC_CAP == 50`. Verification: 751 passed
+      (was 725 + 26 new), ruff clean (one auto-fix pass for import
+      sorting), golden CSV+MD byte-oracle byte-identical (IOC CSV
+      isn't in `examples/`), `regen --check` rc=0, manual smoke
+      against a 3-IOC sidecar (2 linked to CVE-2021-44228, 1 to
+      CVE-2024-99999) renders 2 rows on the per-CVE page sorted by
+      `first_seen` DESC with the unrelated IOC correctly filtered out
+      and no clickable links anywhere.
 - [ ] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /
       reclassified since previous run).
 - [ ] **Slice G — Bucket-policy threading** (`--config NAME` →

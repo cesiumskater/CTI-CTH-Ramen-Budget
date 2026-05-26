@@ -15,12 +15,19 @@ chart that reuses Task-6's `_render_quadrant_svg_from_points` in single-
 CVE multi-snapshot mode (sparkline fallback below 2 snapshots, 200-
 snapshot cap with "+N earlier" footer).
 
-Slice E (this update): per-CVE detail page §§4, 5, 7 — exploit status,
-actor / campaign / malware associations, and affected hosts. All three
-read from the most-recent run's main CVE CSV on disk (snapshot-consistent
-with §§1-3). §6 (IOCs) is deferred to a follow-up that first extends
-`output/stix.py:IOC_CSV_COLUMNS` with a `cve_id` column so per-CVE
-filtering becomes possible.
+Slice E: per-CVE detail page §§4, 5, 7 — exploit status, associations,
+affected hosts. All three read from the most-recent run's main CVE CSV
+on disk (snapshot-consistent with §§1-3).
+
+Slice E.5 (this update): per-CVE detail page §6 — IOCs. Threads CVE
+attribution through the IOC pipeline (extract → dedupe → CSV) by adding
+`IocRecord.cve_ids: list[str]` (`extract.py` populates from co-occurring
+CVEs in the same feed-item text; `_dedupe_iocs` unions on merge;
+`write_iocs_csv` serializes as a semicolon-joined `cve_ids` column). The
+Web UI's `_render_iocs` reads the sidecar, filters where `cve_id` is in
+the row's `cve_ids` list, caps at 50, sorts by `first_seen` DESC, and
+renders an HTML-escaped `<table>` (no clickable `<a>` tags — a malicious
+URL must not be one click away on an analyst's machine).
 
 Slices F-G extend per `docs/web_ui_design.md`:
   - F: "what changed" diff block on per-run pages
@@ -46,6 +53,7 @@ _log = logging.getLogger(__name__)
 
 WEB_DEFAULT_MAX_RUNS_ON_HOME = 30
 WEB_TRAJECTORY_CAP = 200
+WEB_IOC_CAP = 50
 _NVD_URL_TEMPLATE = "https://nvd.nist.gov/vuln/detail/{cve_id}"
 
 # The 6 artefact kinds we link to from per-run pages + the index strip.
@@ -492,13 +500,104 @@ def _render_affected_hosts(row: dict | None) -> str:
     return f"<h2>Affected hosts</h2>\n{body}\n"
 
 
+def _find_iocs_csv_for_cve(cache: Cache, cve_id: str) -> Path | None:
+    """Path to the most-recent run's IOC sidecar CSV for `cve_id`, or None.
+
+    Mirrors `_find_run_csv_for_cve` but for the `-iocs.csv` sidecar. Returns
+    None when the join misses, the file is absent, or the run wasn't the
+    one that produced an IOC artefact (sidecar may legitimately be absent
+    for some runs).
+    """
+    row = cache._conn.execute(
+        "SELECT run_artefacts.disk_stamp, run_artefacts.out_dir "
+        "FROM runs JOIN run_artefacts USING (ts_iso) "
+        "WHERE runs.cve_id = ? "
+        "ORDER BY runs.ts_iso DESC LIMIT 1",
+        (cve_id,),
+    ).fetchone()
+    if not row:
+        return None
+    disk_stamp, out_dir = row
+    iocs_path = Path(out_dir) / f"ramen-cve-{disk_stamp}-iocs.csv"
+    return iocs_path if iocs_path.exists() else None
+
+
+def _read_iocs_for_cve(
+    iocs_path: Path | None,
+    cve_id: str,
+    cap: int = WEB_IOC_CAP,
+) -> list[dict]:
+    """IOC rows from the sidecar whose `cve_ids` column lists `cve_id`.
+
+    Empty list when the file is missing, malformed, or no row matches.
+    Rows are sorted by `first_seen` DESC (most-recent first); ties broken
+    by insertion order. Caps at `cap` rows (design-doc §5.3 §6).
+    """
+    if iocs_path is None:
+        return []
+    matches: list[dict] = []
+    try:
+        with iocs_path.open(newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                linked = [c.strip() for c in (row.get("cve_ids") or "").split(";")]
+                if cve_id in linked:
+                    matches.append(row)
+    except OSError:
+        return []
+    matches.sort(key=lambda r: r.get("first_seen") or "", reverse=True)
+    return matches[:cap]
+
+
+def _render_iocs(rows: list[dict], total: int | None = None) -> str:
+    """§6: render an IOC `<table>` for the per-CVE detail page.
+
+    `rows` is the already-capped + filtered output of `_read_iocs_for_cve`.
+    `total` (when set) is the pre-cap count — used to show "+N more not
+    shown" when truncated. Empty list → "—". Every cell is HTML-escaped;
+    IOC values are NOT wrapped in `<a>` tags (a malicious URL must not be
+    clickable on an analyst's machine).
+    """
+    if not rows:
+        return "<h2>IOCs</h2>\n<p>—</p>\n"
+    header = (
+        "<tr><th>Type</th><th>Value</th><th>Source</th>"
+        "<th>First seen</th><th>Confidence</th></tr>"
+    )
+    body_rows: list[str] = []
+    for row in rows:
+        cells = [
+            html.escape(row.get("ioc_type", ""), quote=True),
+            html.escape(row.get("value", ""), quote=True),
+            html.escape(row.get("source", ""), quote=True),
+            html.escape(row.get("first_seen", ""), quote=True),
+            html.escape(row.get("confidence", ""), quote=True),
+        ]
+        body_rows.append(
+            "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+        )
+    truncated = ""
+    if total is not None and total > len(rows):
+        truncated = (
+            f'<p class="iocs-footer">+{total - len(rows)} more IOCs '
+            "not shown</p>\n"
+        )
+    return (
+        "<h2>IOCs</h2>\n"
+        '<table class="cve-iocs">\n'
+        f"{header}\n"
+        + "\n".join(body_rows)
+        + "\n</table>\n"
+        + truncated
+    )
+
+
 def _render_cve_page(
     cve_id: str,
     cache: Cache,
     version: str,
     policy: BucketPolicy,
 ) -> str:
-    """Render one `cve/<CVE-ID>.html` per-CVE detail page (§§1-5, 7).
+    """Render one `cve/<CVE-ID>.html` per-CVE detail page (§§1-7).
 
     §1 Header: H1 with the CVE id + most-recent bucket label + linked
     NVD URL. The most-recent bucket comes from the final `runs` row
@@ -509,9 +608,8 @@ def _render_cve_page(
     §4 Exploit status / §5 Associations / §7 Affected hosts: read the
     most-recent run's main CVE CSV from disk (snapshot-consistent with
     §§1-3). Missing artefacts or rows → "—" per the best-effort contract.
-
-    §6 (IOCs) is deferred to a follow-up slice that first extends
-    `IOC_CSV_COLUMNS` with a `cve_id` column.
+    §6 IOCs: read the run's `-iocs.csv` sidecar, filter by `cve_ids`,
+    cap at `WEB_IOC_CAP` rows with a "+N more" footer when truncated.
     """
     runs_history = cache.get_runs(cve_id)
     latest_bucket = (
@@ -529,6 +627,11 @@ def _render_cve_page(
 
     csv_path = _find_run_csv_for_cve(cache, cve_id)
     csv_row = _read_cve_csv_row(csv_path, cve_id) if csv_path else None
+    iocs_path = _find_iocs_csv_for_cve(cache, cve_id)
+    # Pre-cap count is used to render the "+N more" footer when the IOC
+    # set exceeds WEB_IOC_CAP. Compute by reading once with cap=very_high.
+    all_iocs = _read_iocs_for_cve(iocs_path, cve_id, cap=10_000)
+    capped_iocs = all_iocs[:WEB_IOC_CAP]
 
     cve_escaped = html.escape(cve_id, quote=True)
     bucket_label_escaped = html.escape(bucket_label, quote=True)
@@ -539,6 +642,7 @@ def _render_cve_page(
     trajectory = _render_cve_trajectory(runs_history)
     exploit = _render_exploit_status(csv_row)
     associations = _render_associations(csv_row)
+    iocs = _render_iocs(capped_iocs, total=len(all_iocs))
     hosts = _render_affected_hosts(csv_row)
 
     return (
@@ -557,6 +661,7 @@ def _render_cve_page(
         f"{trajectory}"
         f"{exploit}"
         f"{associations}"
+        f"{iocs}"
         f"{hosts}"
         "</body>\n"
         "</html>\n"
