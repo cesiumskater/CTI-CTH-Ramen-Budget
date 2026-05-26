@@ -81,8 +81,58 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       Verification: 640 passed (was 630 + 10 new), ruff clean, golden
       CSV+MD byte-oracle byte-identical to anchor, `regen --check`
       rc=0.
-- [ ] **Slice C — `_discover_runs` + run-history strip + per-run
-      summary page** (design-doc §5.1, §5.2 minus diff block).
+- [x] **Slice C — `_discover_runs` + run-history strip + per-run
+      summary page** (design-doc §5.1, §5.2 minus diff block). New
+      helpers in `src/ramen_cve/web/builder.py`:
+      `_DiscoveredRun(NamedTuple)` (ts_iso, cve_count, disk_stamp,
+      out_dir — disk_stamp/out_dir are None for LEFT-JOIN misses);
+      `_discover_runs(cache)` runs `SELECT ts_iso, COUNT(DISTINCT
+      cve_id), run_artefacts.disk_stamp, run_artefacts.out_dir FROM
+      runs LEFT JOIN run_artefacts USING (ts_iso) GROUP BY ts_iso
+      ORDER BY ts_iso DESC` — canonical run list from `runs` with
+      best-effort artefact attachment; `_slugify_ts(ts_iso)` replaces
+      `:` with `-` (filesystem-safe + lex-sortable URL slug);
+      `_ARTEFACT_KINDS` constant locks the 6 kinds (CSV, MD, STIX,
+      HTML, Sigma, YARA) + their filename templates;
+      `_artefact_paths(disk_stamp, out_dir)` composes absolute paths;
+      `_artefact_link_cell(run, kind, page_dir)` renders `<a href>`
+      with `os.path.relpath` href OR "—" (handles LEFT-JOIN miss,
+      missing file on disk, and Windows cross-drive `ValueError`).
+      New `_render_strip(runs, site_dir, cap)` builds a reverse-
+      chronological table with strip-on-index-only placement (per-run
+      pages stay standalone per the lockdown). New `_render_run_page(
+      run, version, runs_dir)` emits `runs/<slug>.html` with H1 + CVE
+      count + 6-row artefacts table. `_render_index` gains a
+      `strip_html: str = ""` kwarg (back-compat with pre-Slice-C
+      callers). `build_site` orchestrates: `mkdir runs/`, write per-
+      run pages, then write index with the embedded strip. Return
+      dict adds `run/<slug>` keys per page so `_run_web`'s path-
+      printer surfaces them. +32 tests in `tests/test_web_ui.py`
+      covering: `_slugify_ts` colon-replacement + `+00:00` suffix
+      handling; `_discover_runs` empty cache, one-row-per-distinct-
+      ts_iso, descending ordering, distinct-CVE counting, artefacts
+      attachment when present, None when missing, mixed populated/
+      missing; per-run page emission (one per ts_iso, slugified
+      filename); per-run page H1 / CVE count singular+plural / all 6
+      artefact-kind labels present; per-run page "—" when artefacts
+      row missing (6 dashes); per-run page `<a>` when files exist on
+      disk; per-run page "—" for individual missing files (row
+      present, only csv+md on disk → 4 dashes); per-run page relative
+      hrefs (no `file://`, `http://`, `https://`); per-run page CSS
+      link `../static/style.css`; per-run page no `<script>`; index
+      includes `<h2>Run history</h2>`; strip is reverse chronological;
+      strip caps at `max_runs_on_home`; strip links to
+      `runs/<slug>.html`; strip renders "—" for missing artefacts;
+      strip renders relative artefact hrefs; `_render_strip([])`
+      returns "" (defensive); CVE count appears in strip column;
+      `build_site` returns per-run paths under `run/<slug>` keys;
+      byte-stability across two builds; `_run_web` stdout includes
+      per-run page paths. Verification: 672 passed (was 640 + 32
+      new), ruff clean, golden CSV+MD byte-oracle byte-identical to
+      anchor, `regen --check` rc=0, manual smoke against a seeded 2-
+      run cache (1 with on-disk artefacts, 1 without) renders the
+      index strip with 5/6 links on the populated run + 6 dashes on
+      the missing-row run, and the per-run pages match.
 - [ ] **Slice D — Per-CVE detail page §§1-3** (header, NVD summary,
       trajectory chart reusing Task-6's `_render_quadrant_svg`).
 - [ ] **Slice E — Per-CVE detail page §§4-7** (exploit-status,
