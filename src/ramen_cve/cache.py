@@ -262,6 +262,45 @@ class Cache:
             return None
         return {"ts_iso": row[0], "disk_stamp": row[1], "out_dir": row[2]}
 
+    def get_nvd_raw(self, cve_id: str) -> dict | None:
+        """Return the cached NVD payload regardless of TTL, or None if absent.
+
+        TTL-bypassing reader for the offline Web UI (Task 8): a per-CVE
+        detail page must render whatever the cache last stored, even if
+        the row is older than `--cache-ttl`. Live API lookups still use
+        `get_nvd`, which preserves the TTL contract.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json FROM nvd_cache WHERE cve_id = ?", (cve_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_epss_raw(self, cve_id: str) -> dict | None:
+        """Return the most-recent cached EPSS payload for `cve_id`, ignoring TTL.
+
+        Picks the latest `score_date` (newest assessment). Used by the
+        Web UI's per-CVE summary; live enrichment still flows through
+        `get_epss(cve_id, score_date)` with its TTL contract.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json FROM epss_cache WHERE cve_id = ? "
+            "ORDER BY score_date DESC LIMIT 1",
+            (cve_id,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_kev_catalog_raw(self) -> dict[str, dict] | None:
+        """Return the cached CISA KEV catalog regardless of TTL, or None.
+
+        TTL-bypassing reader for the offline Web UI. Live enrichment
+        uses `get_kev_catalog` to refresh stale catalogs from CISA.
+        """
+        row = self._conn.execute(
+            "SELECT payload_json FROM kev_cache WHERE id = ?",
+            ("catalog",),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
     def get_runs(self, cve_id: str) -> list[dict]:
         """Return every recorded run for `cve_id` in chronological order."""
         rows = self._conn.execute(

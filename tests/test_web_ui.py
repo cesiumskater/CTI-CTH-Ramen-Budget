@@ -870,8 +870,9 @@ def test_build_site_returns_run_page_paths_in_dict(tmp_path):
     _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-B"])
     site_dir = tmp_path / "site"
     paths = build_site(cache, site_dir)
-    # Index + css + 2 run pages = 4 entries.
-    assert len(paths) == 4
+    # Per-run page keys are surfaced (Slice D additionally writes per-CVE
+    # pages — `len(paths)` is left unconstrained so future slices can
+    # extend without churning this test).
     assert paths["run/2026-05-25T10-00-00"] == (
         site_dir / "runs" / "2026-05-25T10-00-00.html"
     )
@@ -904,3 +905,391 @@ def test_run_web_prints_run_page_paths(tmp_path, capsys):
     assert rc == 0
     stdout = capsys.readouterr().out.splitlines()
     assert any(line.endswith("2026-05-26T14-03-11.html") for line in stdout)
+
+
+# ---------------------------------------------------------------------------
+# Slice D — per-CVE detail pages §§1-3 (header, summary, trajectory).
+# Includes: refactored `_render_quadrant_svg_from_points` (one new caller),
+# per-source raw cache readers, and `_render_cve_page`.
+# ---------------------------------------------------------------------------
+
+
+def _set_nvd_raw(cache, cve_id, payload):
+    """Insert an `nvd_cache` row directly (TTL-irrelevant for raw reader)."""
+    cache._conn.execute(
+        "INSERT OR REPLACE INTO nvd_cache VALUES (?, ?, ?)",
+        (cve_id, __import__("json").dumps(payload), "2020-01-01T00:00:00"),
+    )
+    cache._conn.commit()
+
+
+def _set_epss_raw(cache, cve_id, score_date, payload):
+    cache._conn.execute(
+        "INSERT OR REPLACE INTO epss_cache VALUES (?, ?, ?, ?)",
+        (cve_id, score_date, __import__("json").dumps(payload), "2020-01-01T00:00:00"),
+    )
+    cache._conn.commit()
+
+
+def _set_kev_catalog_raw(cache, catalog):
+    cache._conn.execute(
+        "INSERT OR REPLACE INTO kev_cache VALUES (?, ?, ?)",
+        ("catalog", __import__("json").dumps(catalog), "2020-01-01T00:00:00"),
+    )
+    cache._conn.commit()
+
+
+# ---- Refactor invariant: existing `_render_quadrant_svg` is byte-stable --
+
+
+def test_render_quadrant_svg_from_points_zero_points_still_renders_frame():
+    """The points-list helper must render the chart frame even with no points."""
+    from ramen_cve.output.html_quadrant import _render_quadrant_svg_from_points
+
+    svg = _render_quadrant_svg_from_points([])
+    assert svg.startswith("<svg")
+    assert "</svg>" in svg
+    assert "<circle" not in svg  # no data points
+
+
+def test_render_quadrant_svg_from_points_is_latest_thickens_stroke():
+    """`is_latest=True` adds the `cve-latest` class + a 2px stroke."""
+    from ramen_cve.output.html_quadrant import _render_quadrant_svg_from_points
+
+    svg = _render_quadrant_svg_from_points(
+        [(9.0, 0.5, "tip", "patch_now", True)],
+    )
+    assert "cve-latest" in svg
+    assert 'stroke-width="2"' in svg
+
+
+def test_render_quadrant_svg_from_points_not_latest_uses_default_stroke():
+    """Default `is_latest=False` stays bit-identical to pre-refactor output."""
+    from ramen_cve.output.html_quadrant import _render_quadrant_svg_from_points
+
+    svg = _render_quadrant_svg_from_points(
+        [(9.0, 0.5, "tip", "patch_now", False)],
+    )
+    assert "cve-latest" not in svg
+    assert 'stroke-width="0.5"' in svg
+
+
+# ---- Cache raw readers ----------------------------------------------------
+
+
+def test_get_nvd_raw_returns_payload_regardless_of_ttl(tmp_path):
+    """An ancient `fetched_at` no longer hides the payload."""
+    cache = Cache(tmp_path / ".cache.db", ttl_hours=1)
+    _set_nvd_raw(cache, "CVE-2021-44228", {"cve_id": "CVE-2021-44228",
+                                            "cvss_score": 10.0})
+    # `get_nvd` would return None for this stale row.
+    assert cache.get_nvd("CVE-2021-44228") is None
+    # `get_nvd_raw` must bypass the freshness gate.
+    raw = cache.get_nvd_raw("CVE-2021-44228")
+    assert raw == {"cve_id": "CVE-2021-44228", "cvss_score": 10.0}
+
+
+def test_get_nvd_raw_returns_none_when_absent(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    assert cache.get_nvd_raw("CVE-never-fetched") is None
+
+
+def test_get_epss_raw_returns_latest_score_date(tmp_path):
+    """Two rows for the same CVE → reader returns the newer `score_date`."""
+    cache = Cache(tmp_path / ".cache.db", ttl_hours=1)
+    _set_epss_raw(cache, "CVE-2021-44228", "2024-01-01",
+                  {"epss": 0.50, "percentile": 0.95, "date": "2024-01-01"})
+    _set_epss_raw(cache, "CVE-2021-44228", "2024-02-15",
+                  {"epss": 0.55, "percentile": 0.96, "date": "2024-02-15"})
+    raw = cache.get_epss_raw("CVE-2021-44228")
+    assert raw["date"] == "2024-02-15"
+    assert raw["epss"] == 0.55
+
+
+def test_get_epss_raw_returns_none_when_absent(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    assert cache.get_epss_raw("CVE-no-rows") is None
+
+
+def test_get_kev_catalog_raw_returns_payload_regardless_of_ttl(tmp_path):
+    cache = Cache(tmp_path / ".cache.db", ttl_hours=1)
+    _set_kev_catalog_raw(cache,
+                         {"CVE-2021-44228": {"dueDate": "2021-12-24"}})
+    assert cache.get_kev_catalog() is None  # stale via TTL gate
+    raw = cache.get_kev_catalog_raw()
+    assert raw == {"CVE-2021-44228": {"dueDate": "2021-12-24"}}
+
+
+def test_get_kev_catalog_raw_returns_none_when_absent(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    assert cache.get_kev_catalog_raw() is None
+
+
+# ---- Per-CVE page emission -----------------------------------------------
+
+
+def test_build_site_emits_one_cve_page_per_distinct_cve(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A", "CVE-B"])
+    _seed_run(cache, "2026-05-25T11:00:00", cve_ids=["CVE-A", "CVE-C"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    pages = sorted(p.name for p in (site_dir / "cve").iterdir())
+    assert pages == ["CVE-A.html", "CVE-B.html", "CVE-C.html"]
+
+
+def test_cve_page_contains_h1_with_cve_id(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-2021-44228"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-2021-44228.html").read_text("utf-8")
+    assert "<h1>CVE-2021-44228" in body
+    # `<h1>CVE-2021-44228 <span class="bucket">[Patch now]</span></h1>`-shape
+    assert 'class="bucket"' in body
+
+
+def test_cve_page_header_uses_most_recent_bucket(tmp_path):
+    """A CVE that was reclassified between runs renders the final bucket."""
+    cache = Cache(tmp_path / ".cache.db")
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("CVE-X", "2026-05-25T10:00:00", "watch_closely", 7.0, 0.2),
+    )
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("CVE-X", "2026-05-26T10:00:00", "patch_now", 9.0, 0.5),
+    )
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # DEFAULT_BUCKET_POLICY's label for "patch_now".
+    assert "Patch Now" in body
+
+
+def test_cve_page_links_nvd_url(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-2021-44228"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-2021-44228.html").read_text("utf-8")
+    assert "https://nvd.nist.gov/vuln/detail/CVE-2021-44228" in body
+
+
+def test_cve_page_renders_dash_when_summary_data_absent(tmp_path):
+    """No NVD / EPSS / KEV cache rows → every §2 field renders "—"."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # Description, CVSS score, severity, vector, EPSS, percentile all "—".
+    assert "<dd>—</dd>" in body
+    assert body.count("<dd>—</dd>") >= 5
+    # KEV listed renders "No" rather than "—" (it's a boolean).
+    assert "<dt>KEV listed</dt><dd>No</dd>" in body
+
+
+def test_cve_page_renders_nvd_summary_fields(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    _set_nvd_raw(cache, "CVE-X", {
+        "description": "Remote code execution in Foo before 1.2.",
+        "cvss_score": 9.8,
+        "cvss_severity": "CRITICAL",
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+    })
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "Remote code execution in Foo before 1.2." in body
+    assert "9.8 (CRITICAL)" in body
+    assert "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H" in body
+
+
+def test_cve_page_renders_epss_score_and_percentile(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    _set_epss_raw(cache, "CVE-X", "2024-01-15",
+                  {"epss": 0.9421, "percentile": 0.9876, "date": "2024-01-15"})
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "0.9421" in body
+    assert "98.8%" in body
+
+
+def test_cve_page_renders_kev_listed_and_due_date(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-2021-44228"])
+    _set_kev_catalog_raw(cache, {
+        "CVE-2021-44228": {"dueDate": "2021-12-24",
+                           "knownRansomwareCampaignUse": "Known"}
+    })
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-2021-44228.html").read_text("utf-8")
+    assert "<dt>KEV listed</dt><dd>Yes</dd>" in body
+    assert "<dt>KEV due date</dt><dd>2021-12-24</dd>" in body
+
+
+def test_cve_page_escapes_poisoned_description(tmp_path):
+    """An NVD payload with `<script>` in the description must be defanged."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    _set_nvd_raw(cache, "CVE-X", {
+        "description": "Hi <script>alert(1)</script>",
+    })
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+
+
+# ---- Trajectory chart ----------------------------------------------------
+
+
+def test_cve_page_trajectory_zero_snapshots_shows_no_data(tmp_path):
+    """A CVE with one snapshot but no scores → no plottable points."""
+    cache = Cache(tmp_path / ".cache.db")
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("CVE-X", "2026-05-25T10:00:00", "unknown", None, None),
+    )
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "no trajectory data" in body
+    assert "<svg" not in body  # no SVG when no plottable points
+
+
+def test_cve_page_trajectory_one_snapshot_uses_sparkline(tmp_path):
+    """Below 2 snapshots → ASCII sparkline fallback (design-doc §5.3 §3)."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])  # 1 plottable snapshot
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "Single snapshot" in body
+    # The sparkline character is one of the unicode block-eighths.
+    assert any(ch in body for ch in "▁▂▃▄▅▆▇█")
+    assert "<svg" not in body  # SVG path is only taken at 2+ snapshots
+
+
+def test_cve_page_trajectory_two_plus_snapshots_renders_svg(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    for i, ts in enumerate(("2026-05-25T10:00:00", "2026-05-26T10:00:00",
+                            "2026-05-27T10:00:00")):
+        cache._conn.execute(
+            "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("CVE-X", ts, "patch_now", 9.0 + i * 0.1, 0.5 + i * 0.05),
+        )
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "<svg" in body
+    # 3 circles — one per snapshot.
+    assert body.count("<circle") == 3
+    # The most-recent snapshot is highlighted.
+    assert "cve-latest" in body
+
+
+def test_cve_page_trajectory_caps_at_200_with_footer_note(tmp_path):
+    """251 snapshots → 200 plotted + a '+51 earlier' footer."""
+    cache = Cache(tmp_path / ".cache.db")
+    for i in range(251):
+        cache._conn.execute(
+            "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("CVE-X", f"2026-01-{(i % 30) + 1:02d}T{(i // 30) % 24:02d}:00:{i % 60:02d}",
+             "patch_now", 9.0, 0.5),
+        )
+    cache._conn.commit()
+    # Note: deduped via PRIMARY KEY (cve_id, ts_iso) — collisions possible
+    # with our index arithmetic; pick distinct ts_iso explicitly instead.
+    site_dir = tmp_path / "site"
+    cache._conn.execute("DELETE FROM runs WHERE cve_id = 'CVE-X'")
+    for i in range(251):
+        cache._conn.execute(
+            "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("CVE-X", f"2020-01-01T00:00:{i:04d}",  # unique ts via long suffix
+             "patch_now", 9.0, 0.5),
+        )
+    cache._conn.commit()
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # 200 circles plotted; the other 51 are referenced by the footer.
+    assert body.count("<circle") == 200
+    assert "+51 earlier snapshots" in body
+
+
+def test_cve_page_css_link_is_relative_to_parent(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert '<link rel="stylesheet" href="../static/style.css">' in body
+
+
+def test_cve_page_has_no_javascript(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "<script" not in body
+
+
+# ---- `build_site` integration ---------------------------------------------
+
+
+def test_build_site_byte_stable_with_cve_pages(tmp_path):
+    """Slice D's per-CVE pages must respect the design-doc §6 byte-stability gate."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A", "CVE-B"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    first_a = (site_dir / "cve" / "CVE-A.html").read_bytes()
+    first_b = (site_dir / "cve" / "CVE-B.html").read_bytes()
+    build_site(cache, site_dir)
+    assert (site_dir / "cve" / "CVE-A.html").read_bytes() == first_a
+    assert (site_dir / "cve" / "CVE-B.html").read_bytes() == first_b
+
+
+def test_build_site_returns_cve_page_paths_in_dict(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A", "CVE-B"])
+    site_dir = tmp_path / "site"
+    paths = build_site(cache, site_dir)
+    assert paths["cve/CVE-A"] == site_dir / "cve" / "CVE-A.html"
+    assert paths["cve/CVE-B"] == site_dir / "cve" / "CVE-B.html"
+
+
+def test_run_web_prints_cve_page_paths(tmp_path, capsys):
+    """`_run_web`'s path-printing also surfaces per-CVE page paths."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-2021-44228"])
+    rc = _run_web(_site_args(tmp_path / "site"), cache, None)
+    assert rc == 0
+    stdout = capsys.readouterr().out.splitlines()
+    assert any(line.endswith("CVE-2021-44228.html") for line in stdout)
+
+
+# ---- Constants and re-exports --------------------------------------------
+
+
+def test_web_trajectory_cap_is_200():
+    """Lock the design-doc §5.3 §3 cap."""
+    from ramen_cve.web.builder import WEB_TRAJECTORY_CAP
+
+    assert WEB_TRAJECTORY_CAP == 200

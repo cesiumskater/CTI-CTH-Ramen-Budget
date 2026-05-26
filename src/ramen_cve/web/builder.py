@@ -4,13 +4,19 @@ Slice A: emits a minimal `<site-dir>/index.html` (H1 + "N runs recorded.")
 and an empty `<site-dir>/static/style.css`. Raises `WebUiError` when the
 `runs` table is empty (design-doc §D11).
 
-Slice C (this update): adds `_discover_runs` (LEFT JOIN against
-`run_artefacts`), per-run summary pages at `<site-dir>/runs/<slug>.html`,
-and a run-history strip on the index. The slug is `ts_iso` with colons
-replaced by hyphens — filesystem-safe and lexicographically time-sorted.
+Slice C: adds `_discover_runs` (LEFT JOIN against `run_artefacts`),
+per-run summary pages at `<site-dir>/runs/<slug>.html`, and a run-history
+strip on the index. The slug is `ts_iso` with colons replaced by hyphens.
 
-Slices D-G extend this module per `docs/web_ui_design.md`:
-  - D-E: per-CVE detail pages (RICH content)
+Slice D (this update): per-CVE detail pages at `<site-dir>/cve/<CVE-ID>.html`
+with §§1-3 of design-doc §5.3 — header (CVE id + most-recent bucket +
+linked NVD URL), summary (description + CVSS + EPSS + KEV), and a
+trajectory chart that reuses Task-6's `_render_quadrant_svg_from_points`
+in single-CVE multi-snapshot mode (sparkline fallback below 2 snapshots,
+200-snapshot cap with "+N earlier" footer).
+
+Slices E-G extend per `docs/web_ui_design.md`:
+  - E: per-CVE detail page §§4-7 (exploit-status, actors, IOCs, hosts)
   - F: "what changed" diff block on per-run pages
   - G: bucket-policy threading + showcase regen extension
 """
@@ -22,13 +28,18 @@ import os.path
 from pathlib import Path
 from typing import NamedTuple
 
-from ..bucket_policy import BucketPolicy
+from ..bucket_policy import DEFAULT_BUCKET_POLICY, BucketPolicy
 from ..cache import Cache
+from ..constants import DEFAULT_CVSS_THRESHOLD, DEFAULT_EPSS_THRESHOLD
 from ..models import WebUiError
+from ..output.html_quadrant import _render_quadrant_svg_from_points
+from ..render import _sparkline
 
 _log = logging.getLogger(__name__)
 
 WEB_DEFAULT_MAX_RUNS_ON_HOME = 30
+WEB_TRAJECTORY_CAP = 200
+_NVD_URL_TEMPLATE = "https://nvd.nist.gov/vuln/detail/{cve_id}"
 
 # The 6 artefact kinds we link to from per-run pages + the index strip.
 # Order is the display order (CSV first, YARA last — mirrors --format
@@ -263,6 +274,189 @@ def _render_run_page(
     )
 
 
+def _fmt_or_dash(value, fmt: str = "{}") -> str:
+    """HTML-escaped value via `fmt`, or "—" when value is None / empty.
+
+    Used by the per-CVE summary to keep "best-effort" rendering uniform:
+    a missing field never errors, just shows the em-dash placeholder.
+    """
+    if value is None or value == "":
+        return "—"
+    return html.escape(fmt.format(value), quote=True)
+
+
+def _render_cve_summary(
+    nvd: dict | None,
+    epss: dict | None,
+    kev_row: dict | None,
+) -> str:
+    """Render the §5.3 §2 summary block — description + CVSS + EPSS + KEV.
+
+    Every field renders independently: a missing `nvd_cache` row drops
+    description / CVSS / vector to "—" without affecting EPSS / KEV.
+    `kev_row` is the per-CVE record from `get_kev_catalog_raw()` (or
+    None when this CVE isn't on the KEV catalog).
+    """
+    nvd = nvd or {}
+    epss = epss or {}
+
+    description = _fmt_or_dash(nvd.get("description"))
+    cvss_score = _fmt_or_dash(nvd.get("cvss_score"), "{:.1f}")
+    cvss_severity = _fmt_or_dash(nvd.get("cvss_severity"))
+    cvss_vector = _fmt_or_dash(nvd.get("cvss_vector"))
+    epss_score = _fmt_or_dash(epss.get("epss"), "{:.4f}")
+    epss_percentile_raw = epss.get("percentile")
+    if epss_percentile_raw is None:
+        epss_percentile = "—"
+    else:
+        epss_percentile = html.escape(f"{float(epss_percentile_raw) * 100:.1f}%")
+    kev_listed = "Yes" if kev_row else "No"
+    kev_due = _fmt_or_dash((kev_row or {}).get("dueDate"))
+
+    return (
+        "<h2>Summary</h2>\n"
+        "<dl class=\"cve-summary\">\n"
+        f"<dt>Description</dt><dd>{description}</dd>\n"
+        f"<dt>CVSS score</dt><dd>{cvss_score} ({cvss_severity})</dd>\n"
+        f"<dt>CVSS vector</dt><dd>{cvss_vector}</dd>\n"
+        f"<dt>EPSS score</dt><dd>{epss_score}</dd>\n"
+        f"<dt>EPSS percentile</dt><dd>{epss_percentile}</dd>\n"
+        f"<dt>KEV listed</dt><dd>{kev_listed}</dd>\n"
+        f"<dt>KEV due date</dt><dd>{kev_due}</dd>\n"
+        "</dl>\n"
+    )
+
+
+def _render_cve_trajectory(runs_history: list[dict]) -> str:
+    """Render the §5.3 §3 trajectory chart for a CVE's `runs` rows.
+
+    Branches per design-doc §5.3 §3:
+    - 0 plottable snapshots → "(no trajectory data available)".
+    - 1 plottable snapshot → unicode sparkline (EPSS over time, 1 bar).
+    - 2-200 plottable snapshots → SVG scatter with the most-recent
+      snapshot highlighted (is_latest=True on the final point).
+    - 200+ plottable snapshots → cap at the 200 most-recent + "+N earlier
+      snapshots not shown" footer.
+
+    `runs_history` is `Cache.get_runs(cve_id)` output — list[dict] with
+    `ts_iso`, `bucket`, `cvss_score`, `epss_score`, sorted chronologically.
+    """
+    plottable = [
+        r for r in runs_history
+        if r.get("cvss_score") is not None and r.get("epss_score") is not None
+    ]
+    n_total = len(plottable)
+    if n_total == 0:
+        return "<h2>Trajectory</h2>\n<p>(no trajectory data available)</p>\n"
+
+    if n_total == 1:
+        # Design §5.3 §3: "Below 2 snapshots → fall back to a Task-1-style
+        # ASCII sparkline from render.py".
+        spark = _sparkline([float(plottable[0]["epss_score"])])
+        return (
+            "<h2>Trajectory</h2>\n"
+            f"<p>Single snapshot. EPSS sparkline: {html.escape(spark)}</p>\n"
+        )
+
+    # 2+ snapshots: SVG scatter. Cap at the 200 most recent.
+    truncated = n_total > WEB_TRAJECTORY_CAP
+    capped = plottable[-WEB_TRAJECTORY_CAP:] if truncated else plottable
+    last_idx = len(capped) - 1
+    points: list[tuple[float, float, str, str, bool]] = []
+    for i, r in enumerate(capped):
+        bucket = r.get("bucket") or "unknown"
+        tooltip = (
+            f"{r['ts_iso']} — CVSS {r['cvss_score']:.1f}, "
+            f"EPSS {r['epss_score']:.4f} ({bucket})"
+        )
+        points.append(
+            (float(r["cvss_score"]), float(r["epss_score"]),
+             tooltip, bucket, i == last_idx)
+        )
+    svg = _render_quadrant_svg_from_points(
+        points, DEFAULT_CVSS_THRESHOLD, DEFAULT_EPSS_THRESHOLD,
+    )
+    footer = (
+        f"<p class=\"trajectory-footer\">+{n_total - WEB_TRAJECTORY_CAP} earlier "
+        "snapshots not shown</p>\n"
+        if truncated
+        else ""
+    )
+    return f"<h2>Trajectory</h2>\n{svg}{footer}"
+
+
+def _render_cve_page(
+    cve_id: str,
+    cache: Cache,
+    version: str,
+    policy: BucketPolicy,
+) -> str:
+    """Render one `cve/<CVE-ID>.html` per-CVE detail page (§§1-3).
+
+    §1 Header: H1 with the CVE id + most-recent bucket label + linked
+    NVD URL. The most-recent bucket comes from the final `runs` row
+    (chronologically). Unknown buckets fall back to the raw id.
+
+    §2 Summary: delegated to `_render_cve_summary`.
+
+    §3 Trajectory: delegated to `_render_cve_trajectory`.
+
+    Slice E adds §§4-7 (exploit status, actors, IOCs, hosts) onto the
+    same page below the trajectory chart.
+    """
+    runs_history = cache.get_runs(cve_id)
+    latest_bucket = (
+        runs_history[-1].get("bucket") or "unknown" if runs_history else "unknown"
+    )
+    try:
+        bucket_label = policy.label(latest_bucket)
+    except KeyError:
+        bucket_label = latest_bucket
+
+    nvd = cache.get_nvd_raw(cve_id)
+    epss = cache.get_epss_raw(cve_id)
+    kev_catalog = cache.get_kev_catalog_raw() or {}
+    kev_row = kev_catalog.get(cve_id)
+
+    cve_escaped = html.escape(cve_id, quote=True)
+    bucket_label_escaped = html.escape(bucket_label, quote=True)
+    nvd_url = _NVD_URL_TEMPLATE.format(cve_id=cve_id)
+    nvd_url_escaped = html.escape(nvd_url, quote=True)
+
+    summary = _render_cve_summary(nvd, epss, kev_row)
+    trajectory = _render_cve_trajectory(runs_history)
+
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        f'<meta name="generator" content="ramen-cve {html.escape(version, quote=True)}">\n'
+        f"<title>{cve_escaped} — Ramen CVE Triage</title>\n"
+        '<link rel="stylesheet" href="../static/style.css">\n'
+        "</head>\n"
+        "<body>\n"
+        f'<h1>{cve_escaped} <span class="bucket">[{bucket_label_escaped}]</span></h1>\n'
+        f'<p><a href="{nvd_url_escaped}">{nvd_url_escaped}</a></p>\n'
+        f"{summary}"
+        f"{trajectory}"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _list_distinct_cve_ids(cache: Cache) -> list[str]:
+    """Distinct CVE ids across the entire `runs` history, sorted ASC.
+
+    Sorted alphabetically so the per-CVE page write order (and hence
+    any second-build byte comparison) is deterministic.
+    """
+    rows = cache._conn.execute(
+        "SELECT DISTINCT cve_id FROM runs ORDER BY cve_id ASC"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def build_site(
     cache: Cache,
     site_dir: Path,
@@ -290,7 +484,10 @@ def build_site(
     # docs/REFACTOR_PLAN.md §5.2 resolves the cycle at call time.
     from ..cli import VERSION
 
-    del policy  # reserved for Slice G — intentional no-op here
+    # Slice G will thread a user-supplied policy through every label;
+    # until then, Slice D uses DEFAULT_BUCKET_POLICY for per-CVE header
+    # labels so the page renders with the correct prose today.
+    active_policy = policy or DEFAULT_BUCKET_POLICY
 
     runs = _discover_runs(cache)
     if not runs:
@@ -304,6 +501,8 @@ def build_site(
     static_dir.mkdir(parents=True, exist_ok=True)
     runs_dir = site_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
+    cve_dir = site_dir / "cve"
+    cve_dir.mkdir(parents=True, exist_ok=True)
 
     css_path = static_dir / "style.css"
     css_path.write_text(_CSS_PLACEHOLDER, encoding="utf-8")
@@ -314,6 +513,14 @@ def build_site(
         page_path = runs_dir / f"{slug}.html"
         page_path.write_text(_render_run_page(run, VERSION, runs_dir), encoding="utf-8")
         paths[f"run/{slug}"] = page_path
+
+    for cve_id in _list_distinct_cve_ids(cache):
+        page_path = cve_dir / f"{cve_id}.html"
+        page_path.write_text(
+            _render_cve_page(cve_id, cache, VERSION, active_policy),
+            encoding="utf-8",
+        )
+        paths[f"cve/{cve_id}"] = page_path
 
     strip = _render_strip(runs, site_dir, max_runs_on_home)
     paths["index"].write_text(

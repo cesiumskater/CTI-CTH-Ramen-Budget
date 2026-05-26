@@ -133,8 +133,68 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       run cache (1 with on-disk artefacts, 1 without) renders the
       index strip with 5/6 links on the populated run + 6 dashes on
       the missing-row run, and the per-run pages match.
-- [ ] **Slice D — Per-CVE detail page §§1-3** (header, NVD summary,
+- [x] **Slice D — Per-CVE detail page §§1-3** (header, NVD summary,
       trajectory chart reusing Task-6's `_render_quadrant_svg`).
+      Refactored `output/html_quadrant.py`: extracted
+      `_render_quadrant_svg_from_points(points, cvss_thr, epss_thr)`
+      where `points = list[(cvss, epss, tooltip, bucket_id, is_latest)]`;
+      `is_latest=True` thickens the stroke (2 vs 0.5) + enlarges the
+      radius (8 vs 6) + adds the `cve-latest` CSS class. The existing
+      `_render_quadrant_svg(enriched, ...)` wrapper builds a points
+      list with `is_latest=False` everywhere → bit-identical output to
+      pre-refactor (Task-6 snapshot tests still pass). New cache raw
+      readers in `cache.py` that bypass `_is_fresh()`:
+      `Cache.get_nvd_raw(cve_id)`, `Cache.get_epss_raw(cve_id)` (ORDER
+      BY score_date DESC LIMIT 1 — newest assessment),
+      `Cache.get_kev_catalog_raw()`. New `description` field captured
+      by `_parse_nvd_response` (English-language `descriptions[]`) +
+      added to `_empty_nvd` for shape consistency. New `web/builder.py`
+      helpers: `_NVD_URL_TEMPLATE`, `WEB_TRAJECTORY_CAP = 200`,
+      `_fmt_or_dash(value, fmt)`, `_render_cve_summary(nvd, epss,
+      kev_row)`, `_render_cve_trajectory(runs_history)`,
+      `_render_cve_page(cve_id, cache, version, policy)`,
+      `_list_distinct_cve_ids(cache)`. The per-CVE page renders:
+      §1 H1 with `<cve_id> <span class="bucket">[Label]</span>` (most-
+      recent bucket via `BucketPolicy.label()`, fallback to raw bucket
+      id on KeyError) + linked NVD URL; §2 dl with description / CVSS
+      score+severity / CVSS vector / EPSS score / EPSS percentile (as
+      %) / KEV listed Yes-No / KEV due date — every field "—" when
+      absent (No when KEV); §3 trajectory branches: 0 plottable
+      snapshots → "(no trajectory data available)"; 1 → unicode EPSS
+      sparkline ("Single snapshot"); 2-200 → SVG scatter with last
+      point `is_latest=True`; >200 → cap at the 200 most-recent +
+      "+N earlier snapshots not shown" footer. `build_site` enumerates
+      `SELECT DISTINCT cve_id FROM runs ORDER BY cve_id ASC`, writes
+      each to `cve/<cve_id>.html`, surfaces in the return dict under
+      `cve/<cve_id>` keys (so `_run_web` prints them). +28 tests in
+      `tests/test_web_ui.py` covering: refactor invariants (zero-
+      points still renders frame; `is_latest` toggles stroke/class;
+      default unchanged); `get_nvd_raw` / `get_epss_raw` /
+      `get_kev_catalog_raw` bypass TTL + return None on absent;
+      `get_epss_raw` picks latest score_date; per-CVE page emission
+      (one per distinct cve_id); header H1 with cve_id + bucket span;
+      most-recent bucket wins on reclassification; NVD URL present;
+      full-"—" cascade when no NVD/EPSS/KEV rows; NVD summary fields
+      rendered when present; EPSS score + percentile formatting; KEV
+      listed Yes + due date; HTML-escape against `<script>` in
+      description; 0-snapshot trajectory → "no data" + no SVG; 1-
+      snapshot trajectory → sparkline + no SVG; 2+ snapshots → SVG
+      with one circle per point + `cve-latest` on last; 251
+      snapshots → 200 circles + "+51 earlier" footer; per-CVE page
+      CSS link `../static/style.css`; no `<script>`; byte-stability
+      across two builds; `cve/<cve_id>` paths in return dict;
+      `_run_web` stdout includes per-CVE page paths;
+      `WEB_TRAJECTORY_CAP == 200`. Updated existing
+      `test_build_site_returns_run_page_paths_in_dict` to drop the
+      tight `len(paths) == 4` assertion (Slice D legitimately adds
+      per-CVE keys). Verification: 700 passed (was 672 + 28 new),
+      ruff clean, golden CSV+MD byte-oracle byte-identical to anchor,
+      `regen --check` rc=0, manual smoke against a seeded 3-run cache
+      for CVE-2021-44228 with populated NVD/EPSS/KEV rows renders the
+      header with `[KEV Override (Patch Immediately)]`, summary with
+      every field populated and an HTML-escaped description, and a
+      trajectory SVG with 3 circles where the last is `cve-latest`
+      with `stroke-width="2"` + `r="8"`.
 - [ ] **Slice E — Per-CVE detail page §§4-7** (exploit-status,
       associations, IOCs, affected hosts — the "RICH" content).
 - [ ] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /

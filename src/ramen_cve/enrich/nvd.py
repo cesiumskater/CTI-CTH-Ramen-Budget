@@ -78,6 +78,7 @@ def _empty_nvd(cve_id: str, status: str = "ok") -> dict:
         "cwe": [],
         "nvd_published": None,
         "nvd_status": status,
+        "description": None,
     }
 
 
@@ -116,6 +117,14 @@ def _parse_nvd_response(data: dict) -> dict:
     published_str = cve_data.get("published")
     nvd_published = published_str[:10] if published_str else None
 
+    # English description (NVD returns translations under `descriptions`).
+    # Captured for the Task-8 Web UI per-CVE summary; legacy cache rows
+    # without this key gracefully fall back to "—" at render time.
+    description = next(
+        (d.get("value") for d in cve_data.get("descriptions", []) if d.get("lang") == "en"),
+        None,
+    )
+
     # Walk configurations[].nodes[].cpeMatch[] for CPE 2.3 strings. NVD
     # responses sometimes nest cpeMatch under children; iterate defensively.
     cpes: list[str] = []
@@ -144,5 +153,6 @@ def _parse_nvd_response(data: dict) -> dict:
         "cpes": cpes,
         "nvd_published": nvd_published,
         "nvd_status": "ok",
+        "description": description,
     }
 
