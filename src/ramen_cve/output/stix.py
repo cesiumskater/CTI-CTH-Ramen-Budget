@@ -32,6 +32,7 @@ IOC_CSV_COLUMNS = [
     "admiralty",
     "last_seen",
     "confidence",
+    "cve_ids",
 ]
 
 
@@ -42,6 +43,9 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
     'true'/'false' so consumers can grep the file directly. The enrichments
     column is a JSON-serialized dict so the schema stays one-row-per-IOC.
     confidence is rendered to 4 decimals (1.0000 means just-seen / no decay).
+    cve_ids is semicolon-joined per IocRecord.cve_ids — the offline Web UI's
+    per-CVE detail page (Task 8 §6) substring-matches this column to filter
+    IOCs onto the right CVE.
     """
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
@@ -60,6 +64,7 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     rec.admiralty or "",
                     str(rec.last_seen) if rec.last_seen else "",
                     f"{rec.confidence:.4f}" if rec.confidence is not None else "",
+                    ";".join(rec.cve_ids),
                 ]
             )
 

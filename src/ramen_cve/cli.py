@@ -823,13 +823,19 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
                     item.get("content", [{}])[0].get("value", "") if item.get("content") else "",
                 ]
             )
-            records.extend(extract_cves(
+            item_cves = extract_cves(
                 text, feed_source, item_date, "feed_pub",
                 tlp=entry.tlp, admiralty=entry.admiralty,
-            ))
+            )
+            records.extend(item_cves)
+            # Per-feed-item CVE attribution: an IOC mentioned in the same
+            # text blob as N CVEs gets all N ids stamped onto it. Slice E.5
+            # surfaces these in the `cve_ids` IOC-CSV column, and the Web UI
+            # filters per-CVE pages with substring match.
             iocs.extend(extract_iocs(
                 text, feed_source, item_date, "feed_pub",
                 tlp=entry.tlp, admiralty=entry.admiralty,
+                cve_ids=[r.cve_id for r in item_cves],
             ))
 
     iocs = _dedupe_iocs(iocs)
@@ -1043,6 +1049,7 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
                 tlp=ioc.tlp,
                 admiralty=ioc.admiralty,
                 last_seen=ioc.last_seen or ioc.first_seen,
+                cve_ids=list(ioc.cve_ids),
             )
             continue
         if ioc.first_seen < existing.first_seen:
@@ -1055,6 +1062,11 @@ def _dedupe_iocs(iocs: list[IocRecord]) -> list[IocRecord]:
             existing.last_seen = new_last
         if ioc.defanged_in_source and not existing.defanged_in_source:
             existing.defanged_in_source = True
+        # Union cve_ids across feed-item observations of the same IOC,
+        # preserving discovery order for deterministic serialization.
+        for cve_id in ioc.cve_ids:
+            if cve_id not in existing.cve_ids:
+                existing.cve_ids.append(cve_id)
         if ioc.source and ioc.source not in existing.source.split("; "):
             existing.source = f"{existing.source}; {ioc.source}"
         existing.tlp = _worst_tlp(existing.tlp, ioc.tlp)

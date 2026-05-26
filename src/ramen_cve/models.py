@@ -242,6 +242,13 @@ class IocRecord:
     # `confidence` decays exponentially per IOC type from 1.0 (just-seen) to 0.0
     # (long-stale). Populated by apply_ioc_decay() before output.
     confidence: float = 1.0
+    # CVE ids mentioned in the same feed-item text the IOC was extracted from.
+    # Multiple CVEs can appear in one item, so this is a list. _dedupe_iocs
+    # unions the lists when collapsing duplicates across items. Empty when no
+    # CVEs co-occurred (e.g., STIX bundles without indicator→vulnerability
+    # relationships). Surfaced as a `cve_ids` column in the IOC sidecar CSV
+    # and used by Task-8 Slice E.5 to filter IOCs onto per-CVE detail pages.
+    cve_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

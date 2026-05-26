@@ -1653,3 +1653,415 @@ def test_cve_page_picks_most_recent_artefacted_run(tmp_path):
     body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
     # The older run's exploit status flows through, not "—".
     assert "Public exploit (ExploitDB)" in body
+
+
+# ---------------------------------------------------------------------------
+# Slice E.5 — IOC schema bump + §6 render.
+# Threads CVE attribution through `IocRecord.cve_ids` so the per-CVE detail
+# page can filter the IOC sidecar to indicators that co-occurred with this
+# CVE in the same feed item.
+# ---------------------------------------------------------------------------
+
+
+def _write_run_iocs_csv(out_dir, disk_stamp, rows):
+    """Write a `<stamp>-iocs.csv` shaped to the new IOC_CSV_COLUMNS layout.
+
+    `rows` is `[(ioc_type, value, source, first_seen, confidence, cve_ids), ...]`
+    — minimal subset; uninteresting columns ("", etc.) are filled with empties.
+    """
+    import csv as _csv
+
+    from ramen_cve.output.stix import IOC_CSV_COLUMNS
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"ramen-cve-{disk_stamp}-iocs.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.writer(fh, quoting=_csv.QUOTE_MINIMAL)
+        w.writerow(IOC_CSV_COLUMNS)
+        for ioc_type, value, source, first_seen, confidence, cve_ids in rows:
+            row = {c: "" for c in IOC_CSV_COLUMNS}
+            row.update({
+                "ioc_type": ioc_type,
+                "value": value,
+                "source": source,
+                "first_seen": first_seen,
+                "first_seen_type": "feed_pub",
+                "defanged_in_source": "false",
+                "confidence": confidence,
+                "cve_ids": cve_ids,
+            })
+            w.writerow([row[c] for c in IOC_CSV_COLUMNS])
+    return path
+
+
+# ---- Model + extraction --------------------------------------------------
+
+
+def test_iocrecord_cve_ids_defaults_to_empty_list():
+    """Back-compat: IocRecord() with no cve_ids gets an empty list."""
+    from datetime import date
+
+    from ramen_cve import IocRecord
+
+    rec = IocRecord("url", "https://x", "feed-a", date(2024, 1, 1), "feed_pub")
+    assert rec.cve_ids == []
+
+
+def test_extract_iocs_propagates_cve_ids_to_each_emitted_ioc():
+    """Each IOC in the same feed-item text gets the same cve_ids list."""
+    from datetime import date
+
+    from ramen_cve.extract import extract_iocs
+
+    iocs = extract_iocs(
+        "See https://evil.example.com/ and contact attacker@evil.example.com",
+        "feed-a", date(2024, 1, 1), "feed_pub",
+        cve_ids=["CVE-2024-1234", "CVE-2024-5678"],
+    )
+    assert len(iocs) == 2  # url + email
+    for ioc in iocs:
+        assert ioc.cve_ids == ["CVE-2024-1234", "CVE-2024-5678"]
+
+
+def test_extract_iocs_default_cve_ids_is_empty():
+    from datetime import date
+
+    from ramen_cve.extract import extract_iocs
+
+    iocs = extract_iocs(
+        "See https://evil.example.com/", "feed-a", date(2024, 1, 1), "feed_pub",
+    )
+    assert iocs[0].cve_ids == []
+
+
+def test_extract_iocs_dedupes_cve_ids_input():
+    """A duplicate cve_id in the caller's list isn't repeated on the record."""
+    from datetime import date
+
+    from ramen_cve.extract import extract_iocs
+
+    iocs = extract_iocs(
+        "https://x.example/", "feed-a", date(2024, 1, 1), "feed_pub",
+        cve_ids=["CVE-A", "CVE-A", "CVE-B"],
+    )
+    assert iocs[0].cve_ids == ["CVE-A", "CVE-B"]
+
+
+# ---- Dedupe -------------------------------------------------------------
+
+
+def test_dedupe_iocs_unions_cve_ids_across_feed_items():
+    """Same IOC seen in item-A (CVE-X) and item-B (CVE-Y) → cve_ids = [X, Y]."""
+    from datetime import date
+
+    from ramen_cve import IocRecord
+    from ramen_cve.cli import _dedupe_iocs
+
+    iocs = [
+        IocRecord("url", "https://evil/", "feed-a", date(2024, 1, 1),
+                  "feed_pub", cve_ids=["CVE-X"]),
+        IocRecord("url", "https://evil/", "feed-b", date(2024, 1, 2),
+                  "feed_pub", cve_ids=["CVE-Y", "CVE-Z"]),
+    ]
+    merged = _dedupe_iocs(iocs)
+    assert len(merged) == 1
+    assert merged[0].cve_ids == ["CVE-X", "CVE-Y", "CVE-Z"]
+
+
+def test_dedupe_iocs_dedupes_cve_ids_within_union():
+    """If both items list the same CVE, the merged record carries it once."""
+    from datetime import date
+
+    from ramen_cve import IocRecord
+    from ramen_cve.cli import _dedupe_iocs
+
+    iocs = [
+        IocRecord("url", "https://x/", "feed-a", date(2024, 1, 1),
+                  "feed_pub", cve_ids=["CVE-X", "CVE-Y"]),
+        IocRecord("url", "https://x/", "feed-b", date(2024, 1, 2),
+                  "feed_pub", cve_ids=["CVE-Y", "CVE-Z"]),
+    ]
+    merged = _dedupe_iocs(iocs)
+    assert merged[0].cve_ids == ["CVE-X", "CVE-Y", "CVE-Z"]
+
+
+# ---- IOC CSV writer -----------------------------------------------------
+
+
+def test_ioc_csv_columns_includes_cve_ids():
+    """Lock the new column into IOC_CSV_COLUMNS."""
+    from ramen_cve.output.stix import IOC_CSV_COLUMNS
+
+    assert "cve_ids" in IOC_CSV_COLUMNS
+
+
+def test_write_iocs_csv_serializes_cve_ids_semicolon_joined(tmp_path):
+    import csv as _csv
+    from datetime import date
+
+    from ramen_cve import IocRecord
+    from ramen_cve.output.stix import IOC_CSV_COLUMNS, write_iocs_csv
+
+    iocs = [
+        IocRecord("url", "https://x/", "feed", date(2024, 1, 1), "feed_pub",
+                  cve_ids=["CVE-A", "CVE-B"]),
+    ]
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv(iocs, out)
+    rows = list(_csv.reader(out.open()))
+    cve_ids_idx = IOC_CSV_COLUMNS.index("cve_ids")
+    assert rows[1][cve_ids_idx] == "CVE-A;CVE-B"
+
+
+def test_write_iocs_csv_empty_cve_ids_serializes_to_empty_string(tmp_path):
+    import csv as _csv
+    from datetime import date
+
+    from ramen_cve import IocRecord
+    from ramen_cve.output.stix import IOC_CSV_COLUMNS, write_iocs_csv
+
+    iocs = [IocRecord("url", "https://x/", "feed", date(2024, 1, 1), "feed_pub")]
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv(iocs, out)
+    rows = list(_csv.reader(out.open()))
+    assert rows[1][IOC_CSV_COLUMNS.index("cve_ids")] == ""
+
+
+# ---- `_find_iocs_csv_for_cve` --------------------------------------------
+
+
+def test_find_iocs_csv_for_cve_returns_none_when_no_artefacts(tmp_path):
+    from ramen_cve.web.builder import _find_iocs_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    assert _find_iocs_csv_for_cve(cache, "CVE-X") is None
+
+
+def test_find_iocs_csv_for_cve_returns_none_when_sidecar_missing(tmp_path):
+    """Run has artefacts but the IOC sidecar wasn't produced (no IOCs in run)."""
+    from ramen_cve.web.builder import _find_iocs_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache, "2026-05-25T10:00:00", "20260525T100000000000",
+        tmp_path / "out", [("CVE-X", "none", "", "", "", "")],
+    )
+    # No -iocs.csv on disk.
+    assert _find_iocs_csv_for_cve(cache, "CVE-X") is None
+
+
+def test_find_iocs_csv_for_cve_returns_path_when_sidecar_exists(tmp_path):
+    from ramen_cve.web.builder import _find_iocs_csv_for_cve
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache, "2026-05-25T10:00:00", "20260525T100000000000",
+        tmp_path / "out", [("CVE-X", "none", "", "", "", "")],
+    )
+    _write_run_iocs_csv(
+        tmp_path / "out", "20260525T100000000000",
+        [("url", "https://x/", "feed", "2024-01-01", "1.0000", "CVE-X")],
+    )
+    path = _find_iocs_csv_for_cve(cache, "CVE-X")
+    assert path == tmp_path / "out" / "ramen-cve-20260525T100000000000-iocs.csv"
+
+
+# ---- `_read_iocs_for_cve` ------------------------------------------------
+
+
+def test_read_iocs_for_cve_filters_by_cve_id_substring(tmp_path):
+    from ramen_cve.web.builder import _read_iocs_for_cve
+
+    path = _write_run_iocs_csv(
+        tmp_path, "x",
+        [
+            ("url", "https://x/", "feed-a", "2024-01-01", "1.0000", "CVE-A;CVE-B"),
+            ("url", "https://y/", "feed-b", "2024-01-02", "1.0000", "CVE-C"),
+            ("url", "https://z/", "feed-c", "2024-01-03", "1.0000", "CVE-A"),
+        ],
+    )
+    rows = _read_iocs_for_cve(path, "CVE-A")
+    assert len(rows) == 2
+    values = {r["value"] for r in rows}
+    assert values == {"https://x/", "https://z/"}
+
+
+def test_read_iocs_for_cve_does_not_match_substring(tmp_path):
+    """`CVE-A` must NOT match `CVE-AB` — split on semicolons + exact compare."""
+    from ramen_cve.web.builder import _read_iocs_for_cve
+
+    path = _write_run_iocs_csv(
+        tmp_path, "x",
+        [("url", "https://x/", "feed", "2024-01-01", "1.0000", "CVE-AB")],
+    )
+    rows = _read_iocs_for_cve(path, "CVE-A")
+    assert rows == []
+
+
+def test_read_iocs_for_cve_sorts_by_first_seen_desc(tmp_path):
+    from ramen_cve.web.builder import _read_iocs_for_cve
+
+    path = _write_run_iocs_csv(
+        tmp_path, "x",
+        [
+            ("url", "https://old/", "feed", "2024-01-01", "1.0000", "CVE-X"),
+            ("url", "https://new/", "feed", "2024-03-01", "1.0000", "CVE-X"),
+            ("url", "https://mid/", "feed", "2024-02-01", "1.0000", "CVE-X"),
+        ],
+    )
+    rows = _read_iocs_for_cve(path, "CVE-X")
+    assert [r["first_seen"] for r in rows] == ["2024-03-01", "2024-02-01", "2024-01-01"]
+
+
+def test_read_iocs_for_cve_caps_at_50(tmp_path):
+    from ramen_cve.web.builder import _read_iocs_for_cve
+
+    rows_in = [
+        ("ipv4", f"10.0.0.{i}", "feed", f"2024-01-{(i % 28) + 1:02d}",
+         "1.0000", "CVE-X")
+        for i in range(60)
+    ]
+    path = _write_run_iocs_csv(tmp_path, "x", rows_in)
+    rows = _read_iocs_for_cve(path, "CVE-X")
+    assert len(rows) == 50
+
+
+def test_read_iocs_for_cve_returns_empty_when_no_file():
+    from ramen_cve.web.builder import _read_iocs_for_cve
+
+    assert _read_iocs_for_cve(None, "CVE-X") == []
+
+
+# ---- `_render_iocs` (§6) ------------------------------------------------
+
+
+def test_render_iocs_dash_when_no_rows():
+    from ramen_cve.web.builder import _render_iocs
+
+    out = _render_iocs([])
+    assert "<h2>IOCs</h2>" in out
+    assert "—" in out
+    assert "<table" not in out
+
+
+def test_render_iocs_renders_table_with_escaped_cells():
+    from ramen_cve.web.builder import _render_iocs
+
+    out = _render_iocs([{
+        "ioc_type": "url",
+        "value": "https://x/<script>",
+        "source": "feed-a",
+        "first_seen": "2024-01-01",
+        "confidence": "1.0000",
+    }])
+    assert "<table" in out
+    assert "https://x/&lt;script&gt;" in out
+    # No clickable <a> wrappers — design-doc §3.4 says IOC values must
+    # not be one-click reachable on an analyst's machine.
+    assert "<a href" not in out
+
+
+def test_render_iocs_truncation_footer_when_total_exceeds_displayed():
+    from ramen_cve.web.builder import _render_iocs
+
+    rows = [{
+        "ioc_type": "ipv4", "value": f"10.0.0.{i}",
+        "source": "feed", "first_seen": "2024-01-01", "confidence": "1.0000",
+    } for i in range(5)]
+    out = _render_iocs(rows, total=12)
+    assert "+7 more IOCs not shown" in out
+
+
+def test_render_iocs_no_footer_when_not_truncated():
+    from ramen_cve.web.builder import _render_iocs
+
+    rows = [{
+        "ioc_type": "ipv4", "value": "10.0.0.1",
+        "source": "feed", "first_seen": "2024-01-01", "confidence": "1.0000",
+    }]
+    out = _render_iocs(rows, total=1)
+    assert "more IOCs" not in out
+
+
+# ---- End-to-end per-CVE page integration --------------------------------
+
+
+def test_cve_page_iocs_section_dash_when_no_sidecar(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-X"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "<h2>IOCs</h2>" in body
+    # §6 renders dash; the surrounding sections also dash but at least
+    # one of the "<p>—</p>" instances is the §6 dash.
+    assert "<h2>IOCs</h2>\n<p>—</p>" in body
+
+
+def test_cve_page_iocs_section_renders_table_when_sidecar_present(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache, "2026-05-25T10:00:00", "20260525T100000000000",
+        tmp_path / "out", [("CVE-X", "none", "", "", "", "")],
+    )
+    _write_run_iocs_csv(
+        tmp_path / "out", "20260525T100000000000",
+        [
+            ("url", "https://malicious.example/", "feed-a",
+             "2024-03-10", "1.0000", "CVE-X"),
+            ("ipv4", "10.0.0.5", "feed-b", "2024-03-09", "0.8500", "CVE-X"),
+            ("url", "https://other-cve.example/", "feed-c",
+             "2024-03-08", "1.0000", "CVE-Y"),
+        ],
+    )
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    # CVE-X gets 2 IOCs; CVE-Y's IOC is excluded.
+    assert "https://malicious.example/" in body
+    assert "10.0.0.5" in body
+    assert "https://other-cve.example/" not in body
+
+
+def test_cve_page_iocs_footer_when_more_than_cap(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache, "2026-05-25T10:00:00", "20260525T100000000000",
+        tmp_path / "out", [("CVE-X", "none", "", "", "", "")],
+    )
+    _write_run_iocs_csv(
+        tmp_path / "out", "20260525T100000000000",
+        [
+            ("ipv4", f"10.0.0.{i}", "feed", f"2024-01-{(i % 28) + 1:02d}",
+             "1.0000", "CVE-X")
+            for i in range(75)
+        ],
+    )
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "cve" / "CVE-X.html").read_text("utf-8")
+    assert "+25 more IOCs not shown" in body
+
+
+def test_cve_page_iocs_byte_stable_across_two_builds(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run_with_csv(
+        cache, "2026-05-25T10:00:00", "20260525T100000000000",
+        tmp_path / "out", [("CVE-X", "none", "", "", "", "")],
+    )
+    _write_run_iocs_csv(
+        tmp_path / "out", "20260525T100000000000",
+        [("url", "https://x/", "feed", "2024-01-01", "1.0000", "CVE-X")],
+    )
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    first = (site_dir / "cve" / "CVE-X.html").read_bytes()
+    build_site(cache, site_dir)
+    assert (site_dir / "cve" / "CVE-X.html").read_bytes() == first
+
+
+def test_web_ioc_cap_is_50():
+    from ramen_cve.web.builder import WEB_IOC_CAP
+
+    assert WEB_IOC_CAP == 50

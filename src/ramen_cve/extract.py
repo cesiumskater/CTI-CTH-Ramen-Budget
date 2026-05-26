@@ -171,6 +171,7 @@ def extract_iocs(
     *,
     tlp: str = "CLEAR",
     admiralty: str = "",
+    cve_ids: list[str] | None = None,
 ) -> list[IocRecord]:
     """Extract a deduplicated list of non-CVE indicators from text.
 
@@ -188,6 +189,12 @@ def extract_iocs(
     refanged = _defang_text(text)
     tlp_norm = _normalize_tlp(tlp)
     admiralty_norm = (admiralty or "").upper()
+    # Deduplicate caller-supplied CVE ids while preserving order so the
+    # serialized cve_ids column is deterministic across runs.
+    cve_ids_norm: list[str] = []
+    for cve_id in cve_ids or []:
+        if cve_id not in cve_ids_norm:
+            cve_ids_norm.append(cve_id)
 
     seen: set[tuple[str, str]] = set()
     out: list[IocRecord] = []
@@ -211,6 +218,7 @@ def extract_iocs(
                 # decay anchor. Multi-run reservoirs (future feature) can
                 # update this value when re-discovering a stale IOC.
                 last_seen=first_seen,
+                cve_ids=list(cve_ids_norm),
             )
         )
 
