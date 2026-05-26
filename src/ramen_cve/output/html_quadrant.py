@@ -61,15 +61,18 @@ def _xml_escape(text: str) -> str:
     )
 
 
-def _render_quadrant_svg(
-    enriched: list[EnrichedCve],
+def _render_quadrant_svg_from_points(
+    points: list[tuple[float, float, str, str, bool]],
     cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
     epss_thr: float = DEFAULT_EPSS_THRESHOLD,
 ) -> str:
-    """Return an inline-SVG CVSS×EPSS quadrant scatter as a markup string.
+    """Return an inline-SVG CVSS×EPSS quadrant scatter from raw points.
 
-    Pure function; easy to unit-test and snapshot. Records with a missing
-    CVSS or EPSS score are skipped (no point can be plotted for them).
+    `points` is `[(cvss, epss, tooltip, bucket_id, is_latest), ...]`. The
+    caller is responsible for filtering out None coordinates. `is_latest`
+    enlarges the point and thickens its stroke — used by Task 8 Slice D's
+    per-CVE trajectory page to mark the most-recent snapshot. Stable
+    iteration order preserves byte-snapshottable output (no sort here).
     """
     parts: list[str] = []
     parts.append(
@@ -134,27 +137,48 @@ def _render_quadrant_svg(
             f'text-anchor="end" font-size="9" fill="#666666" dy="0.35em">{v:g}</text>'
         )
     # Data points. Stable order = input order, so snapshot tests are
-    # reproducible.
-    for rec in enriched:
-        if rec.cvss_score is None or rec.epss_score is None:
-            continue
-        cx, cy = _xy(rec.cvss_score, rec.epss_score)
-        bucket = rec.bucket or "unknown"
-        colour = BUCKET_COLOURS.get(bucket, BUCKET_COLOURS["unknown"])
-        tooltip = (
-            f"{rec.cve_id} — CVSS {rec.cvss_score:.1f}, "
-            f"EPSS {rec.epss_score:.4f} ({bucket})"
-        )
+    # reproducible. `is_latest` thickens the stroke + enlarges the point
+    # so the most-recent snapshot in a trajectory pops without changing
+    # any pre-existing snapshots (all wrapper callers pass is_latest=False).
+    for cvss, epss, tooltip, bucket_id, is_latest in points:
+        cx, cy = _xy(cvss, epss)
+        colour = BUCKET_COLOURS.get(bucket_id, BUCKET_COLOURS["unknown"])
+        radius = POINT_RADIUS + 2 if is_latest else POINT_RADIUS
+        stroke_width = "2" if is_latest else "0.5"
+        latest_cls = " cve-latest" if is_latest else ""
         parts.append(
-            f'<circle class="cve cve-{bucket}" '
-            f'cx="{cx:.1f}" cy="{cy:.1f}" r="{POINT_RADIUS}" '
+            f'<circle class="cve cve-{bucket_id}{latest_cls}" '
+            f'cx="{cx:.1f}" cy="{cy:.1f}" r="{radius}" '
             f'fill="{colour}" fill-opacity="0.75" '
-            f'stroke="#333333" stroke-width="0.5">'
+            f'stroke="#333333" stroke-width="{stroke_width}">'
             f'<title>{_xml_escape(tooltip)}</title>'
             f'</circle>'
         )
     parts.append('</svg>')
     return "\n".join(parts) + "\n"
+
+
+def _render_quadrant_svg(
+    enriched: list[EnrichedCve],
+    cvss_thr: float = DEFAULT_CVSS_THRESHOLD,
+    epss_thr: float = DEFAULT_EPSS_THRESHOLD,
+) -> str:
+    """Return an inline-SVG CVSS×EPSS quadrant scatter as a markup string.
+
+    Pure function; easy to unit-test and snapshot. Records with a missing
+    CVSS or EPSS score are skipped (no point can be plotted for them).
+    """
+    points: list[tuple[float, float, str, str, bool]] = []
+    for rec in enriched:
+        if rec.cvss_score is None or rec.epss_score is None:
+            continue
+        bucket = rec.bucket or "unknown"
+        tooltip = (
+            f"{rec.cve_id} — CVSS {rec.cvss_score:.1f}, "
+            f"EPSS {rec.epss_score:.4f} ({bucket})"
+        )
+        points.append((rec.cvss_score, rec.epss_score, tooltip, bucket, False))
+    return _render_quadrant_svg_from_points(points, cvss_thr, epss_thr)
 
 
 def write_quadrant_html(
