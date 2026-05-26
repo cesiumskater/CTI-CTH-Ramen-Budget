@@ -19,18 +19,20 @@ Slice E: per-CVE detail page §§4, 5, 7 — exploit status, associations,
 affected hosts. All three read from the most-recent run's main CVE CSV
 on disk (snapshot-consistent with §§1-3).
 
-Slice E.5 (this update): per-CVE detail page §6 — IOCs. Threads CVE
-attribution through the IOC pipeline (extract → dedupe → CSV) by adding
-`IocRecord.cve_ids: list[str]` (`extract.py` populates from co-occurring
-CVEs in the same feed-item text; `_dedupe_iocs` unions on merge;
-`write_iocs_csv` serializes as a semicolon-joined `cve_ids` column). The
-Web UI's `_render_iocs` reads the sidecar, filters where `cve_id` is in
-the row's `cve_ids` list, caps at 50, sorts by `first_seen` DESC, and
-renders an HTML-escaped `<table>` (no clickable `<a>` tags — a malicious
-URL must not be one click away on an analyst's machine).
+Slice E.5: per-CVE detail page §6 — IOCs. Threads CVE attribution
+through the IOC pipeline (extract → dedupe → CSV) by adding
+`IocRecord.cve_ids: list[str]`. The Web UI's `_render_iocs` reads the
+sidecar, filters where `cve_id` is in the row's `cve_ids` list, caps
+at 50, sorts by `first_seen` DESC, and renders an HTML-escaped
+`<table>` with no clickable `<a>` tags.
 
-Slices F-G extend per `docs/web_ui_design.md`:
-  - F: "what changed" diff block on per-run pages
+Slice F (this update): per-run "Changes since previous run" diff block
+on `runs/<slug>.html`. Compares each run against the immediately-prior
+`ts_iso` and lists added / removed / reclassified CVEs. The oldest run
+gets a "First recorded run" placeholder. All CVE links resolve to
+`../cve/<CVE-ID>.html` (Slice D-emitted pages).
+
+Slice G extends per `docs/web_ui_design.md`:
   - G: bucket-policy threading + showcase regen extension
 """
 from __future__ import annotations
@@ -249,17 +251,135 @@ def _render_strip(
     )
 
 
+def _previous_ts_iso(cache: Cache, ts_iso: str) -> str | None:
+    """The immediately-prior distinct `ts_iso` in `runs`, or None.
+
+    Used by Slice F to pair each run with its predecessor for the diff
+    block. None means the supplied run is the oldest recorded.
+    """
+    row = cache._conn.execute(
+        "SELECT ts_iso FROM runs WHERE ts_iso < ? "
+        "ORDER BY ts_iso DESC LIMIT 1",
+        (ts_iso,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _bucket_map_for_run(cache: Cache, ts_iso: str) -> dict[str, str]:
+    """`{cve_id: bucket}` snapshot for one run."""
+    rows = cache._conn.execute(
+        "SELECT cve_id, bucket FROM runs WHERE ts_iso = ?",
+        (ts_iso,),
+    ).fetchall()
+    return dict(rows)
+
+
+def _diff_runs(
+    cache: Cache, this_ts_iso: str,
+) -> tuple[list[str], list[str], list[tuple[str, str, str]]]:
+    """Return `(added, removed, reclassified)` lists vs. the prior run.
+
+    `reclassified` entries are `(cve_id, old_bucket, new_bucket)`.
+    Sorted alphabetically by CVE id for deterministic, byte-stable
+    output. When no prior run exists, all three lists are empty —
+    `_render_diff_block` then emits the "First recorded run" placeholder.
+    """
+    prev_ts = _previous_ts_iso(cache, this_ts_iso)
+    if prev_ts is None:
+        return ([], [], [])
+    this_map = _bucket_map_for_run(cache, this_ts_iso)
+    prev_map = _bucket_map_for_run(cache, prev_ts)
+    this_ids = set(this_map)
+    prev_ids = set(prev_map)
+    added = sorted(this_ids - prev_ids)
+    removed = sorted(prev_ids - this_ids)
+    reclassified: list[tuple[str, str, str]] = []
+    for cve_id in sorted(this_ids & prev_ids):
+        if prev_map[cve_id] != this_map[cve_id]:
+            reclassified.append((cve_id, prev_map[cve_id], this_map[cve_id]))
+    return added, removed, reclassified
+
+
+def _cve_link(cve_id: str) -> str:
+    """Per-run-page-relative `<a>` to the Slice-D-emitted per-CVE page."""
+    escaped = html.escape(cve_id, quote=True)
+    return f'<a href="../cve/{escaped}.html">{escaped}</a>'
+
+
+def _render_diff_block(
+    cache: Cache,
+    this_ts_iso: str,
+    policy: BucketPolicy,
+) -> str:
+    """Render the §5.2 "Changes since previous run" block.
+
+    Layout:
+    - Oldest run (no predecessor) → "First recorded run — no diff
+      available" placeholder.
+    - Empty diff (CVE set + buckets identical) → "No changes."
+    - Otherwise → three sub-sections (Added / Removed / Reclassified),
+      each rendered only when non-empty. Reclassified entries show
+      "<CVE> · <old label> → <new label>" with policy-resolved labels.
+    """
+    if _previous_ts_iso(cache, this_ts_iso) is None:
+        return (
+            "<h2>Changes since previous run</h2>\n"
+            "<p>First recorded run — no diff available.</p>\n"
+        )
+
+    added, removed, reclassified = _diff_runs(cache, this_ts_iso)
+    if not (added or removed or reclassified):
+        return (
+            "<h2>Changes since previous run</h2>\n"
+            "<p>No changes.</p>\n"
+        )
+
+    parts = ["<h2>Changes since previous run</h2>\n"]
+    if added:
+        items = "".join(f"<li>{_cve_link(c)}</li>" for c in added)
+        parts.append(f"<h3>Added ({len(added)})</h3>\n<ul>{items}</ul>\n")
+    if removed:
+        # Removed CVEs no longer have a per-run-bucket here, but Slice D
+        # may still emit a CVE page (any prior run keeps it in
+        # `_list_distinct_cve_ids`). Link defensively.
+        items = "".join(f"<li>{_cve_link(c)}</li>" for c in removed)
+        parts.append(f"<h3>Removed ({len(removed)})</h3>\n<ul>{items}</ul>\n")
+    if reclassified:
+        rows = []
+        for cve_id, old, new in reclassified:
+            try:
+                old_label = policy.label(old)
+            except KeyError:
+                old_label = old
+            try:
+                new_label = policy.label(new)
+            except KeyError:
+                new_label = new
+            rows.append(
+                f"<li>{_cve_link(cve_id)} · "
+                f"{html.escape(old_label, quote=True)} → "
+                f"{html.escape(new_label, quote=True)}</li>"
+            )
+        parts.append(
+            f"<h3>Reclassified ({len(reclassified)})</h3>\n"
+            f"<ul>{''.join(rows)}</ul>\n"
+        )
+    return "".join(parts)
+
+
 def _render_run_page(
     run: _DiscoveredRun,
     version: str,
     runs_dir: Path,
+    cache: Cache,
+    policy: BucketPolicy,
 ) -> str:
     """Render one `runs/<slug>.html` per-run summary page.
 
-    Slice C scope (locked): header (ts_iso + CVE count) plus a 6-row
-    table of artefact-file links — each row renders "—" when the file
-    is absent. The page is standalone (no run-history strip back-link).
-    Slice F adds the diff block; Slice G threads bucket-policy labels.
+    Slice C: header (ts_iso + CVE count) + 6-row artefact-link table.
+    Slice F: appends a "Changes since previous run" diff block computed
+    from the prior `ts_iso` (added / removed / reclassified CVEs). The
+    oldest run gets a "First recorded run" placeholder.
     """
     ts_escaped = html.escape(run.ts_iso, quote=True)
     plural = "" if run.cve_count == 1 else "s"
@@ -268,6 +388,7 @@ def _render_run_page(
         f"<td>{_artefact_link_cell(run, key, runs_dir)}</td></tr>"
         for key, label, _t in _ARTEFACT_KINDS
     )
+    diff_block = _render_diff_block(cache, run.ts_iso, policy)
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -284,6 +405,7 @@ def _render_run_page(
         "<table>\n"
         f"{artefact_rows}\n"
         "</table>\n"
+        f"{diff_block}"
         "</body>\n"
         "</html>\n"
     )
@@ -734,7 +856,10 @@ def build_site(
     for run in runs:
         slug = _slugify_ts(run.ts_iso)
         page_path = runs_dir / f"{slug}.html"
-        page_path.write_text(_render_run_page(run, VERSION, runs_dir), encoding="utf-8")
+        page_path.write_text(
+            _render_run_page(run, VERSION, runs_dir, cache, active_policy),
+            encoding="utf-8",
+        )
         paths[f"run/{slug}"] = page_path
 
     for cve_id in _list_distinct_cve_ids(cache):

@@ -294,8 +294,45 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       CVE-2024-99999) renders 2 rows on the per-CVE page sorted by
       `first_seen` DESC with the unrelated IOC correctly filtered out
       and no clickable links anywhere.
-- [ ] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /
-      reclassified since previous run).
+- [x] **Slice F — Diff block** on `runs/<ts>.html` (added / removed /
+      reclassified since previous run). New helpers in `web/builder.py`:
+      `_previous_ts_iso(cache, ts_iso)` — `SELECT ts_iso FROM runs
+      WHERE ts_iso < ? ORDER BY ts_iso DESC LIMIT 1` (strict less-than
+      so a run isn't its own predecessor); `_bucket_map_for_run(cache,
+      ts_iso)` — `{cve_id: bucket}` snapshot; `_diff_runs(cache,
+      this_ts_iso)` — returns `(added, removed, reclassified)` where
+      `reclassified` is `[(cve_id, old_bucket, new_bucket), ...]`, all
+      three lists sorted alphabetically for byte-stable output; no
+      double-counting (set semantics: added is `this - prev`, removed
+      is `prev - this`, reclassified is `this ∩ prev` where buckets
+      differ); `_cve_link(cve_id)` — `<a href="../cve/<id>.html">`
+      pointing at Slice-D-emitted per-CVE pages; `_render_diff_block(
+      cache, ts_iso, policy)` — three render branches: oldest run →
+      "First recorded run — no diff available." placeholder; no-change
+      run → "No changes."; otherwise three sub-sections (`Added (N)` /
+      `Removed (N)` / `Reclassified (N)`) each rendered only when
+      non-empty. Reclassified entries render `"<CVE> · <old label> →
+      <new label>"` via `policy.label()` with KeyError-fallback to the
+      raw bucket id. `_render_run_page` signature extended with
+      `cache` + `policy` kwargs; `build_site` passes them through.
+      +18 tests in `tests/test_web_ui.py` covering: `_previous_ts_iso`
+      (None for single-run, picks immediate prior, strict `<` excludes
+      self); `_bucket_map_for_run` (cve→bucket mapping);
+      `_diff_runs` (no prior → empty, added-only, removed-only,
+      reclassified-only, no double-counting, alphabetical sort, no
+      changes); per-run-page integration (oldest run "First recorded"
+      placeholder, "No changes." when identical, Added with linked
+      CVEs, Removed with linked CVEs, Reclassified with old→new label
+      using `policy.label()`, unknown-bucket-fallback to raw id,
+      byte-stability across two builds). Verification: 769 passed
+      (was 751 + 18 new), ruff clean, golden CSV+MD byte-oracle
+      byte-identical to anchor, `regen --check` rc=0, manual smoke
+      against two seeded runs (Run-A: A/B/OLD; Run-B: A/B/NEW with
+      B reclassified watch_closely → kev_override) renders the diff
+      block exactly as expected — Added(1)=CVE-NEW,
+      Removed(1)=CVE-OLD, Reclassified(1)="CVE-B · Watch Closely →
+      KEV Override (Patch Immediately)" — and the older run shows
+      "First recorded run — no diff available."
 - [ ] **Slice G — Bucket-policy threading** (`--config NAME` →
       `args.bucket_policy` → every label in every page) **+ showcase
       regen extension** (`examples/_web-sample/` committed bundle).

@@ -2065,3 +2065,259 @@ def test_web_ioc_cap_is_50():
     from ramen_cve.web.builder import WEB_IOC_CAP
 
     assert WEB_IOC_CAP == 50
+
+
+# ---------------------------------------------------------------------------
+# Slice F — "Changes since previous run" diff block on per-run pages.
+# Compares each run against the immediately-prior `ts_iso` and lists
+# added / removed / reclassified CVEs. The oldest run gets a "First
+# recorded run" placeholder.
+# ---------------------------------------------------------------------------
+
+
+def _insert_run_row(cache, ts_iso, cve_id, bucket="patch_now",
+                     cvss=9.0, epss=0.5):
+    """Direct INSERT into `runs` with explicit (cve_id, bucket) per row."""
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (cve_id, ts_iso, bucket, cvss, epss),
+    )
+
+
+# ---- `_previous_ts_iso` --------------------------------------------------
+
+
+def test_previous_ts_iso_none_when_only_one_run(tmp_path):
+    from ramen_cve.web.builder import _previous_ts_iso
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    assert _previous_ts_iso(cache, "2026-05-25T10:00:00") is None
+
+
+def test_previous_ts_iso_picks_immediately_prior(tmp_path):
+    from ramen_cve.web.builder import _previous_ts_iso
+
+    cache = Cache(tmp_path / ".cache.db")
+    for ts in ("2026-05-25T10:00:00", "2026-05-26T10:00:00",
+               "2026-05-27T10:00:00"):
+        _seed_run(cache, ts, cve_ids=["CVE-A"])
+    assert _previous_ts_iso(cache, "2026-05-27T10:00:00") == "2026-05-26T10:00:00"
+
+
+def test_previous_ts_iso_skips_same_ts(tmp_path):
+    """The prior-run query is `ts_iso < ?` — equal ts_iso isn't "previous"."""
+    from ramen_cve.web.builder import _previous_ts_iso
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A", "CVE-B"])
+    assert _previous_ts_iso(cache, "2026-05-25T10:00:00") is None
+
+
+# ---- `_bucket_map_for_run` ----------------------------------------------
+
+
+def test_bucket_map_for_run_returns_cve_to_bucket_dict(tmp_path):
+    from ramen_cve.web.builder import _bucket_map_for_run
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-B", bucket="watch_closely")
+    cache._conn.commit()
+    bm = _bucket_map_for_run(cache, "2026-05-25T10:00:00")
+    assert bm == {"CVE-A": "patch_now", "CVE-B": "watch_closely"}
+
+
+# ---- `_diff_runs` -------------------------------------------------------
+
+
+def test_diff_runs_returns_empty_when_no_prior(tmp_path):
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    assert _diff_runs(cache, "2026-05-25T10:00:00") == ([], [], [])
+
+
+def test_diff_runs_added(tmp_path):
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-B", bucket="patch_now")
+    cache._conn.commit()
+    added, removed, reclassified = _diff_runs(cache, "2026-05-26T10:00:00")
+    assert added == ["CVE-B"]
+    assert removed == []
+    assert reclassified == []
+
+
+def test_diff_runs_removed(tmp_path):
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-B", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    cache._conn.commit()
+    added, removed, reclassified = _diff_runs(cache, "2026-05-26T10:00:00")
+    assert removed == ["CVE-B"]
+    assert added == []
+    assert reclassified == []
+
+
+def test_diff_runs_reclassified(tmp_path):
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-X",
+                    bucket="watch_closely")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-X",
+                    bucket="patch_now")
+    cache._conn.commit()
+    added, removed, reclassified = _diff_runs(cache, "2026-05-26T10:00:00")
+    assert added == []
+    assert removed == []
+    assert reclassified == [("CVE-X", "watch_closely", "patch_now")]
+
+
+def test_diff_runs_no_double_counting(tmp_path):
+    """A CVE that's "added" can't also be "reclassified" (not in prior)."""
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-B",
+                    bucket="watch_closely")
+    cache._conn.commit()
+    added, _, reclassified = _diff_runs(cache, "2026-05-26T10:00:00")
+    assert added == ["CVE-B"]
+    assert all(c != "CVE-B" for c, _o, _n in reclassified)
+
+
+def test_diff_runs_sorts_alphabetically(tmp_path):
+    """Byte-stability: each list is sorted by CVE id ASC."""
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-Z", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-Z", bucket="patch_now")
+    for cve_id in ("CVE-D", "CVE-A", "CVE-M"):
+        _insert_run_row(cache, "2026-05-26T10:00:00", cve_id,
+                        bucket="watch_closely")
+    cache._conn.commit()
+    added, _, _ = _diff_runs(cache, "2026-05-26T10:00:00")
+    assert added == ["CVE-A", "CVE-D", "CVE-M"]
+
+
+def test_diff_runs_no_changes_returns_empty(tmp_path):
+    """Two identical runs (same CVE set + buckets) → all three lists empty."""
+    from ramen_cve.web.builder import _diff_runs
+
+    cache = Cache(tmp_path / ".cache.db")
+    for ts in ("2026-05-25T10:00:00", "2026-05-26T10:00:00"):
+        _insert_run_row(cache, ts, "CVE-A", bucket="patch_now")
+        _insert_run_row(cache, ts, "CVE-B", bucket="watch_closely")
+    cache._conn.commit()
+    assert _diff_runs(cache, "2026-05-26T10:00:00") == ([], [], [])
+
+
+# ---- `_render_diff_block` integration via build_site ---------------------
+
+
+def test_run_page_oldest_run_shows_first_recorded_placeholder(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-25T10:00:00", cve_ids=["CVE-A"])
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-25T10-00-00.html").read_text("utf-8")
+    assert "<h2>Changes since previous run</h2>" in body
+    assert "First recorded run" in body
+
+
+def test_run_page_no_changes_when_buckets_identical(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    for ts in ("2026-05-25T10:00:00", "2026-05-26T10:00:00"):
+        _insert_run_row(cache, ts, "CVE-A", bucket="patch_now")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "<p>No changes.</p>" in body
+    # No Added/Removed/Reclassified sub-headers.
+    assert "<h3>Added" not in body
+    assert "<h3>Removed" not in body
+    assert "<h3>Reclassified" not in body
+
+
+def test_run_page_shows_added_section_with_cve_links(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-B", bucket="patch_now")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "<h3>Added (1)</h3>" in body
+    assert '<a href="../cve/CVE-B.html">CVE-B</a>' in body
+
+
+def test_run_page_shows_removed_section_with_cve_links(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-B", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "<h3>Removed (1)</h3>" in body
+    assert '<a href="../cve/CVE-B.html">CVE-B</a>' in body
+
+
+def test_run_page_shows_reclassified_with_old_to_new_labels(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-X",
+                    bucket="watch_closely")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-X", bucket="patch_now")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "<h3>Reclassified (1)</h3>" in body
+    # Policy labels: watch_closely → "Watch Closely", patch_now → "Patch Now"
+    assert "Watch Closely" in body
+    assert "Patch Now" in body
+    # The "old → new" arrow.
+    assert "→" in body
+
+
+def test_run_page_reclassified_unknown_bucket_falls_back_to_raw(tmp_path):
+    """A bucket id not in the policy renders the raw id rather than crashing."""
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-X",
+                    bucket="not_a_bucket")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-X", bucket="patch_now")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    body = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "not_a_bucket" in body
+
+
+def test_run_page_diff_block_is_byte_stable(tmp_path):
+    cache = Cache(tmp_path / ".cache.db")
+    _insert_run_row(cache, "2026-05-25T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-A", bucket="patch_now")
+    _insert_run_row(cache, "2026-05-26T10:00:00", "CVE-B",
+                    bucket="watch_closely")
+    cache._conn.commit()
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir)
+    first = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes()
+    build_site(cache, site_dir)
+    assert (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes() == first
