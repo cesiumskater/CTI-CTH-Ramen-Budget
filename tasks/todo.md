@@ -750,6 +750,20 @@ E: 1; tests: 2–3; docs: 1).
   Left in place; harmless (merged). A maintainer can delete it from the
   GitHub UI, or enable "automatically delete head branches" on the repo.
 
+**Follow-up (2026-05-26).** Second deletion attempt during the Task 8
+work surface: same `HTTP 403` on `git push origin --delete
+claude/daemon-mode`, and the available GitHub MCP toolset has no
+`delete_branch` verb (only `create_branch`, `delete_file`,
+`list_branches` exist on this session). Confirmed via the
+`origin/main..origin/claude/daemon-mode` log that the ref has zero
+unmerged commits — its code is fully on `main` via PR #26's squash, so
+deletion would lose nothing. **Manual step required from the
+maintainer:** GitHub UI → branches page → trash-icon next to
+`claude/daemon-mode`, OR enable Repo Settings → General →
+"Automatically delete head branches" so future merged PRs auto-clean
+their head ref (this stale one would still need a one-shot manual
+delete, but no future ones would accrue).
+
 **Acceptance.** Local clutter gone; `main` history unchanged. The
 remaining `origin/claude/daemon-mode` is a known, harmless leftover
 outside this session's push scope.
