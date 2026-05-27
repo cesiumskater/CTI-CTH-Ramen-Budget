@@ -1,5 +1,10 @@
 # AI Coding Agent Guidelines (claude.md)
 
+> **Scope.** Internal, contributor-facing rules for AI coding agents
+> working in this repository. For everything user-facing — install,
+> usage, configuration, outputs, roadmap — start with
+> [`README.md`](../README.md) (the single source of truth).
+
 These rules define how an AI coding agent should plan, execute, verify, communicate, and recover when working in a real codebase. Optimize for correctness, minimalism, and developer experience.
 
 ---
@@ -264,14 +269,11 @@ This section is project-specific and applies only to the `ramen-cve` tool that l
 
 ### Project shape
 
-> **Status note:** this project-specific section was originally written
-> for the single-file v1 (`ramen_cve.py` at the repo root, ~400 LOC). The
-> codebase has since been refactored into a ~30-module package under
-> `src/ramen_cve/` behind a flat re-export façade — see
-> `docs/REFACTOR_PLAN.md` for the authoritative architecture and the
-> Execution Log. The entries below have been updated to reflect the
-> current package shape; the global AI-agent operating principles above
-> are unchanged.
+> **Status:** the codebase is a ~30-module package under `src/ramen_cve/`
+> behind a pure re-export façade with a locked `__all__`. The historical
+> monolith → package refactor is summarised in `docs/REFACTOR_PLAN.md`;
+> the current architecture reference is `src/ramen_cve/__init__.py`
+> itself and `README.md` (Repository layout section).
 
 - **Layered package.** Implementation lives under `src/ramen_cve/` as
   ~30 focused, layered modules: `constants`, `models`, `cache`,
@@ -343,57 +345,27 @@ Both APIs are documented at the URLs above and behavior is subject to change. If
 
 ### File and directory layout
 
-```
-ramen-cve/
-├── README.md
-├── pyproject.toml              # ramen-cve console script + dev extra
-├── threat_intel_hunter.py      # entry-point shim (routes to ramen_cve.cli.main)
-├── conftest.py                 # tests bootstrap (src/ on sys.path)
-├── .env.example
-├── .gitignore
-├── LICENSE
-├── src/ramen_cve/
-│   ├── __init__.py             # pure re-export façade + locked __all__
-│   ├── __main__.py             # `python -m ramen_cve` -> cli.main
-│   ├── constants.py            # regexes, thresholds, DEFAULT_*, lookup tables
-│   ├── models.py               # OpmlError + 10 dataclasses (L0 leaf)
-│   ├── cache.py                # SQLite cache
-│   ├── extract.py, decay.py    # opml/CVE/IOC extraction; IOC decay
-│   ├── analyze.py              # bucket_and_suggest, filter_by_date, TLP/Admiralty
-│   ├── associations.py         # threat-actor / campaign / malware associations
-│   ├── keyring.py              # API-key bootstrap + redaction
-│   ├── enrich/                 # nvd, epss, kev, exploits, iocs, inventory, orchestrator
-│   ├── output/                 # csv_writer, markdown, stix, sigma, yara
-│   ├── dispatch/               # sinks (Slack/webhook/email), runner, digest
-│   ├── config.py, cliutil.py   # YAML presets + remembered-OPML; argparse validators
-│   ├── pipeline.py             # _maybe_* glue, _output multi-format writer
-│   ├── wizard.py               # interactive questionary wizard
-│   ├── hunt.py, pir.py, trend.py
-│   ├── audit.py, schedule.py   # tamper-evident audit log; cron / Task XML emit
-│   ├── cli.py                  # _shared_flags, build_parser, main, _run_*
-│   └── data/                   # bundled associations.json, default hunts/ + pirs/
-├── examples/
-│   ├── sample.opml
-│   ├── sample-output.csv
-│   └── sample-report.md
-├── tests/
-│   ├── test_ramen_cve.py       # main suite
-│   ├── test_facade.py          # façade-contract lock
-│   ├── test_smoke.py           # mocked-pipeline E2E
-│   ├── test_wizard.py
-│   └── fixtures/               # NVD/EPSS JSON fixtures
-├── docs/
-│   ├── CLAUDE.md               # these guidelines
-│   └── REFACTOR_PLAN.md        # authoritative architecture + Execution Log
-└── tasks/
-    └── lessons.md              # L1–L6 (recurring failure modes + prevention)
-```
+The authoritative repository tree lives in
+[`README.md` — Repository layout](../README.md#repository-layout).
+Contributor-relevant additions on top of that:
+
+- `src/ramen_cve/web/` — static-HTML Web UI generator (Task 8).
+- `src/ramen_cve/daemon.py` — long-running daemon subcommand.
+- `src/ramen_cve/bucket_policy.py` — configurable bucket
+  policy (label / threshold / action) used by `analyze`, `output`,
+  and `web`.
+- `src/ramen_cve/render.py` — small render helpers (sparkline) lifted
+  to an L1 leaf so `output/` and `trend/` can share them without an
+  upward import.
+- `tests/test_facade.py` locks the full re-export surface +
+  patch-contract for `ramen_cve.requests.get`, `ramen_cve.time.sleep`,
+  and `ramen_cve.DEFAULT_CACHE_PATH`. Never remove a re-export without
+  updating the contract.
 
 `tasks/lessons.md` is mandatory and is reviewed at session start (per the
-Self-Improvement Loop). `tasks/todo.md` is currently consolidated into
-`docs/REFACTOR_PLAN.md`'s Execution Log to keep a single auditable
-ledger — `REFACTOR_PLAN.md` and `lessons.md` together cover the
-templates in the global section above.
+Self-Improvement Loop). `tasks/todo.md` is the active backlog with
+planning templates and forward-looking work; together with
+`lessons.md` it covers the templates in the global section above.
 
 ### Style
 
@@ -412,26 +384,21 @@ templates in the global section above.
 
 ### Things still out of scope
 
-The list below is what remains genuinely future work after the package
-refactor. Items that the v1 doc originally listed here but that have
-since shipped (Slack / generic-webhook / email digest dispatchers in
-`dispatch/`, the Windows Task Scheduler / cron emitter in `schedule.py`,
-STIX 2.1 + Sigma + YARA writers in `output/`) are no longer out of
-scope — they are documented in `docs/REFACTOR_PLAN.md` §2.
+The original v1 "things still out of scope" list (HTML quadrant chart,
+EPSS trajectory mode, multi-page URL crawling, configurable bucket
+labels/thresholds, web UI, daemon mode) **has all shipped**. The
+current forward-looking backlog lives in two places:
 
-- HTML quadrant chart output.
-- EPSS trajectory mode (date-range historical lookups).
-- Multi-page URL crawling (the `--depth 1` option).
-- Configurable bucket labels or thresholds beyond the CVSS and EPSS
-  cutoffs.
-- A web UI.
-- A long-running daemon mode (the `schedule` subcommand emits a
-  cron line / Task XML for the user's own scheduler — the tool itself
-  still runs one shot at a time).
+- [`tasks/todo.md`](../tasks/todo.md) — active backlog with slice plans
+  and verification gates.
+- [`cti-capability-gap-analysis-v2.md`](cti-capability-gap-analysis-v2.md)
+  — prioritized capability roadmap (SSVC, native SIEM query generation,
+  MISP push/pull, bucket-transition delta alerting, scanner imports,
+  risk-weighted prioritization, backtesting, hunt analytics library).
 
-If a request would expand scope into one of these, log it as a follow-up
-in `docs/REFACTOR_PLAN.md` (or its successor) rather than scope-creeping
-the current change.
+If a request would expand scope beyond the in-flight task, log it as a
+follow-up in `tasks/todo.md` rather than scope-creeping the current
+change.
 
 ### Definition of Done for v1 specifically
 

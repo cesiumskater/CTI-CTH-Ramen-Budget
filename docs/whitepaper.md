@@ -107,13 +107,13 @@ caches, a non-purged `runs` history (for trending), and an append-only
 (`src/ramen_cve/data/`); YAML presets ship under `src/ramen_cve/config/`.
 
 The codebase is a ~30-module package under `src/ramen_cve/`, refactored from
-the original single-file design on 2026-05-18 → 2026-05-20 (see
-`docs/REFACTOR_PLAN.md` Execution Log, steps 0–33). The package layers
-(constants → models → cache → extract → … → output / dispatch / config →
-cli → façade) preserve the flat `from ramen_cve import X` contract via a
-re-export `__init__.py`. The 463-test suite and a golden byte-oracle
-proved the refactor is zero-behaviour-change end-to-end (regenerated
-CSV/Markdown are byte-identical to the pre-refactor baseline).
+the original single-file design in May 2026 (historical detail in
+`docs/REFACTOR_PLAN.md`). The package layers (constants → models → cache →
+extract → … → output / dispatch / config → cli → façade) preserve the flat
+`from ramen_cve import X` contract via a re-export `__init__.py` with a
+locked `__all__`. The 770+-test suite and a golden byte-oracle proved the
+refactor is zero-behaviour-change end-to-end (regenerated CSV/Markdown are
+byte-identical to the pre-refactor baseline).
 
 ---
 
@@ -228,16 +228,18 @@ the **audit log** records who ran what, when, and with what outcome.
 
 ## 8. Roadmap
 
-Prioritized in `docs/cti-capability-gap-analysis-v2.md`:
+The prioritized forward-looking backlog lives in
+`docs/cti-capability-gap-analysis-v2.md` (and the live work-item list at
+`tasks/todo.md`). At a glance:
 
-1. **SSVC decision tree** (CISA/CMU) alongside the existing buckets.
-2. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside Sigma.
-3. **MISP-native push/pull** via PyMISP.
-4. **Bucket-transition delta alerting** — page only when a CVE *moves* up.
-5. **Vulnerability-scanner imports** (Nessus / Qualys).
-6. **Risk-weighted prioritization** (CVE × asset criticality × exploit).
-7. **Backtesting / replay mode** for evaluating model changes safely.
-8. Completion of the fine-grained `core/parsers/outputs` module split.
+1. **Bucket-transition delta alerting** — page only when a CVE *moves up*.
+2. **SSVC decision tree** (CISA/CMU) alongside the existing buckets.
+3. **Risk-weighted prioritization** (CVE × asset criticality × exploit).
+4. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside Sigma.
+5. **MISP-native push/pull** via PyMISP.
+6. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7).
+7. **Hunt analytics library** — reusable per-ATT&CK-technique queries.
+8. **Backtesting / replay mode** for evaluating model changes safely.
 
 ---
 
