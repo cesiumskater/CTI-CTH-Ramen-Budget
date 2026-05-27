@@ -528,6 +528,14 @@ def build_parser() -> argparse.ArgumentParser:
              "<DIR>/static/style.css. No default — explicit by design "
              "(no surprise overwrites; see docs/web_ui_design.md §D5).",
     )
+    web_p.add_argument(
+        "--out-dir", type=_path_arg, metavar="DIR",
+        help="Optional. Override the per-run artefact directory recorded "
+             "in run_artefacts when the cache was written — useful when "
+             "the CSV/MD/STIX/etc. files have been moved since the "
+             "original pipeline run. Without this flag, the Web UI uses "
+             "the absolute path stamped at write time.",
+    )
     web_p.add_argument("--quiet", action="store_true")
     web_p.add_argument("--verbose", action="store_true")
 
@@ -1237,6 +1245,7 @@ def _run_web(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         paths = build_site(
             cache, args.site_dir,
             policy=getattr(args, "bucket_policy", None),
+            out_dir=getattr(args, "out_dir", None),
         )
     except WebUiError as exc:
         _log.warning("%s", exc)

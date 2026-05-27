@@ -368,6 +368,13 @@ covering every run in the cache:
   snapshots, sparkline below) + exploit status + linked actors / campaigns
   / malware + IOCs from the most recent run's sidecar + affected hosts.
 
+Flags:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--site-dir DIR` | *(required)* | Where the site is written. No default — explicit by design |
+| `--out-dir DIR` | from cache | Override the per-run artefact directory recorded in `run_artefacts`; useful when CSV/MD/STIX files have been moved since the original pipeline run |
+
 Zero JavaScript, zero new runtime dependency, no server. Open
 `index.html` directly in a browser, or rsync `_site/` behind any static
 host. A committed showcase bundle lives at
