@@ -1061,7 +1061,7 @@ def test_write_csv_round_trip(tmp_path):
     out = tmp_path / "out.csv"
     write_csv([rec], out)
 
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     assert rows[0] == CSV_COLUMNS
     assert len(rows) == 2  # header + 1 data row
     row = dict(zip(rows[0], rows[1], strict=True))
@@ -1081,7 +1081,7 @@ def test_write_csv_suggested_action_with_comma(tmp_path):
     out = tmp_path / "out.csv"
     write_csv([rec], out)
 
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     row = dict(zip(rows[0], rows[1], strict=True))
     assert row["suggested_action"] == "Patch now, urgently"
 
@@ -1096,7 +1096,7 @@ def test_write_csv_empty_cvss_as_empty_string(tmp_path):
     out = tmp_path / "out.csv"
     write_csv([rec], out)
 
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     row = dict(zip(rows[0], rows[1], strict=True))
     assert row["cvss_score"] == ""
     assert row["cvss_severity"] == ""
@@ -1568,7 +1568,7 @@ def test_write_csv_includes_kev_columns(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     for col in (
         "kev_due_date",
@@ -1861,7 +1861,7 @@ def test_write_iocs_csv_round_trip(tmp_path):
     ]
     out = tmp_path / "iocs.csv"
     write_iocs_csv(iocs, out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     assert rows[0] == IOC_CSV_COLUMNS
     assert len(rows) == 3
     assert rows[1][0] == "url"
@@ -2025,7 +2025,7 @@ def test_write_csv_includes_attack_techniques_column(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     assert "attack_techniques" in rows[0]
     assert rows[0] == CSV_COLUMNS
     row = dict(zip(rows[0], rows[1], strict=True))
@@ -2338,7 +2338,7 @@ def test_write_csv_includes_exploit_status_column(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     assert "exploit_status" in header
     row = dict(zip(header, rows[1], strict=True))
@@ -2911,7 +2911,7 @@ def test_write_csv_includes_linked_columns(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     assert "linked_actors" in header
     assert "linked_campaigns" in header
@@ -3442,7 +3442,7 @@ def test_iocs_csv_includes_enrichments_column(tmp_path):
     )
     out = tmp_path / "iocs.csv"
     write_iocs_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     enr_idx = IOC_CSV_COLUMNS.index("enrichments")
     body = json.loads(rows[1][enr_idx])
     assert body == {"virustotal": {"malicious": 3}}
@@ -3655,7 +3655,7 @@ def test_write_csv_includes_tlp_and_admiralty_columns(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     assert "tlp" in header and "admiralty" in header
     row = dict(zip(header, rows[1], strict=True))
@@ -3673,7 +3673,7 @@ def test_write_iocs_csv_includes_tlp_and_admiralty(tmp_path):
     )
     out = tmp_path / "iocs.csv"
     write_iocs_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     assert "tlp" in rows[0] and "admiralty" in rows[0]
     row = dict(zip(rows[0], rows[1], strict=True))
     assert row["tlp"] == "GREEN"
@@ -4261,7 +4261,7 @@ def test_write_csv_includes_affected_hosts_column(tmp_path):
     )
     out = tmp_path / "out.csv"
     write_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     assert "affected_hosts" in header
     row = dict(zip(header, rows[1], strict=True))
@@ -5644,7 +5644,7 @@ def test_write_iocs_csv_includes_confidence_and_last_seen(tmp_path):
     ramen_cve.apply_ioc_decay([rec], today=date(2024, 6, 1))
     out = tmp_path / "iocs.csv"
     ramen_cve.write_iocs_csv([rec], out)
-    rows = list(csv.reader(out.open()))
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
     header = rows[0]
     assert "confidence" in header and "last_seen" in header
     row = dict(zip(header, rows[1], strict=True))

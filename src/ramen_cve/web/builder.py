@@ -561,7 +561,7 @@ def _read_cve_csv_row(csv_path: Path, cve_id: str) -> dict | None:
     crash because an artefact got mangled.
     """
     try:
-        with csv_path.open(newline="", encoding="utf-8") as fh:
+        with csv_path.open(newline="", encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):
                 if row.get("cve_id") == cve_id:
                     return row
@@ -659,7 +659,7 @@ def _read_iocs_for_cve(
         return []
     matches: list[dict] = []
     try:
-        with iocs_path.open(newline="", encoding="utf-8") as fh:
+        with iocs_path.open(newline="", encoding="utf-8-sig") as fh:
             for row in csv.DictReader(fh):
                 linked = [c.strip() for c in (row.get("cve_ids") or "").split(";")]
                 if cve_id in linked:

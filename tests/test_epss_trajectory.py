@@ -232,7 +232,7 @@ def test_write_epss_trajectory_csv_writes_one_row_per_date(tmp_path):
     out = tmp_path / "traj.csv"
     write_epss_trajectory_csv([rec], out)
 
-    lines = out.read_text().splitlines()
+    lines = out.read_text(encoding="utf-8-sig").splitlines()
     assert lines[0] == "cve_id,date,epss,percentile"
     assert lines[1:] == [
         "CVE-2024-0001,2024-06-01,0.1000,0.5000",
@@ -250,7 +250,7 @@ def test_write_epss_trajectory_csv_skips_records_with_empty_trajectory(tmp_path)
         [_enriched("CVE-2024-AAAA"), _enriched("CVE-2024-BBBB")], out
     )
 
-    assert out.read_text().splitlines() == ["cve_id,date,epss,percentile"]
+    assert out.read_text(encoding="utf-8-sig").splitlines() == ["cve_id,date,epss,percentile"]
 
 
 def test_write_epss_trajectory_csv_rows_are_sorted(tmp_path):
@@ -272,7 +272,7 @@ def test_write_epss_trajectory_csv_rows_are_sorted(tmp_path):
     # Pass in shuffled order; output must still be sorted.
     write_epss_trajectory_csv([a, b], out)
 
-    assert out.read_text().splitlines()[1:] == [
+    assert out.read_text(encoding="utf-8-sig").splitlines()[1:] == [
         "CVE-2024-AAAA,2024-06-01,0.1000,0.5000",
         "CVE-2024-AAAA,2024-06-02,0.2000,0.8000",
         "CVE-2024-ZZZZ,2024-06-03,0.3000,0.9000",
