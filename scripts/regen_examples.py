@@ -456,7 +456,7 @@ def _write_web_sample_artefacts(site_dir: Path) -> None:
     ]
     csv_path = out_dir / f"ramen-cve-{WEB_SAMPLE_RUN_B_STAMP}.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
         writer.writerow(CSV_COLUMNS)
         for row in csv_rows:
             line = {c: "" for c in CSV_COLUMNS}
@@ -479,7 +479,7 @@ def _write_web_sample_artefacts(site_dir: Path) -> None:
     ]
     iocs_path = out_dir / f"ramen-cve-{WEB_SAMPLE_RUN_B_STAMP}-iocs.csv"
     with iocs_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
         writer.writerow(IOC_CSV_COLUMNS)
         for row in ioc_rows:
             writer.writerow(row)

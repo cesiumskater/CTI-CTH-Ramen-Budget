@@ -69,6 +69,9 @@ htmlcov/
 # Tool output files
 ramen-cve-*.csv
 ramen-cve-*.md
+# ...but the Web UI showcase bundle's on-disk artefacts ARE committed
+# (they back the per-run page's artefact links — see Slice G).
+!examples/_web-sample/out/ramen-cve-*.csv
 
 # Remembered-OPML state (written by --remember-opml; user/run state)
 src/ramen_cve/config/last_opml.json
