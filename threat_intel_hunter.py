@@ -23,7 +23,20 @@ _SRC = Path(__file__).resolve().parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ramen_cve import main  # noqa: E402 — sys.path tweak must come first
+try:
+    from ramen_cve import main  # noqa: E402 — sys.path tweak must come first
+except ModuleNotFoundError as exc:
+    # Surface a runnable hint instead of a stack trace when a runtime
+    # dep (PyYAML, requests, feedparser, python-dotenv, questionary)
+    # isn't installed in the active venv.
+    name = exc.name or "<unknown>"
+    sys.stderr.write(
+        f"ramen-cve: missing dependency '{name}'.\n"
+        f"Run `pip install -e .` from the repo root (inside your venv) "
+        f"to install all runtime requirements.\n",
+    )
+    sys.exit(1)
+
 
 if __name__ == "__main__":
     sys.exit(main())
