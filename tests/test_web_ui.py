@@ -229,6 +229,85 @@ def test_run_web_no_files_written_when_runs_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Slice G — bucket-policy threading (`--config NAME` → args.bucket_policy →
+# every label in every rendered page).
+# ---------------------------------------------------------------------------
+
+
+def _custom_policy_renaming_patch_now(new_label: str):
+    """Return a BucketPolicy that renames `patch_now`'s label only."""
+    import dataclasses
+
+    from ramen_cve.bucket_policy import DEFAULT_BUCKET_POLICY
+
+    buckets = dict(DEFAULT_BUCKET_POLICY.buckets)
+    buckets["patch_now"] = dataclasses.replace(
+        buckets["patch_now"], label=new_label,
+    )
+    return dataclasses.replace(DEFAULT_BUCKET_POLICY, buckets=buckets)
+
+
+def test_run_web_threads_custom_policy_into_per_cve_page_header(tmp_path):
+    """`args.bucket_policy` reaches the per-CVE page's bucket badge."""
+    cache = _cache_with_runs(tmp_path, n=1)
+    site_dir = tmp_path / "site"
+    args = _site_args(site_dir)
+    args.bucket_policy = _custom_policy_renaming_patch_now("Drop Everything Now")
+    rc = _run_web(args, cache, None)
+    assert rc == 0
+    cve_page = (site_dir / "cve" / "CVE-2024-0000.html").read_text(encoding="utf-8")
+    assert "[Drop Everything Now]" in cve_page
+    assert "[Patch Now]" not in cve_page
+
+
+def test_run_web_threads_custom_policy_into_diff_block(tmp_path):
+    """Reclassified diff entries render `policy.label()`-resolved names."""
+    import dataclasses
+
+    from ramen_cve.bucket_policy import DEFAULT_BUCKET_POLICY
+
+    cache = Cache(tmp_path / ".cache.db")
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("CVE-X", "2026-05-25T10:00:00", "watch_closely", 4.0, 0.5),
+    )
+    cache._conn.execute(
+        "INSERT INTO runs (cve_id, ts_iso, bucket, cvss_score, epss_score) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("CVE-X", "2026-05-26T10:00:00", "patch_now", 4.0, 0.5),
+    )
+    cache._conn.commit()
+
+    buckets = dict(DEFAULT_BUCKET_POLICY.buckets)
+    buckets["patch_now"] = dataclasses.replace(
+        buckets["patch_now"], label="URGENT",
+    )
+    buckets["watch_closely"] = dataclasses.replace(
+        buckets["watch_closely"], label="MONITOR",
+    )
+    args = _site_args(tmp_path / "site")
+    args.bucket_policy = dataclasses.replace(DEFAULT_BUCKET_POLICY, buckets=buckets)
+    rc = _run_web(args, cache, None)
+    assert rc == 0
+    run_page = (
+        tmp_path / "site" / "runs" / "2026-05-26T10-00-00.html"
+    ).read_text(encoding="utf-8")
+    assert "MONITOR → URGENT" in run_page
+
+
+def test_run_web_uses_default_policy_when_args_lacks_bucket_policy(tmp_path):
+    """No `args.bucket_policy` attr → DEFAULT_BUCKET_POLICY labels render."""
+    cache = _cache_with_runs(tmp_path, n=1)
+    site_dir = tmp_path / "site"
+    args = _site_args(site_dir)  # intentionally no bucket_policy attr
+    rc = _run_web(args, cache, None)
+    assert rc == 0
+    cve_page = (site_dir / "cve" / "CVE-2024-0000.html").read_text(encoding="utf-8")
+    assert "[Patch Now]" in cve_page
+
+
+# ---------------------------------------------------------------------------
 # Argparse — `--site-dir` is required.
 # ---------------------------------------------------------------------------
 

@@ -1234,7 +1234,10 @@ def _run_web(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
     """
     del api_key
     try:
-        paths = build_site(cache, args.site_dir)
+        paths = build_site(
+            cache, args.site_dir,
+            policy=getattr(args, "bucket_policy", None),
+        )
     except WebUiError as exc:
         _log.warning("%s", exc)
         return 1

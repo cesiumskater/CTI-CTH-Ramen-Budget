@@ -333,9 +333,62 @@ and `docs/REFACTOR_PLAN.md` for completed refactor history.
       Removed(1)=CVE-OLD, Reclassified(1)="CVE-B · Watch Closely →
       KEV Override (Patch Immediately)" — and the older run shows
       "First recorded run — no diff available."
-- [ ] **Slice G — Bucket-policy threading** (`--config NAME` →
+- [x] **Slice G — Bucket-policy threading** (`--config NAME` →
       `args.bucket_policy` → every label in every page) **+ showcase
       regen extension** (`examples/_web-sample/` committed bundle).
+      `_run_web` (`src/ramen_cve/cli.py:1237`) now passes
+      `policy=getattr(args, "bucket_policy", None)` into `build_site`,
+      matching the established pattern used by every other `_run_<name>`
+      handler (`_run_csv`, `_run_markdown`, etc.). `build_site` already
+      threaded `policy or DEFAULT_BUCKET_POLICY` from Slice C through
+      to `_render_run_page` / `_render_cve_page` / `_render_diff_block`,
+      so the one-line CLI change wires the full path end-to-end. **Web
+      showcase bundle** in `scripts/regen_examples.py` (+~190 LOC):
+      `_seed_web_sample_cache(workdir, site_dir)` seeds a fresh SQLite
+      with two runs (`WEB_SAMPLE_RUN_A_TS=2025-12-01T10:00:00`,
+      `WEB_SAMPLE_RUN_B_TS=2026-01-15T09:00:00`) across 7 CVEs chosen
+      so the diff block has all three sections populated (Added:
+      CVE-2024-0010, Removed: CVE-2024-0009, Reclassified: CVE-2024-0002
+      `plan_and_patch` → `patch_now`); seeds NVD/EPSS/KEV cache rows
+      for the two real CVEs (CVE-2021-44228 Log4Shell, CVE-2021-26855
+      ProxyLogon) so §2 summary renders rich, leaving the synthetic
+      CVE-2024-* rows on the best-effort "—" fallback to demonstrate
+      both paths. `_write_web_sample_artefacts(site_dir)` writes the
+      main CSV + IOC sidecar to `<site>/out/` so the relative artefact
+      links resolve inside the bundle (the user clones the repo, opens
+      `examples/_web-sample/index.html`, and every link works without
+      a server). `_generate_web_sample(workdir)` orchestrates: seed
+      cache → write artefacts → `build_site` → walk tree → return
+      `{rel: bytes}` keyed under `_web-sample/<rel>`. Merged into
+      `_generate`'s return dict. `main()` refactored: `_TARGETS` dict
+      replaced with `_target_path(name)` function (uniform handling
+      for flat + nested entries); `--check` extended with stale-file
+      detection (catches committed `_web-sample/` files no longer
+      produced); regen path wipes `_web-sample/` first via
+      `shutil.rmtree` so renamed/removed pages don't linger. Committed
+      bundle: **14 files** in `examples/_web-sample/`: `index.html`
+      (the home page), 2 run pages, 7 per-CVE pages, 2 artefact CSVs
+      (main + IOC sidecar), 1 stylesheet stub. Total ≈30 KB. Tests
+      (+3 in `tests/test_web_ui.py`):
+      `test_run_web_threads_custom_policy_into_per_cve_page_header`
+      (renaming `patch_now` → "Drop Everything Now" surfaces in the
+      `<h1>` badge);
+      `test_run_web_threads_custom_policy_into_diff_block` (custom
+      `MONITOR → URGENT` labels render in the Reclassified diff
+      entry); `test_run_web_uses_default_policy_when_args_lacks_bucket_policy`
+      (no `args.bucket_policy` attr → `[Patch Now]` default label).
+      Verification: 772 passed (was 769 + 3 new); `ruff check src/
+      tests/ scripts/` clean; golden CSV+MD byte-oracle byte-identical
+      to anchor; `python scripts/regen_examples.py --check` → rc=0
+      (validates all 14 web-sample files + the 4 flat artefacts); the
+      bundle's `runs/2026-01-15T09-00-00.html` shows the diff block
+      with all three sections populated and the CSV link
+      (`../out/ramen-cve-20260115T090000000000.csv`) resolves to a
+      real on-disk artefact; the bundle's `cve/CVE-2021-44228.html`
+      renders **all 7 sections** (title+bucket, NVD §2 summary,
+      trajectory SVG with 2 dots + `cve-latest` marker, exploit
+      status, threat-actor + malware associations, 3 IOCs in §6,
+      affected hosts).
 
 ### Task 7 — Configurable bucket labels / thresholds
 
