@@ -2400,3 +2400,111 @@ def test_run_page_diff_block_is_byte_stable(tmp_path):
     first = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes()
     build_site(cache, site_dir)
     assert (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes() == first
+
+
+# ---------------------------------------------------------------------------
+# `--out-dir` override (build_site out_dir kwarg + CLI flag)
+# ---------------------------------------------------------------------------
+
+
+def test_build_site_out_dir_overrides_per_run_artefact_directory(tmp_path):
+    """`out_dir=PATH` replaces the cached per-run `out_dir` for every run.
+
+    Use case: the user moved their artefacts since the original
+    pipeline run wrote them; the absolute path in `run_artefacts` is
+    stale, but the `disk_stamp` (filename portion) is still right.
+    """
+    cache = Cache(tmp_path / ".cache.db")
+    original_out = tmp_path / "original"
+    moved_out = tmp_path / "moved"
+    _seed_run(
+        cache, "2026-05-26T10:00:00",
+        cve_ids=["CVE-A"],
+        artefacts=("20260526T100000000000", original_out),
+    )
+    _make_artefact_files(moved_out, "20260526T100000000000", kinds=("csv", "md"))
+
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir, out_dir=moved_out)
+
+    run_html = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    # The CSV/MD links resolve into the MOVED dir (relative path); the
+    # ORIGINAL dir must not appear anywhere in the page.
+    assert "ramen-cve-20260526T100000000000.csv" in run_html
+    assert "ramen-cve-20260526T100000000000.md" in run_html
+    assert "original" not in run_html
+
+
+def test_build_site_out_dir_does_not_fabricate_disk_stamp(tmp_path):
+    """Runs with no `run_artefacts` row stay as "—" even under override."""
+    cache = Cache(tmp_path / ".cache.db")
+    _seed_run(cache, "2026-05-26T10:00:00", cve_ids=["CVE-A"])  # no artefacts row
+    site_dir = tmp_path / "site"
+    moved_out = tmp_path / "moved"
+    moved_out.mkdir()
+
+    build_site(cache, site_dir, out_dir=moved_out)
+
+    run_html = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    # Six artefact kinds × one dash each — the empty-row fallback.
+    assert run_html.count("—") >= 6
+
+
+def test_build_site_out_dir_byte_stable(tmp_path):
+    """Override path produces deterministic output across two builds."""
+    cache = Cache(tmp_path / ".cache.db")
+    moved_out = tmp_path / "moved"
+    _seed_run(
+        cache, "2026-05-26T10:00:00",
+        cve_ids=["CVE-A"],
+        artefacts=("20260526T100000000000", tmp_path / "stale"),
+    )
+    _make_artefact_files(moved_out, "20260526T100000000000")
+
+    site_dir = tmp_path / "site"
+    build_site(cache, site_dir, out_dir=moved_out)
+    first = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes()
+    build_site(cache, site_dir, out_dir=moved_out)
+    assert (site_dir / "runs" / "2026-05-26T10-00-00.html").read_bytes() == first
+
+
+def test_run_web_threads_out_dir_into_build_site(tmp_path):
+    """The `--out-dir` flag on the `web` subparser reaches `build_site`."""
+    cache = Cache(tmp_path / ".cache.db")
+    moved_out = tmp_path / "moved"
+    _seed_run(
+        cache, "2026-05-26T10:00:00",
+        cve_ids=["CVE-A"],
+        artefacts=("20260526T100000000000", tmp_path / "stale"),
+    )
+    _make_artefact_files(moved_out, "20260526T100000000000", kinds=("csv",))
+
+    site_dir = tmp_path / "site"
+    args = argparse.Namespace(
+        site_dir=site_dir, out_dir=moved_out, quiet=False, verbose=False,
+    )
+    rc = _run_web(args, cache, None)
+    assert rc == 0
+    run_html = (site_dir / "runs" / "2026-05-26T10-00-00.html").read_text("utf-8")
+    assert "ramen-cve-20260526T100000000000.csv" in run_html
+    assert "stale" not in run_html
+
+
+def test_web_subparser_accepts_out_dir_flag(tmp_path):
+    """Argparse-level: `ramen-cve web --site-dir X --out-dir Y` parses."""
+    from ramen_cve.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(
+        ["web", "--site-dir", str(tmp_path / "site"),
+         "--out-dir", str(tmp_path / "out")]
+    )
+    assert args.site_dir == tmp_path / "site"
+    assert args.out_dir == tmp_path / "out"
+
+
+def test_web_subparser_out_dir_defaults_to_none_when_omitted(tmp_path):
+    """`--out-dir` is optional; omitted form sets the attr to None."""
+    from ramen_cve.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["web", "--site-dir", str(tmp_path / "site")])
+    assert args.out_dir is None

@@ -808,6 +808,7 @@ def build_site(
     *,
     policy: BucketPolicy | None = None,
     max_runs_on_home: int = WEB_DEFAULT_MAX_RUNS_ON_HOME,
+    out_dir: Path | None = None,
 ) -> dict[str, Path]:
     """Render the static site rooted at `site_dir`.
 
@@ -820,8 +821,15 @@ def build_site(
     obscure the misconfiguration that led here.
 
     `max_runs_on_home` caps the strip at the most-recent N runs (older
-    runs reachable by direct `runs/<slug>.html` URL). `policy` is
-    reserved for Slice G — label propagation to per-run + per-CVE pages.
+    runs reachable by direct `runs/<slug>.html` URL). `policy` is the
+    `BucketPolicy` whose labels render in every page heading; defaults
+    to `DEFAULT_BUCKET_POLICY`.
+
+    `out_dir` overrides the per-run artefact directory recorded in
+    `run_artefacts` for every run. Useful when the files have been
+    moved since the original pipeline run wrote them (the cache still
+    holds the original absolute path). Runs with no `run_artefacts`
+    row stay "—" — the override doesn't fabricate a `disk_stamp`.
     """
     # Lazy import — `cli.VERSION` is L4, importing it at module load
     # creates a cli ↔ web cycle (cli imports from web; web would import
@@ -829,9 +837,6 @@ def build_site(
     # docs/REFACTOR_PLAN.md §5.2 resolves the cycle at call time.
     from ..cli import VERSION
 
-    # Slice G will thread a user-supplied policy through every label;
-    # until then, Slice D uses DEFAULT_BUCKET_POLICY for per-CVE header
-    # labels so the page renders with the correct prose today.
     active_policy = policy or DEFAULT_BUCKET_POLICY
 
     runs = _discover_runs(cache)
@@ -840,6 +845,13 @@ def build_site(
             "No runs recorded in cache — nothing to render. "
             "Run `ramen-cve opml/url/cve ...` first to populate the runs table."
         )
+
+    if out_dir is not None:
+        override = str(out_dir)
+        runs = [
+            run._replace(out_dir=override) if run.disk_stamp is not None else run
+            for run in runs
+        ]
 
     site_dir.mkdir(parents=True, exist_ok=True)
     static_dir = site_dir / "static"
