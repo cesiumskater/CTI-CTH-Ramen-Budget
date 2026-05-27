@@ -46,8 +46,11 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
     cve_ids is semicolon-joined per IocRecord.cve_ids — the offline Web UI's
     per-CVE detail page (Task 8 §6) substring-matches this column to filter
     IOCs onto the right CVE.
+
+    Written with utf-8-sig so Excel / PyCharm auto-detect UTF-8 (same
+    reason as the CVE CSV in csv_writer.write_csv).
     """
-    with path.open("w", newline="", encoding="utf-8") as fh:
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
         writer.writerow(IOC_CSV_COLUMNS)
         for rec in iocs:

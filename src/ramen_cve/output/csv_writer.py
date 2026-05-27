@@ -54,8 +54,12 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
 
     Columns are in the order defined by CSV_COLUMNS. Numeric formatting:
     CVSS to 1 decimal, EPSS/percentile to 4 decimals.
+
+    Written with utf-8-sig (UTF-8 + BOM) so Excel / PyCharm / etc. on
+    Windows auto-detect the encoding instead of falling back to cp1252
+    and rendering non-ASCII chars like the em dash as mojibake.
     """
-    with path.open("w", newline="", encoding="utf-8") as fh:
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
         writer.writerow(CSV_COLUMNS)
         for rec in enriched:
@@ -112,7 +116,7 @@ def write_epss_trajectory_csv(enriched: list[EnrichedCve], path: Path) -> None:
         for d, payload in rec.epss_trajectory.items():
             rows.append((rec.cve_id, d, payload.get("epss"), payload.get("percentile")))
     rows.sort()
-    with path.open("w", newline="", encoding="utf-8") as fh:
+    with path.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
         writer.writerow(EPSS_TRAJECTORY_COLUMNS)
         for cve_id, d, epss, pct in rows:

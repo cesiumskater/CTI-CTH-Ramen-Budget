@@ -1887,7 +1887,7 @@ def test_write_iocs_csv_serializes_cve_ids_semicolon_joined(tmp_path):
     ]
     out = tmp_path / "iocs.csv"
     write_iocs_csv(iocs, out)
-    rows = list(_csv.reader(out.open()))
+    rows = list(_csv.reader(out.open(encoding="utf-8-sig")))
     cve_ids_idx = IOC_CSV_COLUMNS.index("cve_ids")
     assert rows[1][cve_ids_idx] == "CVE-A;CVE-B"
 
@@ -1902,7 +1902,7 @@ def test_write_iocs_csv_empty_cve_ids_serializes_to_empty_string(tmp_path):
     iocs = [IocRecord("url", "https://x/", "feed", date(2024, 1, 1), "feed_pub")]
     out = tmp_path / "iocs.csv"
     write_iocs_csv(iocs, out)
-    rows = list(_csv.reader(out.open()))
+    rows = list(_csv.reader(out.open(encoding="utf-8-sig")))
     assert rows[1][IOC_CSV_COLUMNS.index("cve_ids")] == ""
 
 
