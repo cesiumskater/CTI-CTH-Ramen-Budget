@@ -1,8 +1,11 @@
 # Software Bill of Materials (SBOM)
 
+> **Scope.** Supply-chain inventory for `ramen-cve`. For everything else
+> (install, usage, configuration), start with [`README.md`](../README.md).
+
 **Project:** ramen-cve / threat-intel-hunter
-**Document version:** 1.0
-**Generated:** 2026-05-12
+**Document version:** 1.1
+**Generated:** 2026-05-12 (revised 2026-05-28)
 **Format:** human-readable Markdown (a machine-readable CycloneDX export can be
 produced with `pip install cyclonedx-bom && cyclonedx-py environment`).
 
@@ -17,7 +20,7 @@ source is bundled — only the runtime wheels resolved from PyPI.
 
 | Component | Path | License | Notes |
 | --- | --- | --- | --- |
-| `ramen_cve` (package) | `src/ramen_cve/` (~30 focused modules; `__init__.py` is a 526-LOC re-export façade — implementation lives in submodules, see `docs/REFACTOR_PLAN.md`) | MIT | The entire implementation. |
+| `ramen_cve` (package) | `src/ramen_cve/` (~30 focused modules; `__init__.py` is a re-export façade with a locked `__all__`) | MIT | The entire implementation. |
 | `threat_intel_hunter.py` | repo root | MIT | 10-line entry-point shim → `ramen_cve.main()`. |
 | Bundled lookup data | `src/ramen_cve/data/associations.json`, `data/hunts/*`, `data/pirs/*` | MIT | Curated CVE → actor/campaign/malware map + sample hunt + sample PIR. Sourced from public MITRE ATT&CK Groups data and public reporting; no proprietary intel. |
 | YAML config template + presets | `src/ramen_cve/config/config.yaml`, `config/presets/` | MIT | Documented configuration schema. |
@@ -62,7 +65,7 @@ Declared in `pyproject.toml` `[project.optional-dependencies] dev` and
 
 | Package | Resolved version | License | Purpose |
 | --- | --- | --- | --- |
-| pytest | 9.0.3 | MIT | 446-case test suite. |
+| pytest | 9.0.3 | MIT | 778-case test suite. |
 | ruff | 0.15.12 | MIT | Lint + import-sort gate (rules E,F,W,I,UP,B,SIM). |
 
 ---
