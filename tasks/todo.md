@@ -31,35 +31,29 @@ matters" + suggested implementation approach for each item lives in
 [`cti-capability-gap-analysis-v2.md`](../docs/cti-capability-gap-analysis-v2.md);
 this list is the operational picking surface.
 
-1. **Bucket-transition delta detection / alerting.** Highest ratio: the
-   `runs` table + dispatcher pipeline are already shipped; this is one
-   `compute_bucket_deltas(cache, enriched)` function plus a
-   `--dispatch-on-delta-only` flag, and it dramatically reduces alert
-   fatigue (the single biggest reason mature SOCs ignore noisy
-   pipelines).
-2. **SSVC decision tree.** CISA/CMU SEI's formal `track / track* /
+1. **SSVC decision tree.** CISA/CMU SEI's formal `track / track* /
    attend / act` action tree; runs in parallel with the existing
    bucketing (additive). Modest implementation cost; produces an
    auditor-recognized output.
-3. **Risk-weighted prioritization (asset criticality).** One new
+2. **Risk-weighted prioritization (asset criticality).** One new
    optional inventory column (`criticality: tier1/2/3`) + one weighted
    `risk_score` function. Transforms the inventory feature from
    informational to operational.
-4. **Native SIEM query generation (KQL / SPL / Elastic EQL).** Extend
+3. **Native SIEM query generation (KQL / SPL / Elastic EQL).** Extend
    `--format` to emit per-platform query stubs alongside Sigma. Higher
    implementation cost than the three above but takes the
    detection-engineering output from "useful scaffold" to "deployable."
-5. **MISP-platform native push / pull** (optional `pymisp` dep gated on
+4. **MISP-platform native push / pull** (optional `pymisp` dep gated on
    `--misp-url`). Different shape from generic STIX — MISP consumers
    want events with Galaxy tags, not raw bundles.
-6. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native).
+5. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native).
    `import` subcommand parsing scanner output into the existing
    inventory shape, with scanner-reported fields passed through as
    extra columns.
-7. **Hunt analytics library.** `analytics/` directory of one-JSON-per
+6. **Hunt analytics library.** `analytics/` directory of one-JSON-per
    reusable per-ATT&CK-technique query; `analytic suggest <hunt-id>`
    prints analytics whose techniques overlap the hunt.
-8. **Backtesting / replay mode.** `replay --as-of YYYY-MM-DD` reads
+7. **Backtesting / replay mode.** `replay --as-of YYYY-MM-DD` reads
    cache only (no network), reconstructs `EnrichedCve` from cached
    snapshots, re-runs the pipeline, and diff-tables against the
    historical `runs` table for that day. Biggest cost is a soft-

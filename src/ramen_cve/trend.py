@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 
+from .bucket_policy import DEFAULT_BUCKET_POLICY, BucketPolicy
 from .cache import Cache
 from .constants import CVE_REGEX
+from .deltas import compute_bucket_deltas
 from .models import EnrichedCve
 
 # Lifted to the L1 `render` leaf so output/markdown.py can reuse the
@@ -18,10 +20,22 @@ from .render import _SPARKLINE_CHARS, _sparkline  # noqa: F401
 _log = logging.getLogger(__name__)
 
 
-def _record_runs(cache: Cache, enriched: list[EnrichedCve]) -> None:
-    """Append a snapshot row per enriched CVE so `trend` has history to draw."""
+def _record_runs(
+    cache: Cache,
+    enriched: list[EnrichedCve],
+    policy: BucketPolicy | None = None,
+) -> dict[str, tuple[str | None, str]]:
+    """Append a snapshot row per enriched CVE so `trend` has history to draw.
+
+    Returns bucket-transition deltas computed against the *previous*
+    recorded run (i.e. before this run is inserted). Callers thread the
+    return value into `_maybe_dispatch` so `--dispatch-on-delta-only`
+    can suppress unchanged-bucket repeats.
+    """
+    deltas = compute_bucket_deltas(cache, enriched, policy or DEFAULT_BUCKET_POLICY)
     for rec in enriched:
         cache.record_run(rec.cve_id, rec.bucket, rec.cvss_score, rec.epss_score)
+    return deltas
 
 
 def _run_trend(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int:

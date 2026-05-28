@@ -14,8 +14,8 @@
 > enrichment, TLP+Admiralty tagging, threat-hunt workflow, asset/
 > inventory correlation, Slack/webhook dispatchers, Diamond Model +
 > Kill Chain, historical trending, EPSS trajectory mode, depth-1 URL
-> crawl, daemon mode, configurable bucket policy, static-HTML Web UI)
-> have been removed.
+> crawl, daemon mode, configurable bucket policy, static-HTML Web UI,
+> bucket-transition delta alerting) have been removed.
 
 ---
 
@@ -36,24 +36,7 @@ fully-instrumented program.
 Ranked by **impact-to-effort ratio**, given the project's ramen-budget
 constraint of staying small and readable.
 
-### 1. Bucket-transition delta detection / alerting
-
-**Category:** Analysis / Dissemination. **Maturity tier:** Intermediate.
-
-The `runs` table already records every CVE's bucket per run; the
-high-value signal isn't the current bucket but the **transition**
-("CVE-X moved from `watch_closely` to `kev_override` overnight"). Today
-the dispatcher fires every run for every patch_now / kev_override
-record, producing alert fatigue rather than triage signal.
-
-*Approach:* `compute_bucket_deltas(cache, enriched)` joins each
-EnrichedCve to its previous run's bucket via `Cache.get_runs` and
-yields `(cve_id, old_bucket, new_bucket)` for upgrades only
-(downgrades are noise). A `--dispatch-on-delta-only` flag gates
-`dispatch_records` on the delta result. Slack / webhook payloads
-include the transition.
-
-### 2. SSVC (Stakeholder-Specific Vulnerability Categorization)
+### 1. SSVC (Stakeholder-Specific Vulnerability Categorization)
 
 **Category:** Analysis. **Maturity tier:** Intermediate.
 
@@ -69,7 +52,7 @@ walking the 2023 v2 decision tree using exploit_status, KEV listing,
 EPSS, CWE-derived technical impact, and an `--organization-profile`
 JSON file. Surface alongside the existing bucket — don't replace.
 
-### 3. Risk-weighted prioritization (asset criticality)
+### 2. Risk-weighted prioritization (asset criticality)
 
 **Category:** Analysis. **Maturity tier:** Advanced.
 
@@ -85,7 +68,7 @@ asset criticality.
 `risk_score` + the most-critical affected tier in CSV / Markdown /
 Slack. Re-rank CVEs in each bucket by `risk_score` in the Markdown.
 
-### 4. Native SIEM query generation (KQL / SPL / Elastic EQL)
+### 3. Native SIEM query generation (KQL / SPL / Elastic EQL)
 
 **Category:** Detection Engineering. **Maturity tier:** Intermediate.
 
@@ -100,7 +83,7 @@ and emit one platform-flavoured template per CVE into a
 TODO; the value-add is the pre-tagged title / level / CVE / ATT&CK /
 KEV references in each platform's idiom.
 
-### 5. MISP-platform native integration
+### 4. MISP-platform native integration
 
 **Category:** Collection / Dissemination. **Maturity tier:** Intermediate.
 
@@ -116,7 +99,7 @@ Galaxy clusters.
 with attributes / tags / Galaxy references. `misp pull` reads events
 back through the enrichment pipeline.
 
-### 6. Vulnerability-scanner imports (Nessus / Qualys / Rapid7 / OpenVAS)
+### 5. Vulnerability-scanner imports (Nessus / Qualys / Rapid7 / OpenVAS)
 
 **Category:** Collection. **Maturity tier:** Intermediate.
 
@@ -130,7 +113,7 @@ inventory shape; same for Qualys CSV. Each plugin's CVE list joins to
 ramen-cve's CSV / Markdown output. Scanner-reported fields pass
 through as extra columns.
 
-### 7. Hunt analytics library (reusable per-technique queries)
+### 6. Hunt analytics library (reusable per-technique queries)
 
 **Category:** Hunting Workflow / Detection Engineering. **Maturity tier:** Intermediate.
 
@@ -145,7 +128,7 @@ suggest` subcommand; `analytic suggest <hunt-id>` prints the
 analytics whose `attack_techniques` overlap the hunt's. Seed with
 five analytics covering T1059 / T1190 / T1078 / T1110 / T1566.
 
-### 8. Backtesting / replay mode
+### 7. Backtesting / replay mode
 
 **Category:** Operations / Analysis. **Maturity tier:** Advanced.
 
@@ -161,7 +144,7 @@ diff-tables the produced bucket assignment against what was
 historically recorded in the `runs` table for that day. Biggest cost
 is a soft-versioning column (`as_of_date`) on cache rows.
 
-### 9. Sector / geopolitical threat context (deeper than today's filter)
+### 8. Sector / geopolitical threat context (deeper than today's filter)
 
 **Category:** Analysis. **Maturity tier:** Intermediate.
 
@@ -172,7 +155,7 @@ weighting prioritization by sector-relevance to the operator.
 
 *Approach:* Surface the actor sector list in the Markdown adversary
 cross-tab (already in the data, not yet rendered). Optionally weight
-`risk_score` (item 3 above) by sector match.
+`risk_score` (item 2 above) by sector match.
 
 ---
 

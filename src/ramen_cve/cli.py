@@ -219,6 +219,16 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--dispatch-on-delta-only",
+        action="store_true",
+        help=(
+            "When --dispatch is on, only push records whose bucket *upgraded* "
+            "since the previously recorded run (first-seen CVEs also count). "
+            "Suppresses the every-run repeat-dispatch of unchanged findings "
+            "that is the dominant source of alert fatigue."
+        ),
+    )
+    parser.add_argument(
         "--digest",
         action="store_true",
         help=(
@@ -864,7 +874,9 @@ def _run_opml(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         args.epss_threshold,
         policy=getattr(args, "bucket_policy", None),
     )
-    _record_runs(cache, enriched)
+    args._bucket_deltas = _record_runs(
+        cache, enriched, policy=getattr(args, "bucket_policy", None),
+    )
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -1010,7 +1022,9 @@ def _run_url(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         args.epss_threshold,
         policy=getattr(args, "bucket_policy", None),
     )
-    _record_runs(cache, enriched)
+    args._bucket_deltas = _record_runs(
+        cache, enriched, policy=getattr(args, "bucket_policy", None),
+    )
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -1135,7 +1149,9 @@ def _run_cve(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
         args.epss_threshold,
         policy=getattr(args, "bucket_policy", None),
     )
-    _record_runs(cache, enriched)
+    args._bucket_deltas = _record_runs(
+        cache, enriched, policy=getattr(args, "bucket_policy", None),
+    )
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 
@@ -1204,7 +1220,9 @@ def _run_stix(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
         args.epss_threshold,
         policy=getattr(args, "bucket_policy", None),
     )
-    _record_runs(cache, enriched)
+    args._bucket_deltas = _record_runs(
+        cache, enriched, policy=getattr(args, "bucket_policy", None),
+    )
     if args.start or args.end:
         enriched = filter_by_date(enriched, args.start, args.end, date_mode)
 

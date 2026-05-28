@@ -23,8 +23,11 @@ class _DispatcherBase:
     """Abstract base for outbound dispatchers (Slack, generic webhook, ...).
 
     Subclasses set `name`, gate themselves via `enabled()`, and implement
-    `dispatch(rec)` to push one EnrichedCve to the configured target. dispatch()
-    must NEVER raise — return False on failure.
+    `dispatch(rec, *, transition=None)` to push one EnrichedCve to the
+    configured target. `transition` is the optional
+    `(old_bucket, new_bucket)` tuple from `compute_bucket_deltas`;
+    when provided the payload should surface it. `dispatch()` must
+    NEVER raise — return False on failure.
     """
 
     name: str = ""
@@ -32,7 +35,12 @@ class _DispatcherBase:
     def enabled(self) -> bool:
         return False
 
-    def dispatch(self, rec: EnrichedCve) -> bool:
+    def dispatch(
+        self,
+        rec: EnrichedCve,
+        *,
+        transition: tuple[str | None, str] | None = None,
+    ) -> bool:
         raise NotImplementedError
 
 
@@ -47,7 +55,11 @@ class SlackWebhookDispatcher(_DispatcherBase):
     def enabled(self) -> bool:
         return bool(self.webhook_url)
 
-    def _build_payload(self, rec: EnrichedCve) -> dict:
+    def _build_payload(
+        self,
+        rec: EnrichedCve,
+        transition: tuple[str | None, str] | None = None,
+    ) -> dict:
         emoji = {
             "kev_override": ":rotating_light:",
             "patch_now": ":rotating_light:",
@@ -61,6 +73,14 @@ class SlackWebhookDispatcher(_DispatcherBase):
             f"*Action:* {rec.suggested_action}",
             f"*CVSS:* {cvss} ({rec.cvss_severity or 'N/A'}) · *EPSS:* {epss}",
         ]
+        if transition is not None:
+            old_bucket, new_bucket = transition
+            if old_bucket is None:
+                body_lines.append("*Status:* first seen")
+            else:
+                body_lines.append(
+                    f"*Transition:* `{old_bucket}` → `{new_bucket}`"
+                )
         if rec.kev_listed:
             kev_line = "*CISA KEV:* listed"
             if rec.kev_due_date:
@@ -97,11 +117,16 @@ class SlackWebhookDispatcher(_DispatcherBase):
             ]
         }
 
-    def dispatch(self, rec: EnrichedCve) -> bool:
+    def dispatch(
+        self,
+        rec: EnrichedCve,
+        *,
+        transition: tuple[str | None, str] | None = None,
+    ) -> bool:
         try:
             resp = requests.post(
                 self.webhook_url or "",
-                json=self._build_payload(rec),
+                json=self._build_payload(rec, transition=transition),
                 headers={"User-Agent": USER_AGENT},
                 timeout=15,
             )
@@ -123,8 +148,12 @@ class GenericWebhookDispatcher(_DispatcherBase):
     def enabled(self) -> bool:
         return bool(self.webhook_url)
 
-    def _build_payload(self, rec: EnrichedCve) -> dict:
-        return {
+    def _build_payload(
+        self,
+        rec: EnrichedCve,
+        transition: tuple[str | None, str] | None = None,
+    ) -> dict:
+        payload = {
             "cve_id": rec.cve_id,
             "bucket": rec.bucket,
             "suggested_action": rec.suggested_action,
@@ -144,12 +173,24 @@ class GenericWebhookDispatcher(_DispatcherBase):
             "tlp": rec.tlp,
             "admiralty": rec.admiralty,
         }
+        if transition is not None:
+            old_bucket, new_bucket = transition
+            payload["previous_bucket"] = old_bucket
+            payload["transition"] = (
+                f"{old_bucket or 'first_seen'}->{new_bucket}"
+            )
+        return payload
 
-    def dispatch(self, rec: EnrichedCve) -> bool:
+    def dispatch(
+        self,
+        rec: EnrichedCve,
+        *,
+        transition: tuple[str | None, str] | None = None,
+    ) -> bool:
         try:
             resp = requests.post(
                 self.webhook_url or "",
-                json=self._build_payload(rec),
+                json=self._build_payload(rec, transition=transition),
                 headers={"User-Agent": USER_AGENT},
                 timeout=15,
             )

@@ -22,8 +22,18 @@ def dispatch_records(
     *,
     dispatch_on: tuple[str, ...] = DISPATCH_DEFAULT_BUCKETS,
     dispatchers: list[_DispatcherBase] | None = None,
+    deltas: dict[str, tuple[str | None, str]] | None = None,
+    delta_only: bool = False,
 ) -> int:
     """Push records whose bucket is in `dispatch_on` to every enabled dispatcher.
+
+    `deltas` maps `cve_id -> (old_bucket, new_bucket)` for records whose
+    bucket upgraded since the previous run (see `ramen_cve.deltas`). When
+    `delta_only` is True, records absent from `deltas` are skipped — this
+    is the `--dispatch-on-delta-only` mode. When a record IS in `deltas`,
+    the transition tuple is passed as a `transition=` kwarg to each
+    dispatcher so the payload can surface it; dispatchers without a
+    `transition` parameter are called positionally (back-compat).
 
     Returns the count of successful (record, dispatcher) posts. Failures are
     logged but do not abort the run.
@@ -37,12 +47,17 @@ def dispatch_records(
             "(set SLACK_WEBHOOK_URL or RAMEN_DISPATCH_WEBHOOK)."
         )
         return 0
+    deltas = deltas or {}
     successes = 0
     for rec in enriched:
         if rec.bucket not in dispatch_on:
             continue
+        if delta_only and rec.cve_id not in deltas:
+            continue
+        transition = deltas.get(rec.cve_id)
+        extra = {"transition": transition} if transition is not None else {}
         for d in enabled:
-            if d.dispatch(rec):
+            if d.dispatch(rec, **extra):
                 successes += 1
     return successes
 
