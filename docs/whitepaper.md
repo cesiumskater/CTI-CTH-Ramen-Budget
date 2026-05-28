@@ -1,5 +1,9 @@
 # Threat Intel on a Ramen Budget — A Technical Whitepaper
 
+> **Scope.** Conceptual companion to the BSidesSLC 2026 talk —
+> problem statement, methodology, security posture. For
+> install / usage / configuration, see [`README.md`](../README.md).
+
 **Project:** ramen-cve / threat-intel-hunter
 **Author:** Danny Page ([@cesiumskater](https://github.com/cesiumskater))
 **Companion to:** the BSidesSLC 2026 talk *"Threat Intel on a Ramen Budget"*
@@ -111,9 +115,9 @@ the original single-file design in May 2026 (historical detail in
 `docs/REFACTOR_PLAN.md`). The package layers (constants → models → cache →
 extract → … → output / dispatch / config → cli → façade) preserve the flat
 `from ramen_cve import X` contract via a re-export `__init__.py` with a
-locked `__all__`. The 770+-test suite and a golden byte-oracle proved the
-refactor is zero-behaviour-change end-to-end (regenerated CSV/Markdown are
-byte-identical to the pre-refactor baseline).
+locked `__all__`. The 778-case test suite and a golden byte-oracle prove
+that the refactor was zero-behaviour-change end-to-end (regenerated
+CSV/Markdown are byte-identical to the pre-refactor baseline).
 
 ---
 

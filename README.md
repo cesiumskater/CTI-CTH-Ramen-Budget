@@ -485,7 +485,7 @@ counterpart at [`examples/sample-output.csv`](examples/sample-output.csv).
 │   ├── todo.md                # forward-looking backlog
 │   └── lessons.md             # recurring failure modes + prevention
 │
-├── tests/                     # 770+ pytest cases + fixtures
+├── tests/                     # 778+ pytest cases + fixtures
 └── .claude/                   # Claude Code project settings (gitkept)
 ```
 
@@ -550,6 +550,56 @@ The features below are next-up directions, prioritized in
 
 The active backlog with slice plans, acceptance criteria, and effort
 estimates lives at [`tasks/todo.md`](tasks/todo.md).
+
+---
+
+## Contributing
+
+The project is intentionally small enough that one person can hold it
+in their head. PRs that respect that spirit are welcome.
+
+**Before opening a PR:**
+
+```bash
+pip install -e ".[dev]"           # if you haven't already
+pytest tests/ -q                  # must stay green (778 cases as of this writing)
+ruff check threat_intel_hunter.py conftest.py src/ tests/ scripts/
+python scripts/regen_examples.py --check   # byte-oracle on the showcase bundle
+```
+
+All three are part of the per-commit verification gate documented in
+[`docs/CLAUDE.md`](docs/CLAUDE.md). The byte-oracle catches accidental
+drift in the bundled `examples/sample-output.csv` /
+`examples/sample-report.md` / `examples/_web-sample/` artefacts.
+
+**Conventions worth knowing:**
+
+- **Five-runtime-dep budget.** Adding a sixth needs a written
+  justification in `tasks/todo.md`. The current set is `requests`,
+  `feedparser`, `python-dotenv`, `questionary`, `PyYAML` — see
+  [`docs/SBOM.md`](docs/SBOM.md).
+- **Layered package.** Modules sit on layers L0–L5; imports point
+  downward only. New modules should pick the lowest layer that fits.
+  [`src/ramen_cve/__init__.py`](src/ramen_cve/__init__.py) is a pure
+  re-export façade with a locked `__all__`; both halves of the
+  contract are gated by `tests/test_facade.py`.
+- **Thin vertical slices.** Land features in small reviewable steps,
+  each with its own tests + verification story. See
+  [`docs/CLAUDE.md`](docs/CLAUDE.md) §3.
+- **Per-failure-mode lessons.** When you hit a recurring failure
+  pattern, capture it in [`tasks/lessons.md`](tasks/lessons.md) so
+  the next contributor doesn't repeat it.
+
+**Reporting issues:** open a GitHub issue with the command you ran,
+the observed output, and the expected output. Redact any real API
+keys before pasting logs (the tool redacts at write time, but
+manually-captured terminal scrollback may not have been).
+
+**Picking a task:** the prioritized backlog in
+[`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md)
+is sorted by impact-to-effort ratio. Item 1 (bucket-transition delta
+alerting) is the highest-leverage starter task — the infrastructure
+is already in place.
 
 ---
 

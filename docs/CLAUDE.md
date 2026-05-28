@@ -301,20 +301,43 @@ This section is project-specific and applies only to the `ramen-cve` tool that l
 
 ### Dependencies (keep this list small)
 
-Three runtime dependencies, no more without a written justification in `tasks/todo.md`:
+**Five** runtime dependencies, no more without a written justification
+in `tasks/todo.md`. The authoritative version pins live in
+[`pyproject.toml`](../pyproject.toml) / [`config/requirements.txt`](../config/requirements.txt);
+licenses + transitive list in [`docs/SBOM.md`](SBOM.md).
 
-- **`requests`** — HTTP client for NVD, EPSS, and URL-mode fetching. The `urllib` standard library option is technically possible but produces unreadable code for a beginner audience. `requests` is the right ramen-budget call.
-- **`feedparser`** — RSS/Atom parsing. Real-world feeds are inconsistent (RSS 2.0, Atom, weird hybrids); `feedparser` normalizes them. Standard library `xml.etree.ElementTree` is fine for parsing the OPML file itself, but not for the feed bodies.
-- **`python-dotenv`** — Loads `.env` for the NVD API key. Six lines saved versus rolling our own `.env` parser, and it's the convention every Python developer recognizes.
+- **`requests`** — HTTP client for every external fetch (NVD, EPSS,
+  KEV, Exploit-DB, Nuclei, GitHub, VT/AbuseIPDB/OTX/MalwareBazaar,
+  TAXII, Slack/webhook). The `urllib` stdlib option works but produces
+  unreadable code; `requests` is the right ramen-budget call.
+- **`feedparser`** — RSS/Atom parsing. Real-world feeds are
+  inconsistent (RSS 2.0, Atom, weird hybrids); `feedparser` normalises
+  them. Stdlib `xml.etree.ElementTree` is fine for the OPML wrapper,
+  not for the feed bodies inside.
+- **`python-dotenv`** — Loads `.env` for `NVD_API_KEY` + SMTP secrets.
+  Six lines saved versus rolling our own parser; convention-matching.
+- **`questionary`** — Interactive prompt library for the no-args
+  wizard. Function-local import in `wizard.py` so it's only paid for
+  when the wizard runs (test seam preserved via `sys.modules` patching).
+- **`PyYAML`** — Read / write YAML presets (`--config`, `--save-config`).
+  Stdlib has no YAML parser; rolling one for a documented schema is
+  not a ramen-budget move.
 
-Standard library only for everything else: `argparse`, `csv`, `dataclasses`, `datetime`, `json`, `logging`, `pathlib`, `re`, `sqlite3`, `sys`, `urllib.parse`, `xml.etree.ElementTree`.
+Standard library only for everything else: `argparse`, `csv`,
+`dataclasses`, `datetime`, `getpass`, `hashlib`, `ipaddress`, `json`,
+`logging`, `math`, `pathlib`, `re`, `signal`, `smtplib` + `email.mime`,
+`sqlite3`, `sys`, `threading`, `urllib.parse`, `xml.etree.ElementTree`,
+`xml.sax.saxutils`.
 
-**Dev dependencies** (in `requirements-dev.txt`, separate from runtime):
+**Dev dependencies** (in `config/requirements-dev.txt`, separate from
+runtime):
 
 - **`pytest`** — test runner. Bare `pytest`, no plugins.
-- **`ruff`** — linter and formatter in one. Replaces `flake8` + `black` + `isort`. One config, fast, no debate.
+- **`ruff`** — linter + formatter. Replaces `flake8` + `black` +
+  `isort`. One config, fast, no debate.
 
-That's it. No `mypy` in v1 — type hints are present in the code for readability but not enforced. No `pre-commit` hooks — the user runs `ruff` and `pytest` manually. No `tox`. No `poetry`.
+That's it. No `mypy` — type hints are present for readability but not
+enforced. No `pre-commit` hooks. No `tox`. No `poetry`.
 
 ### External APIs and rate limits
 
@@ -377,10 +400,33 @@ planning templates and forward-looking work; together with
 
 ### Testing strategy for this project
 
-- **Unit tests for pure logic.** The CVE regex, the bucket assignment function, the date filter, the OPML parser. These run offline in milliseconds.
-- **No live API tests in CI.** Mock NVD and EPSS responses with fixture JSON files in `tests/fixtures/`. Live network calls happen only during manual integration testing.
-- **One smoke test that runs the whole pipeline against the bundled `examples/sample.opml`** with mocked APIs and asserts the output files exist and contain expected bucket headers. This is the "would it actually work" test.
-- **Coverage target:** not measured in v1. The above tests are enough.
+- **Unit tests for pure logic** — CVE regex, bucket assignment, date
+  filter, OPML parser, IOC decay, TLP/Admiralty merge, bucket policy.
+  Offline, milliseconds.
+- **No live API tests in CI.** Every fetcher (`nvd`, `epss`, `kev`,
+  `exploits`, IOC enrichers, TAXII) is exercised via
+  `patch("ramen_cve.requests.get", side_effect=...)` plus fixtures in
+  `tests/fixtures/`. Live network calls happen only during manual
+  integration testing.
+- **End-to-end smoke** — `tests/test_smoke.py` runs the full pipeline
+  against `examples/sample.opml` with mocked APIs, asserts the output
+  files exist and contain expected bucket headers. The "would it
+  actually work" test.
+- **Façade contract lock** — `tests/test_facade.py` enumerates every
+  `from ramen_cve import X` token and every `ramen_cve.X` token the
+  suite references. Removing a re-export fails this test; that's the
+  point. Patch-contract for `ramen_cve.requests.get`,
+  `ramen_cve.time.sleep`, `ramen_cve.DEFAULT_CACHE_PATH` is locked
+  here too.
+- **Golden byte-oracle** — `scripts/regen_examples.py --check`
+  regenerates the showcase bundle into a temp dir and byte-diffs
+  against the committed `examples/` files. Catches accidental
+  output-shape drift. Run as part of the per-commit gate.
+- **Web UI determinism** — `tests/test_web_ui.py` locks byte-stability
+  across two builds, HTML-escape invariants, no-JS / no-external-asset
+  invariants, and the layout described in `docs/web_ui_design.md`.
+- **Coverage target:** not measured. The above gates are enough to
+  catch behaviour drift; coverage as a number adds noise.
 
 ### Things still out of scope
 
@@ -400,14 +446,19 @@ If a request would expand scope beyond the in-flight task, log it as a
 follow-up in `tasks/todo.md` rather than scope-creeping the current
 change.
 
-### Definition of Done for v1 specifically
+### Per-PR Definition of Done
 
-The v1 release is done when:
+A PR is ready when:
 
-- All three input modes (`opml`, `url`, `cve`) work end-to-end against the bundled `examples/sample.opml` and a real CVE.
-- All three date modes (`feed`, `disclosure`, `epss`) parse correctly and apply the right filter.
-- CSV and Markdown outputs are produced with the schemas specified in the design doc.
-- KEV override is correctly distinguished from `patch_now` in the bucket column and the report.
-- `ruff check .` and `pytest` both pass.
-- `README.md` covers install, NVD key setup, three example invocations, and a "what this is not" section.
-- A run against `examples/sample.opml` produces the bundled `examples/sample-output.csv` and `examples/sample-report.md` byte-for-byte (use a frozen mock-API fixture to make this reproducible).
+- New behaviour has tests, and the full `pytest tests/ -q` stays green.
+- `ruff check threat_intel_hunter.py conftest.py src/ tests/ scripts/`
+  is clean.
+- `python scripts/regen_examples.py --check` returns rc=0 (no drift in
+  the showcase bundle, OR the bundle has been intentionally regenerated
+  and committed in the same PR).
+- User-facing changes are reflected in [`README.md`](../README.md)
+  (the single source of truth); architectural changes are reflected in
+  [`tasks/lessons.md`](../tasks/lessons.md) or this file if they
+  represent a recurring pattern future contributors should know about.
+- The PR description carries the "what changed + how we know it works"
+  verification story (per the Communication Guidelines above).
