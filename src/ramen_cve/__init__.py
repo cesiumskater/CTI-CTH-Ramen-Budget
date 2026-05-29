@@ -141,6 +141,7 @@ from .decay import (  # noqa: F401
     apply_ioc_decay,
     filter_iocs_by_confidence,
 )
+from .deltas import compute_bucket_deltas  # noqa: F401
 from .dispatch.digest import (  # noqa: F401
     _build_digest_body,
     _group_records_by_owner,
@@ -512,6 +513,7 @@ __all__ = [
     "bucket_and_suggest",
     "build_parser",
     "build_site",
+    "compute_bucket_deltas",
     "correlate_inventory",
     "delete_yaml_preset",
     "dispatch_records",

@@ -68,6 +68,8 @@ PUBLIC_API: tuple[str, ...] = (
     "SlackWebhookDispatcher", "GenericWebhookDispatcher", "EmailDispatcher",
     "dispatch_records", "_group_records_by_owner", "_build_digest_body",
     "_maybe_dispatch", "_maybe_digest",
+    # deltas.py
+    "compute_bucket_deltas",
     # config.py
     "load_yaml_config", "save_yaml_config", "list_yaml_presets",
     "delete_yaml_preset", "apply_yaml_config", "args_to_yaml_payload",

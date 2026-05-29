@@ -63,7 +63,9 @@ at the bottom.
   rule stubs, inline-SVG CVSS×EPSS quadrant HTML, and a deterministic
   static-HTML Web UI generator.
 - **Dispatch:** Slack Block-Kit webhooks, generic JSON webhook, per-owner
-  email digests.
+  email digests; optional `--dispatch-on-delta-only` mode pushes only CVEs
+  whose bucket *upgraded* since the previous run (the bucket transition is
+  surfaced in the payload either way).
 - **Workflow primitives:** threat-hunt hypothesis tracker (`hunt`), Priority
   Intelligence Requirements (`pir`), historical trend (`trend`), and a
   tamper-evident audit log (`audit`).
@@ -225,6 +227,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static HTML browseable 
 | `--associations-file PATH` | bundled | Override the CVE→actor/malware lookup |
 | `--allow-tlp-red` | off | Permit writing TLP:RED records (otherwise stripped) |
 | `--dispatch` | off | Push per-finding alerts to Slack / generic webhook |
+| `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included). Suppresses every-run repeats. |
 | `--digest` | off | Batch-mail a daily digest per asset owner (SMTP via env) |
 | `--quiet` / `--verbose` | off | Logging level |
 

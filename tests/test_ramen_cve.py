@@ -4644,6 +4644,211 @@ def test_cli_dispatch_flag_parses():
 
 
 # ---------------------------------------------------------------------------
+# Bucket-transition delta detection (backlog item #1)
+# ---------------------------------------------------------------------------
+
+
+class _FakeRunsCache:
+    """Minimal Cache stand-in exposing only `get_runs`.
+
+    Constructed with a mapping `cve_id -> list[bucket_history]`; each
+    history entry is converted into the dict shape `get_runs` returns
+    (`ts_iso` is synthetic; only `bucket` is consulted by
+    `compute_bucket_deltas`).
+    """
+
+    def __init__(self, history: dict[str, list[str]]) -> None:
+        self._history = history
+
+    def get_runs(self, cve_id: str) -> list[dict]:
+        return [
+            {"ts_iso": f"2026-01-0{i}T00:00:00", "bucket": b,
+             "cvss_score": None, "epss_score": None}
+            for i, b in enumerate(self._history.get(cve_id, []), start=1)
+        ]
+
+
+def test_compute_bucket_deltas_first_seen_included():
+    """A CVE with no recorded history is treated as an upgrade (None -> bucket)."""
+    from ramen_cve import compute_bucket_deltas
+
+    rec = _disp_rec(cve_id="CVE-2099-NEW", bucket="patch_now")
+    cache = _FakeRunsCache({})
+    deltas = compute_bucket_deltas(cache, [rec])
+    assert deltas == {"CVE-2099-NEW": (None, "patch_now")}
+
+
+def test_compute_bucket_deltas_upgrade_included():
+    """watch_closely -> patch_now is an upgrade (lower order int)."""
+    from ramen_cve import compute_bucket_deltas
+
+    rec = _disp_rec(cve_id="CVE-2099-UP", bucket="patch_now")
+    cache = _FakeRunsCache({"CVE-2099-UP": ["watch_closely"]})
+    deltas = compute_bucket_deltas(cache, [rec])
+    assert deltas == {"CVE-2099-UP": ("watch_closely", "patch_now")}
+
+
+def test_compute_bucket_deltas_no_change_excluded():
+    """Same-bucket transition is not a delta."""
+    from ramen_cve import compute_bucket_deltas
+
+    rec = _disp_rec(cve_id="CVE-2099-SAME", bucket="patch_now")
+    cache = _FakeRunsCache({"CVE-2099-SAME": ["patch_now"]})
+    deltas = compute_bucket_deltas(cache, [rec])
+    assert deltas == {}
+
+
+def test_compute_bucket_deltas_downgrade_excluded():
+    """patch_now -> watch_closely (rank-up int) is not an upgrade — excluded."""
+    from ramen_cve import compute_bucket_deltas
+
+    rec = _disp_rec(cve_id="CVE-2099-DOWN", bucket="watch_closely")
+    cache = _FakeRunsCache({"CVE-2099-DOWN": ["patch_now"]})
+    deltas = compute_bucket_deltas(cache, [rec])
+    assert deltas == {}
+
+
+def test_compute_bucket_deltas_compares_against_most_recent_history():
+    """The previous bucket is taken from the LAST history entry, not the first."""
+    from ramen_cve import compute_bucket_deltas
+
+    rec = _disp_rec(cve_id="CVE-2099-MULTI", bucket="patch_now")
+    cache = _FakeRunsCache({
+        "CVE-2099-MULTI": ["patch_now", "watch_closely"],
+    })
+    deltas = compute_bucket_deltas(cache, [rec])
+    assert deltas == {"CVE-2099-MULTI": ("watch_closely", "patch_now")}
+
+
+def test_dispatch_records_delta_only_skips_non_delta_records():
+    """--dispatch-on-delta-only filters records whose CVE id is not in deltas."""
+    from ramen_cve import dispatch_records
+
+    class CountingDisp:
+        name = "counting"
+        seen: list[str] = []
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec, *, transition=None) -> bool:
+            type(self).seen.append(rec.cve_id)
+            return True
+
+    changed = _disp_rec(cve_id="CVE-2099-CHANGED", bucket="patch_now")
+    unchanged = _disp_rec(cve_id="CVE-2099-UNCHANGED", bucket="patch_now")
+    deltas = {"CVE-2099-CHANGED": ("watch_closely", "patch_now")}
+    CountingDisp.seen.clear()
+    sent = dispatch_records(
+        [changed, unchanged],
+        dispatchers=[CountingDisp()],
+        deltas=deltas,
+        delta_only=True,
+    )
+    assert sent == 1
+    assert CountingDisp.seen == ["CVE-2099-CHANGED"]
+
+
+def test_dispatch_records_passes_transition_to_dispatcher():
+    """The `transition` kwarg reaches `dispatch()` when the CVE is in deltas."""
+    from ramen_cve import dispatch_records
+
+    class CaptureDisp:
+        name = "capture"
+        captured: list[tuple[str, tuple | None]] = []
+
+        def enabled(self) -> bool:
+            return True
+
+        def dispatch(self, rec, *, transition=None) -> bool:
+            type(self).captured.append((rec.cve_id, transition))
+            return True
+
+    a = _disp_rec(cve_id="CVE-2099-A", bucket="patch_now")
+    b = _disp_rec(cve_id="CVE-2099-B", bucket="patch_now")
+    deltas = {"CVE-2099-A": (None, "patch_now")}
+    CaptureDisp.captured.clear()
+    dispatch_records(
+        [a, b],
+        dispatchers=[CaptureDisp()],
+        deltas=deltas,
+    )
+    assert ("CVE-2099-A", (None, "patch_now")) in CaptureDisp.captured
+    # B is not in deltas → dispatched without transition kwarg.
+    assert ("CVE-2099-B", None) in CaptureDisp.captured
+
+
+def test_slack_payload_includes_transition_string():
+    """Slack body includes 'Transition: old → new' when transition is provided."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hook")
+    rec = _disp_rec(cve_id="CVE-2099-T", bucket="patch_now")
+    payload = d._build_payload(rec, transition=("watch_closely", "patch_now"))
+    body_section = payload["blocks"][1]["text"]["text"]
+    assert "Transition:" in body_section
+    assert "watch_closely" in body_section
+    assert "patch_now" in body_section
+
+
+def test_slack_payload_first_seen_marker():
+    """Slack body marks first-seen CVEs distinctly."""
+    from ramen_cve import SlackWebhookDispatcher
+
+    d = SlackWebhookDispatcher(webhook_url="https://hook")
+    rec = _disp_rec(cve_id="CVE-2099-NEW", bucket="patch_now")
+    payload = d._build_payload(rec, transition=(None, "patch_now"))
+    body_section = payload["blocks"][1]["text"]["text"]
+    assert "first seen" in body_section
+    assert "Transition:" not in body_section
+
+
+def test_generic_webhook_payload_includes_transition_fields():
+    """Generic webhook payload gets `previous_bucket` and `transition` keys."""
+    from ramen_cve import GenericWebhookDispatcher
+
+    d = GenericWebhookDispatcher(webhook_url="https://hook")
+    rec = _disp_rec(cve_id="CVE-2099-T", bucket="patch_now")
+    payload = d._build_payload(rec, transition=("watch_closely", "patch_now"))
+    assert payload["previous_bucket"] == "watch_closely"
+    assert payload["transition"] == "watch_closely->patch_now"
+
+
+def test_generic_webhook_payload_first_seen_transition_string():
+    """First-seen transition encodes None as `first_seen` in the string form."""
+    from ramen_cve import GenericWebhookDispatcher
+
+    d = GenericWebhookDispatcher(webhook_url="https://hook")
+    rec = _disp_rec(cve_id="CVE-2099-NEW", bucket="patch_now")
+    payload = d._build_payload(rec, transition=(None, "patch_now"))
+    assert payload["previous_bucket"] is None
+    assert payload["transition"] == "first_seen->patch_now"
+
+
+def test_generic_webhook_payload_no_transition_keys_when_absent():
+    """When no transition is passed, the payload omits the transition keys."""
+    from ramen_cve import GenericWebhookDispatcher
+
+    d = GenericWebhookDispatcher(webhook_url="https://hook")
+    rec = _disp_rec(cve_id="CVE-2099-T", bucket="patch_now")
+    payload = d._build_payload(rec)
+    assert "previous_bucket" not in payload
+    assert "transition" not in payload
+
+
+def test_cli_dispatch_on_delta_only_flag_parses():
+    """--dispatch-on-delta-only is accepted on every analysis subcommand."""
+    from ramen_cve import build_parser
+
+    args = build_parser().parse_args(
+        ["opml", "x.opml", "--dispatch", "--dispatch-on-delta-only"]
+    )
+    assert args.dispatch_on_delta_only is True
+    args2 = build_parser().parse_args(["opml", "x.opml"])
+    assert args2.dispatch_on_delta_only is False
+
+
+# ---------------------------------------------------------------------------
 # Slice 20 — Diamond Model + Cyber Kill Chain mapping
 # ---------------------------------------------------------------------------
 

@@ -98,10 +98,17 @@ def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]
 
 
 def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
-    """If --dispatch is set, push high-priority records to configured dispatchers."""
+    """If --dispatch is set, push high-priority records to configured dispatchers.
+
+    Bucket-transition deltas computed by `_record_runs` are read off
+    `args._bucket_deltas` and forwarded so payloads can include the
+    transition and `--dispatch-on-delta-only` can filter on it.
+    """
     if not getattr(args, "dispatch", False):
         return
-    sent = dispatch_records(enriched)
+    deltas = getattr(args, "_bucket_deltas", None) or {}
+    delta_only = getattr(args, "dispatch_on_delta_only", False)
+    sent = dispatch_records(enriched, deltas=deltas, delta_only=delta_only)
     _log.info("Dispatch complete: %d successful posts.", sent)
 
 
