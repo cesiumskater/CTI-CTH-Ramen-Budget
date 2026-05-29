@@ -150,7 +150,7 @@ def _run_wizard() -> list[str]:
 
     fmt = questionary.select(
         "Output format:",
-        choices=["both", "csv", "md"],
+        choices=["both", "csv", "md", "html", "all"],
         default="both",
     ).unsafe_ask()
     argv.extend(["--format", fmt])

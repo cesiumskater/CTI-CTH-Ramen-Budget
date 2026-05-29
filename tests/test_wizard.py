@@ -432,6 +432,93 @@ def test_wizard_blank_out_dir_defaults_to_cwd(tmp_path):
     assert argv[argv.index("--out-dir") + 1] == "."
 
 
+def test_wizard_html_format_round_trips(tmp_path):
+    """Selecting 'html' in the wizard emits --format html and parses back."""
+    import ramen_cve
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10",
+        "",                   # basename
+        str(tmp_path),
+        "html",               # NEW format option
+        False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    assert "--format" in argv
+    assert argv[argv.index("--format") + 1] == "html"
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.format == "html"
+
+
+def test_wizard_all_format_round_trips(tmp_path):
+    """Selecting 'all' in the wizard emits --format all and parses back."""
+    import ramen_cve
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10",
+        "",                   # basename
+        str(tmp_path),
+        "all",                # NEW format option
+        False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+    assert argv[argv.index("--format") + 1] == "all"
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.format == "all"
+
+
+def test_wizard_format_choices_offer_html_and_all():
+    """The wizard's format prompt must list html and all alongside the originals."""
+    import inspect
+
+    import ramen_cve
+
+    src = inspect.getsource(ramen_cve._run_wizard)
+    # The choices list passed to questionary.select for the format prompt must
+    # include the two new options. Guards against a regression that drops them.
+    assert '"html"' in src
+    assert '"all"' in src
+
+
+def test_output_writes_html_file(tmp_path):
+    """End-to-end: --format html produces a self-contained .html quadrant report."""
+    import argparse
+    from datetime import date
+
+    import ramen_cve
+
+    rec = ramen_cve.EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+    )
+    args = argparse.Namespace(
+        format="html",
+        out_dir=tmp_path,
+        basename="quadrant-run",
+        allow_tlp_red=False,
+    )
+    paths = ramen_cve._output([rec], args, {"version": "0.1"})
+    html_path = tmp_path / "quadrant-run.html"
+    assert html_path.exists()
+    assert paths["html"] == html_path
+    body = html_path.read_text(encoding="utf-8")
+    assert "<svg" in body          # inline-SVG quadrant present
+    assert "CVE-2021-44228" in body
+    # No CSV / Markdown written when only html was requested.
+    assert paths["csv"] is None and paths["md"] is None
+
+
 def test_output_honors_basename_end_to_end(tmp_path):
     """End-to-end: --basename produces <name>.csv / <name>.md / <name>-iocs.csv files."""
     from datetime import date
