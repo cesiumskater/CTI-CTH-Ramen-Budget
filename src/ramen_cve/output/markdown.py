@@ -38,11 +38,21 @@ BUCKET_DISPLAY = {
 
 
 def _md_safe(text: str) -> str:
-    """Collapse newlines and control whitespace so a string is safe in a Markdown bullet."""
+    """Collapse newlines and escape Markdown structural chars for safe embedding.
+
+    A raw `|` inside a table cell ends the cell early and breaks the row; a raw
+    backtick opens inline-code mode and consumes following text. Both are
+    escaped here so attacker-controllable fields (CVE descriptions, vendor /
+    product names, actor names, hostnames) cannot deform tables or inject
+    inline code. `<>` are left alone — most Markdown renderers don't auto-HTML
+    them outside of recognised tag patterns, and escaping them would mangle
+    legitimate text like "x < 5" in CVE descriptions.
+    """
     if not text:
         return ""
     # Replace any run of \r/\n/\t/etc. with a single space so the bullet stays on one line.
-    return re.sub(r"\s+", " ", text).strip()
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    return collapsed.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
 
 
 IOC_TYPE_DISPLAY: dict[str, str] = {
@@ -163,7 +173,7 @@ def write_markdown(
             "| --- | --- | --- |",
         ]
         for tid in sorted(technique_rollup):
-            name = ATTACK_TECHNIQUE_NAMES.get(tid, "(unmapped)")
+            name = _md_safe(ATTACK_TECHNIQUE_NAMES.get(tid, "(unmapped)"))
             cves = technique_rollup[tid]
             lines.append(f"| {tid} | {name} | {len(cves)} |")
         lines.append("")

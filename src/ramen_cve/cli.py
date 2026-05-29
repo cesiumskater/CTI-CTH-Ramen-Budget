@@ -31,6 +31,7 @@ from .cliutil import (
     _parse_iso_date,
     _path_arg,
     _validate_cve_id,
+    _validate_http_url,
 )
 from .config import (
     _load_remembered_opml,
@@ -320,7 +321,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # url subcommand
     url_p = sub.add_parser("url", help="Extract CVEs from a single URL.")
-    url_p.add_argument("url", help="URL of the article or page to scan.")
+    url_p.add_argument(
+        "url",
+        type=_validate_http_url,
+        help="URL of the article or page to scan (http:// or https:// only).",
+    )
     url_p.add_argument(
         "--depth",
         type=int,

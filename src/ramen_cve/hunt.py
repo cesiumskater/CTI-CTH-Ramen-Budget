@@ -104,7 +104,7 @@ def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             return 0
         hunt.linked_cves.append(cve)
         save_hunt(hunt, hunt_path)
-        print(f"Linked {cve} to {hunt.id}")
+        _log.info("Linked %s to %s.", cve, hunt.id)
         return 0
 
     if action == "log":
@@ -116,7 +116,7 @@ def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             "text": args.value,
         })
         save_hunt(hunt, hunt_path)
-        print(f"Logged finding on {hunt.id}")
+        _log.info("Logged finding on %s.", hunt.id)
         return 0
 
     if action == "status":
@@ -131,7 +131,7 @@ def _run_hunt(args: argparse.Namespace, cache: Cache, api_key: str | None) -> in
             return 1
         hunt.status = new_status
         save_hunt(hunt, hunt_path)
-        print(f"Set {hunt.id} status → {new_status}")
+        _log.info("Set %s status → %s.", hunt.id, new_status)
         return 0
 
     _log.error("Unknown hunt action: %r", action)
