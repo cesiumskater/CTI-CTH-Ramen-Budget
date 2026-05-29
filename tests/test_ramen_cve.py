@@ -7876,3 +7876,145 @@ def test_args_to_yaml_payload_includes_remember_opml():
     )
     payload = ramen_cve.args_to_yaml_payload(args)
     assert payload["remember_opml"] is True
+
+
+# ---------------------------------------------------------------------------
+# Hardening regression tests — markdown table escape + URL scheme allow-list
+# + sqlite busy-timeout + CSV consistency for unwrapped columns.
+# ---------------------------------------------------------------------------
+
+
+def test_md_safe_escapes_pipe_and_backtick():
+    """A `|` inside a Markdown table cell ends the cell early; a backtick
+    opens inline-code mode. Both must be neutralized so attacker-controllable
+    fields can't deform tables or inject inline code.
+    """
+    from ramen_cve.output.markdown import _md_safe
+
+    assert _md_safe("vendor | injected") == "vendor \\| injected"
+    assert _md_safe("name with `code` chunk") == "name with \\`code\\` chunk"
+    # Backslash itself escapes first so a hostile input of `\|` survives as a
+    # rendered literal `\|` rather than becoming an unescaped `\\|` (which a
+    # Markdown table parser would read as "escaped backslash, then pipe").
+    assert _md_safe("path\\to\\evil|host") == "path\\\\to\\\\evil\\|host"
+    # Whitespace collapse still applies.
+    assert _md_safe("multi\nline\ttext") == "multi line text"
+    # Safe inputs (the golden case) are unchanged.
+    assert _md_safe("APT41") == "APT41"
+    assert _md_safe("") == ""
+
+
+def test_validate_http_url_accepts_http_and_https():
+    """The CLI `url` arg must accept the two web schemes the tool actually fetches."""
+    from ramen_cve.cliutil import _validate_http_url
+
+    assert _validate_http_url("https://example.com/x") == "https://example.com/x"
+    assert _validate_http_url("http://example.com/x") == "http://example.com/x"
+
+
+def test_validate_http_url_rejects_dangerous_schemes():
+    """Closes the CLI-side SSRF / scheme-confusion gap (file://, gopher://, ftp://,
+    bare hostnames). The wizard already gates this at prompt time; this validator
+    is the matching gate for direct-argv invocations.
+    """
+    import argparse
+
+    from ramen_cve.cliutil import _validate_http_url
+
+    for bad in (
+        "file:///etc/passwd",
+        "gopher://internal.host/x",
+        "ftp://files.example.com/x",
+        "javascript:alert(1)",
+        "data:text/plain,hello",
+        "example.com",          # no scheme
+        "",                     # empty
+        "http://",              # no host
+    ):
+        with pytest.raises(argparse.ArgumentTypeError):
+            _validate_http_url(bad)
+
+
+def test_cache_connect_uses_busy_timeout(tmp_path, monkeypatch):
+    """A concurrent writer holding the SQLite write lock should not crash the
+    second process on the first contended commit. We assert sqlite3.connect()
+    is called with a non-default timeout so the second writer waits-and-retries.
+    """
+    import sqlite3 as real_sqlite3
+
+    from ramen_cve.cache import Cache
+
+    captured: dict[str, object] = {}
+    original_connect = real_sqlite3.connect
+
+    def spy(path, *args, **kwargs):
+        captured["path"] = path
+        captured["timeout"] = kwargs.get("timeout")
+        return original_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr("ramen_cve.cache.sqlite3.connect", spy)
+
+    Cache(tmp_path / "test.db", ttl_hours=1)
+    assert captured["timeout"] is not None
+    assert captured["timeout"] >= 5  # Python's stdlib default is 5.0; we want more.
+
+
+def test_csv_safe_wraps_bucket_and_enum_columns(tmp_path):
+    """Defense-in-depth: even columns sourced from validated/enum upstream
+    (bucket, cvss_severity, exploit_status, tlp, admiralty, cve_id, dates) are
+    routed through _csv_safe so a future regression in upstream validation
+    cannot reintroduce a formula-injection vector here.
+    """
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    # Construct a record whose enum-like fields contain trigger characters.
+    # In practice these are enums and would be rejected upstream; the test
+    # asserts the writer is the *last line of defense*.
+    rec = EnrichedCve(
+        cve_id="=CVE-2099-0001",                # forcibly leading "="
+        source="benign",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="-feed",                # forcibly leading "-"
+        cvss_score=7.5,
+        epss_score=0.1,
+        cvss_severity="@HIGH",                  # forcibly leading "@"
+        bucket="=patch_now",
+        exploit_status="-exploit",
+        tlp="+CLEAR",
+        admiralty="@B2",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
+    body = rows[1]
+    for col in (
+        "cve_id", "first_seen_type", "cvss_severity", "bucket",
+        "exploit_status", "tlp", "admiralty",
+    ):
+        cell = body[CSV_COLUMNS.index(col)]
+        assert cell.startswith("'"), f"{col} not escaped: {cell!r}"
+
+
+def test_csv_safe_wraps_epss_trajectory_sidecar(tmp_path):
+    """The EPSS trajectory sidecar writer is fed cve_id (regex-validated) and
+    ISO-format date strings — both safe today. Wrap them anyway so a future
+    upstream regression cannot reintroduce a formula-injection vector here.
+    """
+    from ramen_cve import EnrichedCve, write_epss_trajectory_csv
+
+    rec = EnrichedCve(
+        cve_id="=CVE-2099-0001",      # forcibly leading "="
+        source="x",
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=7.0,
+        epss_score=0.1,
+        bucket="patch_now",
+        epss_trajectory={"-2024-01-01": {"epss": 0.1, "percentile": 0.5}},
+    )
+    out = tmp_path / "traj.csv"
+    write_epss_trajectory_csv([rec], out)
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
+    # First data row: cve_id, date, epss, percentile.
+    assert rows[1][0].startswith("'"), rows[1][0]
+    assert rows[1][1].startswith("'"), rows[1][1]

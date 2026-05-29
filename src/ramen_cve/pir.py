@@ -129,7 +129,7 @@ def _run_pir(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
             return 0
         pir.tagged_cves.append(cve)
         save_pir(pir, pir_path)
-        print(f"Linked {cve} to {pir.id}")
+        _log.info("Linked %s to %s.", cve, pir.id)
         return 0
 
     _log.error("Unknown pir action: %r", action)

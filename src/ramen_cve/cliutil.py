@@ -28,6 +28,24 @@ def _validate_cve_id(value: str) -> str:
     return value.upper()
 
 
+def _validate_http_url(value: str) -> str:
+    """Argparse type: accept only `http://` or `https://` URLs.
+
+    Closes a CLI-side SSRF / scheme-confusion gap where a `url`-mode invocation
+    could otherwise hand `file://`, `gopher://`, etc. to `requests.get`. The
+    wizard already enforces the same rule (`wizard.py`); this is the
+    direct-argv path's matching guard.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise argparse.ArgumentTypeError(
+            f"'{value}' is not a valid URL. Expected scheme http:// or https://."
+        )
+    return value
+
+
 def _strip_path_quotes(value: str) -> str:
     """Return `value` with surrounding whitespace and a single layer of paired
     ASCII or curly quotes stripped.

@@ -84,37 +84,37 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
             pct = f"{rec.epss_percentile:.4f}" if rec.epss_percentile is not None else ""
             writer.writerow(
                 [
-                    rec.cve_id,
+                    _csv_safe(rec.cve_id),
                     _csv_safe(rec.source),
-                    str(rec.first_seen) if rec.first_seen else "",
-                    rec.first_seen_type,
+                    _csv_safe(str(rec.first_seen) if rec.first_seen else ""),
+                    _csv_safe(rec.first_seen_type),
                     cvss,
-                    rec.cvss_severity or "",
+                    _csv_safe(rec.cvss_severity or ""),
                     epss,
                     pct,
                     str(rec.kev_listed).lower(),
-                    str(rec.kev_due_date) if rec.kev_due_date else "",
+                    _csv_safe(str(rec.kev_due_date) if rec.kev_due_date else ""),
                     str(rec.kev_known_ransomware_use).lower(),
                     _csv_safe(rec.kev_vendor_project or ""),
                     _csv_safe(rec.kev_product or ""),
-                    rec.bucket,
+                    _csv_safe(rec.bucket),
                     _csv_safe(rec.suggested_action),
                     _csv_safe(";".join(rec.cwe)),
                     _csv_safe(";".join(rec.attack_techniques)),
-                    rec.exploit_status,
+                    _csv_safe(rec.exploit_status),
                     _csv_safe(";".join(a.name for a in rec.linked_actors)),
                     _csv_safe(";".join(c.name for c in rec.linked_campaigns)),
                     _csv_safe(";".join(m.name for m in rec.linked_malware)),
-                    rec.tlp or "CLEAR",
-                    rec.admiralty or "",
+                    _csv_safe(rec.tlp or "CLEAR"),
+                    _csv_safe(rec.admiralty or ""),
                     _csv_safe(";".join(rec.affected_hosts)),
                     _csv_safe(rec.kill_chain_phase),
                     _csv_safe(rec.diamond_capability),
                     _csv_safe(rec.diamond_adversary),
                     _csv_safe(rec.diamond_infrastructure),
                     _csv_safe(rec.diamond_victim),
-                    str(rec.nvd_published) if rec.nvd_published else "",
-                    rec.enriched_at.isoformat(),
+                    _csv_safe(str(rec.nvd_published) if rec.nvd_published else ""),
+                    _csv_safe(rec.enriched_at.isoformat()),
                 ]
             )
 
@@ -138,8 +138,8 @@ def write_epss_trajectory_csv(enriched: list[EnrichedCve], path: Path) -> None:
         for cve_id, d, epss, pct in rows:
             writer.writerow(
                 [
-                    cve_id,
-                    d,
+                    _csv_safe(cve_id),
+                    _csv_safe(d),
                     f"{epss:.4f}" if epss is not None else "",
                     f"{pct:.4f}" if pct is not None else "",
                 ]

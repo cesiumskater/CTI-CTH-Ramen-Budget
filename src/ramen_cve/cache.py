@@ -85,7 +85,10 @@ class Cache:
     def __init__(self, path: Path | str, ttl_hours: int = DEFAULT_CACHE_TTL_HOURS) -> None:
         """Open (or create) the cache database and ensure the schema exists."""
         self._ttl = timedelta(hours=ttl_hours)
-        self._conn = sqlite3.connect(str(path))
+        # timeout=30 lets sqlite retry briefly when another process holds the
+        # write lock (concurrent daemon / scheduled run) instead of raising
+        # OperationalError("database is locked") on the first contended commit.
+        self._conn = sqlite3.connect(str(path), timeout=30)
         self._conn.executescript(self._SCHEMA)
         self._conn.commit()
 
