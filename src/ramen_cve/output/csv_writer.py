@@ -12,6 +12,22 @@ from pathlib import Path
 
 from ..models import EnrichedCve
 
+# CWE-1236: the CSV is intentionally written with a UTF-8 BOM (utf-8-sig)
+# so Excel auto-detects encoding — which also means it opens the file as
+# a spreadsheet and interprets a leading =/+/-/@/TAB/CR as a formula. Feed
+# titles, URL <title>s, and a handful of other free-text fields here are
+# attacker-controllable. Prefix any such cell with a single apostrophe —
+# the Excel-documented escape, consumed on display so the visible value
+# is unchanged.
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """Return `value` with a leading apostrophe if it would trigger a formula."""
+    if value and value[0] in _FORMULA_TRIGGERS:
+        return "'" + value
+    return value
+
 EPSS_TRAJECTORY_COLUMNS = ("cve_id", "date", "epss", "percentile")
 
 CSV_COLUMNS = [
@@ -69,7 +85,7 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
             writer.writerow(
                 [
                     rec.cve_id,
-                    rec.source,
+                    _csv_safe(rec.source),
                     str(rec.first_seen) if rec.first_seen else "",
                     rec.first_seen_type,
                     cvss,
@@ -79,24 +95,24 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                     str(rec.kev_listed).lower(),
                     str(rec.kev_due_date) if rec.kev_due_date else "",
                     str(rec.kev_known_ransomware_use).lower(),
-                    rec.kev_vendor_project or "",
-                    rec.kev_product or "",
+                    _csv_safe(rec.kev_vendor_project or ""),
+                    _csv_safe(rec.kev_product or ""),
                     rec.bucket,
-                    rec.suggested_action,
-                    ";".join(rec.cwe),
-                    ";".join(rec.attack_techniques),
+                    _csv_safe(rec.suggested_action),
+                    _csv_safe(";".join(rec.cwe)),
+                    _csv_safe(";".join(rec.attack_techniques)),
                     rec.exploit_status,
-                    ";".join(a.name for a in rec.linked_actors),
-                    ";".join(c.name for c in rec.linked_campaigns),
-                    ";".join(m.name for m in rec.linked_malware),
+                    _csv_safe(";".join(a.name for a in rec.linked_actors)),
+                    _csv_safe(";".join(c.name for c in rec.linked_campaigns)),
+                    _csv_safe(";".join(m.name for m in rec.linked_malware)),
                     rec.tlp or "CLEAR",
                     rec.admiralty or "",
-                    ";".join(rec.affected_hosts),
-                    rec.kill_chain_phase,
-                    rec.diamond_capability,
-                    rec.diamond_adversary,
-                    rec.diamond_infrastructure,
-                    rec.diamond_victim,
+                    _csv_safe(";".join(rec.affected_hosts)),
+                    _csv_safe(rec.kill_chain_phase),
+                    _csv_safe(rec.diamond_capability),
+                    _csv_safe(rec.diamond_adversary),
+                    _csv_safe(rec.diamond_infrastructure),
+                    _csv_safe(rec.diamond_victim),
                     str(rec.nvd_published) if rec.nvd_published else "",
                     rec.enriched_at.isoformat(),
                 ]

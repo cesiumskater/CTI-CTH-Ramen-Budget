@@ -1873,6 +1873,102 @@ def test_write_iocs_csv_round_trip(tmp_path):
     assert rows[1][IOC_CSV_COLUMNS.index("enrichments")] == ""
 
 
+def test_write_csv_neutralizes_formula_injection(tmp_path):
+    """CWE-1236: a feed/site title starting with =, +, -, @, \\t, \\r must NOT be
+    written as a literal formula. Because the CSV uses utf-8-sig (BOM) specifically
+    so Excel auto-opens it, an unescaped leading `=` in any text cell would
+    execute on open. Every such cell must be prefixed with a single quote — the
+    standard Excel-documented escape, which is consumed on display.
+    """
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    payloads = {
+        "=": '=HYPERLINK("http://attacker.example/x","click")',
+        "+": "+1+1+cmd|'/c calc'!A1",
+        "-": "-2+3+cmd|'/c calc'!A1",
+        "@": "@SUM(1+1)*cmd|'/c calc'!A1",
+        "\t": "\tleading-tab",
+        "\r": "\rleading-cr",
+    }
+    recs = [
+        EnrichedCve(
+            cve_id=f"CVE-2099-{i:04d}",
+            source=payload,
+            first_seen=date(2024, 1, 1),
+            first_seen_type="feed_pub",
+            cvss_score=7.5,
+            epss_score=0.1,
+            bucket="patch_now",
+            # Two other externally-influenced free-text fields:
+            suggested_action="=cmd|'/c calc'!A1",
+            kev_vendor_project="@Acme",
+        )
+        for i, (_, payload) in enumerate(payloads.items())
+    ]
+    out = tmp_path / "out.csv"
+    write_csv(recs, out)
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
+    src_col = CSV_COLUMNS.index("source")
+    action_col = CSV_COLUMNS.index("suggested_action")
+    vendor_col = CSV_COLUMNS.index("kev_vendor_project")
+    for row in rows[1:]:
+        # Every offending cell must now begin with the apostrophe escape;
+        # the original payload follows so the visible content is preserved.
+        assert row[src_col].startswith("'"), f"source not escaped: {row[src_col]!r}"
+        assert row[action_col].startswith("'"), f"action not escaped: {row[action_col]!r}"
+        assert row[vendor_col].startswith("'"), f"vendor not escaped: {row[vendor_col]!r}"
+
+
+def test_write_csv_does_not_double_escape_safe_text(tmp_path):
+    """Cells that don't begin with a formula-trigger char are written verbatim."""
+    from ramen_cve import CSV_COLUMNS, EnrichedCve, write_csv
+
+    rec = EnrichedCve(
+        cve_id="CVE-2021-44228",
+        source="Krebs on Security",   # benign — must NOT gain a leading apostrophe
+        first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub",
+        cvss_score=10.0,
+        epss_score=0.97,
+        bucket="kev_override",
+        suggested_action="Patch immediately.",
+    )
+    out = tmp_path / "out.csv"
+    write_csv([rec], out)
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
+    src = rows[1][CSV_COLUMNS.index("source")]
+    action = rows[1][CSV_COLUMNS.index("suggested_action")]
+    assert src == "Krebs on Security"
+    assert action == "Patch immediately."
+
+
+def test_write_iocs_csv_neutralizes_formula_injection(tmp_path):
+    """CWE-1236 for the IOC sidecar CSV: the `source` column is feed-controlled
+    and lands in a utf-8-sig CSV Excel will auto-open. A leading =/+/-/@/\\t/\\r
+    must be escaped just like the main CVE CSV.
+    """
+    from ramen_cve import IOC_CSV_COLUMNS, IocRecord, write_iocs_csv
+
+    iocs = [
+        IocRecord(
+            "ipv4", "8.8.8.8",
+            '=HYPERLINK("http://attacker.example/x","click")',
+            date(2024, 1, 1), "feed_pub",
+        ),
+        IocRecord(
+            "url", "https://evil.example/x",
+            "@Acme Feed",
+            date(2024, 1, 2), "feed_pub",
+        ),
+    ]
+    out = tmp_path / "iocs.csv"
+    write_iocs_csv(iocs, out)
+    rows = list(csv.reader(out.open(encoding="utf-8-sig")))
+    src_col = IOC_CSV_COLUMNS.index("source")
+    for row in rows[1:]:
+        assert row[src_col].startswith("'"), f"IOC source not escaped: {row[src_col]!r}"
+
+
 def test_write_markdown_renders_iocs_section(tmp_path):
     """When iocs is non-empty, the Markdown report includes an IOC section."""
     from ramen_cve import IocRecord, write_markdown
