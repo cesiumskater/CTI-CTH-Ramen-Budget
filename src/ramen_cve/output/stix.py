@@ -16,6 +16,7 @@ import requests
 
 from ..constants import CVE_REGEX, USER_AGENT
 from ..models import CveRecord, EnrichedCve, IocRecord, OpmlError, _utcnow
+from .csv_writer import _csv_safe
 
 _log = logging.getLogger(__name__)
 
@@ -57,8 +58,8 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
             writer.writerow(
                 [
                     rec.ioc_type,
-                    rec.value,
-                    rec.source,
+                    _csv_safe(rec.value),
+                    _csv_safe(rec.source),
                     str(rec.first_seen) if rec.first_seen else "",
                     rec.first_seen_type,
                     str(rec.defanged_in_source).lower(),
@@ -67,7 +68,7 @@ def write_iocs_csv(iocs: list[IocRecord], path: Path) -> None:
                     rec.admiralty or "",
                     str(rec.last_seen) if rec.last_seen else "",
                     f"{rec.confidence:.4f}" if rec.confidence is not None else "",
-                    ";".join(rec.cve_ids),
+                    _csv_safe(";".join(rec.cve_ids)),
                 ]
             )
 
