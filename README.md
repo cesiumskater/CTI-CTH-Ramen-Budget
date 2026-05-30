@@ -1,76 +1,104 @@
 # ramen-cve
 
 **CVE triage on a ramen budget** — a Python CTI / threat-hunting pipeline
-behind a flat re-export façade, for teams who need a working pipeline before
-they have a working platform.
+for teams who need a *working* process before they can afford a *working
+platform*.
 
-Give it an OPML feed list, an article URL, a CVE list, or a STIX 2.1 bundle.
-It extracts CVE identifiers, enriches each with CVSS (NVD), exploitation
-probability (EPSS), CISA KEV context, MITRE ATT&CK mappings, threat-actor
-attribution, public-exploit availability, and per-host inventory correlation.
-It buckets every CVE into one of five action categories — KEV-listed CVEs
-always surface first — then writes analyst-friendly artefacts (CSV, Markdown,
-STIX 2.1, Sigma stubs, YARA stubs, inline-SVG quadrant, static Web UI) and
-optionally pushes Slack / webhook alerts or batched email digests to asset
-owners.
+Give it an OPML feed list, an article URL, a CVE list, or a STIX 2.1
+bundle. It extracts CVE identifiers and enriches each one with CVSS (NVD),
+exploitation probability (EPSS), CISA KEV context, MITRE ATT&CK mappings,
+threat-actor attribution, public-exploit availability, and per-host
+inventory correlation. It then drops every CVE into one of five action
+buckets — KEV-listed CVEs always surface first — and writes analyst-friendly
+artefacts (CSV, Markdown, STIX 2.1, Sigma/YARA stubs, an inline-SVG quadrant,
+a static Web UI) and optionally pushes Slack / webhook alerts or batched
+email digests to asset owners.
 
-Companion to the BSidesSLC 2026 talk **"Threat Intel on a Ramen Budget"** by
-Danny Page ([@cesiumskater](https://github.com/cesiumskater)).
+Companion code for the BSidesSLC 2026 talk **"Threat Intel on a Ramen
+Budget"** by Danny Page ([@cesiumskater](https://github.com/cesiumskater)).
 
-This README is the single source of truth for the project. Supplementary
-material lives under [`docs/`](docs/) — see [Documentation](#documentation)
-at the bottom.
+> **This README is the single source of truth.** Everything you need to
+> install, run, configure, and extend the tool lives here. The files under
+> [`docs/`](docs/) are supplementary — see [Documentation](#documentation).
 
 ---
 
 ## Contents
 
+- [Overview](#overview)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Installation](#installation)
 - [API keys](#api-keys)
 - [Usage](#usage)
-- [YAML configuration & presets](#yaml-configuration--presets)
+- [Configuration & presets](#configuration--presets)
 - [Scheduled runs](#scheduled-runs)
 - [Daemon mode](#daemon-mode)
 - [Web UI](#web-ui)
 - [Bucket logic](#bucket-logic)
 - [Outputs](#outputs)
-- [Repository layout](#repository-layout)
 - [What's bundled](#whats-bundled)
+- [Repository layout](#repository-layout)
 - [Documentation](#documentation)
 - [Roadmap](#roadmap)
+- [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Overview
+
+The intelligence cycle — *direction → collection → processing → analysis →
+dissemination → feedback* — doesn't require a commercial platform. It
+requires a repeatable process. `ramen-cve` is that process in one auditable
+Python package:
+
+- **Collect** CVEs and IOCs from feeds, articles, CVE lists, or STIX/TAXII.
+- **Enrich** them against free, authoritative sources (NVD, EPSS, CISA KEV,
+  Exploit-DB / Nuclei / GitHub, VirusTotal / AbuseIPDB / OTX / MalwareBazaar).
+- **Analyse** with industry-standard frames (MITRE ATT&CK, Cyber Kill Chain,
+  Diamond Model) plus TLP + NATO Admiralty provenance.
+- **Prioritize** with a flat, defensible five-bucket decision table.
+- **Disseminate** in every format a downstream tool can consume.
+
+It runs from a fresh checkout with **no install and no API keys** — every
+key you add and every enrichment you enable simply unlocks more. The whole
+thing is small enough for one analyst to run, schedule, read, and defend to
+leadership. That's the ramen budget.
+
+**Who it's for:** small security teams, solo analysts, and anyone who wants
+the working core of a CTI / CTH program without a TIP licence. MIT-licensed
+and meant to be forked.
 
 ---
 
 ## Features
 
-- **Inputs:** OPML feed lists (single file or directory), single-URL crawl
-  (`--depth 0|1`), hand-supplied CVE lists, STIX 2.1 bundle import, TAXII 2.x
-  pull.
-- **Enrichment:** NVD (CVSS, CWE, CPE), EPSS (including multi-day trajectory
-  mode), CISA KEV catalogue (due date + ransomware-use flag), public-exploit
+- **Inputs** — OPML feed lists (single file or a directory of `*.opml`),
+  single-URL crawl (`--depth 0|1`), hand-supplied CVE lists, STIX 2.1 bundle
+  import, and TAXII 2.x pull.
+- **Enrichment** — NVD (CVSS, CWE, CPE), EPSS (including multi-day
+  trajectory mode), CISA KEV (due date + ransomware-use flag), public-exploit
   signals (Exploit-DB, Nuclei, GitHub PoC), IOC reputation (VirusTotal,
   AbuseIPDB, OTX, MalwareBazaar), bundled threat-actor / campaign / malware
   associations, and CPE↔asset inventory correlation.
-- **Analysis frames:** MITRE ATT&CK technique tagging, Cyber Kill Chain
+- **Analysis frames** — MITRE ATT&CK technique tagging, Cyber Kill Chain
   phase, Diamond Model (adversary / capability / infrastructure / victim),
-  TLP + NATO Admiralty source-confidence merging, IOC confidence decay,
-  optional sector filter.
-- **Outputs:** CVE CSV (UTF-8 with BOM so Excel renders correctly), IOC CSV
-  sidecar, Markdown triage report, STIX 2.1 bundle, Sigma rule stubs, YARA
-  rule stubs, inline-SVG CVSS×EPSS quadrant HTML, and a deterministic
-  static-HTML Web UI generator.
-- **Dispatch:** Slack Block-Kit webhooks, generic JSON webhook, per-owner
-  email digests; optional `--dispatch-on-delta-only` mode pushes only CVEs
-  whose bucket *upgraded* since the previous run (the bucket transition is
-  surfaced in the payload either way).
-- **Workflow primitives:** threat-hunt hypothesis tracker (`hunt`), Priority
-  Intelligence Requirements (`pir`), historical trend (`trend`), and a
-  tamper-evident audit log (`audit`).
-- **Operations:** YAML preset system (`--save-config` / `--config`), native
-  scheduler emitters (Windows Task Scheduler XML + cron), long-running
+  TLP + NATO Admiralty source-confidence merging, IOC confidence decay, and
+  an optional sector filter.
+- **Outputs** — CVE CSV (UTF-8 BOM so Excel renders it correctly, with
+  spreadsheet formula-injection neutralised), IOC CSV sidecar, Markdown
+  triage report, STIX 2.1 bundle, Sigma rule stubs, YARA rule stubs, an
+  inline-SVG CVSS×EPSS quadrant, and a deterministic static-HTML Web UI.
+- **Dispatch** — Slack Block-Kit webhooks, generic JSON webhook, and
+  per-owner email digests. `--dispatch-on-delta-only` pushes only CVEs whose
+  bucket *upgraded* since the previous run (the bucket transition is surfaced
+  in the payload either way).
+- **Workflow primitives** — threat-hunt hypothesis tracker (`hunt`),
+  Priority Intelligence Requirements (`pir`), historical trend (`trend`), and
+  a tamper-evident audit log (`audit`).
+- **Operations** — YAML preset system (`--save-config` / `--config`), native
+  scheduler emitters (Windows Task Scheduler XML + cron), and a long-running
   `daemon` subcommand with timestamped per-iteration output and optional
   history pruning.
 - **Five runtime dependencies** (`requests`, `feedparser`, `python-dotenv`,
@@ -94,8 +122,8 @@ python threat_intel_hunter.py opml examples/sample.opml
 ```
 
 The bootstrap creates `.venv`, does an editable install (so the `ramen-cve`
-console script is on your `PATH`), and copies `config/env.example` to `.env`
-at the repo root on first run.
+console script lands on your `PATH`), and copies `config/env.example` to
+`.env` at the repo root on first run.
 
 ---
 
@@ -113,24 +141,27 @@ cp config/env.example .env         # then fill in any keys you want
 
 Three equivalent entry points after install:
 
-- `ramen-cve …` (console script, recommended)
+- `ramen-cve …` — console script (recommended)
 - `python -m ramen_cve …`
-- `python threat_intel_hunter.py …` (no-install shim — prints a friendly
-  hint if dependencies aren't on the path yet)
+- `python threat_intel_hunter.py …` — no-install shim that prints a friendly
+  hint if dependencies aren't on the path yet
 
-Python 3.10+. Runtime deps pinned in `config/requirements.txt`; dev deps in
-`config/requirements-dev.txt`.
+**Python 3.10+.** Runtime deps are pinned in
+[`config/requirements.txt`](config/requirements.txt); dev deps in
+[`config/requirements-dev.txt`](config/requirements-dev.txt). The
+authoritative dependency manifest is
+[`pyproject.toml`](pyproject.toml).
 
 ---
 
 ## API keys
 
-The tool runs without any keys. Each key you set unlocks more.
+The tool runs with **zero** keys. Each key you set unlocks more.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `NVD_API_KEY` | every run | Lifts NVD rate-limit from 5/30s → 50/30s |
-| `GITHUB_TOKEN` | exploit tracker | Lifts GitHub Search rate-limit from 10/min → 30/min |
+| `NVD_API_KEY` | every run | Lifts the NVD rate limit from 5/30s → 50/30s |
+| `GITHUB_TOKEN` | exploit tracker | Lifts the GitHub Search rate limit from 10/min → 30/min |
 | `VT_API_KEY` | IOC enrichment | VirusTotal lookups for IPs / URLs / domains / hashes |
 | `ABUSEIPDB_API_KEY` | IOC enrichment | AbuseIPDB IP reputation |
 | `OTX_API_KEY` | IOC enrichment | AlienVault OTX indicator pulses |
@@ -139,9 +170,10 @@ The tool runs without any keys. Each key you set unlocks more.
 | `RAMEN_SMTP_HOST` (+ `_FROM`, `_USER`, `_PASS`, `_USE_TLS`) | `--digest` | Daily-digest email |
 | `RAMEN_DIGEST_TO` | `--digest` | Catch-all recipient for un-owned hosts |
 
-Copy `config/env.example` → `.env` at the repo root and paste your keys
-after each `=`. `.env` is gitignored; keys are redacted from logs and never
-serialized into outputs or the cache.
+Copy [`config/env.example`](config/env.example) → `.env` at the repo root and
+paste your keys after each `=`. `.env` is gitignored; keys are redacted from
+logs and are never serialized into outputs or the cache. The full network
+trust surface is enumerated in [`docs/SBOM.md`](docs/SBOM.md) §6.
 
 ---
 
@@ -149,7 +181,10 @@ serialized into outputs or the cache.
 
 The fastest way in is the no-args **wizard** — `python threat_intel_hunter.py`
 walks you through every prompt, accepts quoted Windows paths and `~`, and
-lets you pick the output basename before files are written.
+lets you pick the output basename before any files are written.
+
+Eleven subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
+`pir`, `trend`, `audit`, `web`, `schedule`, and `daemon`.
 
 ### OPML feeds
 
@@ -204,7 +239,7 @@ python threat_intel_hunter.py pir link log4j-exposure CVE-2021-44228
 ```bash
 python threat_intel_hunter.py trend CVE-2021-44228     # sparkline across cached runs
 python threat_intel_hunter.py audit --tail 100         # who ran what, when
-python threat_intel_hunter.py web --site-dir ./_site   # static HTML browseable view
+python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 ```
 
 ### Common flags (analysis subcommands)
@@ -218,7 +253,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static HTML browseable 
 | `--out-dir PATH` | cwd | Output directory (quote-stripped, `~`-expanded) |
 | `--basename NAME` | timestamped | Output filename stem |
 | `--format {csv,md,both,stix,sigma,yara,html,all}` | `both` | Output formats |
-| `--no-cache` | off | Skip SQLite cache (always re-fetch) |
+| `--no-cache` | off | Skip the SQLite cache (always re-fetch) |
 | `--no-exploit-lookup` | off | Skip Exploit-DB / Nuclei / GitHub PoC lookups |
 | `--no-enrich-iocs` | off | Skip VT / AbuseIPDB / OTX / MalwareBazaar enrichment |
 | `--ioc-confidence-floor F` | `0.0` | Drop IOCs whose decayed confidence < `F` |
@@ -227,24 +262,24 @@ python threat_intel_hunter.py web --site-dir ./_site   # static HTML browseable 
 | `--associations-file PATH` | bundled | Override the CVE→actor/malware lookup |
 | `--allow-tlp-red` | off | Permit writing TLP:RED records (otherwise stripped) |
 | `--dispatch` | off | Push per-finding alerts to Slack / generic webhook |
-| `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included). Suppresses every-run repeats. |
+| `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included); suppresses every-run repeats |
 | `--digest` | off | Batch-mail a daily digest per asset owner (SMTP via env) |
 | `--quiet` / `--verbose` | off | Logging level |
 
-Three top-level flags (valid before any subcommand): `--config NAME`,
-`--save-config NAME`, `--list-configs`. See the next section.
+Three top-level flags are valid before any subcommand: `--config NAME`,
+`--save-config NAME`, and `--list-configs`. See the next section.
 
 ---
 
-## YAML configuration & presets
+## Configuration & presets
 
-Every flag above can be captured in a YAML file so a complex invocation
+Every flag above can be captured in a YAML file, so a complex invocation
 becomes a one-word command. The fully commented schema lives at
 **[`src/ramen_cve/config/config.yaml`](src/ramen_cve/config/config.yaml)** —
 that file is the authoritative reference for every supported key (`output`,
 `filters`, `enrichment`, `cache`, `dispatch`, `email`, `logging`,
 `inventory_path`, `remember_opml`, plus the nested `buckets:` block for
-custom bucket labels / thresholds).
+custom bucket labels / thresholds / action text).
 
 ```bash
 # Save the current invocation as a named preset:
@@ -259,7 +294,7 @@ python threat_intel_hunter.py --config /abs/path/custom.yaml      # explicit fil
 python threat_intel_hunter.py --list-configs
 ```
 
-Precedence: **CLI flag > YAML value > built-in default**. A YAML key left
+**Precedence: CLI flag > YAML value > built-in default.** A YAML key left
 blank is ignored. The preset records the subcommand too, so `--config
 daily-hunt` with no positional subcommand runs exactly what was saved.
 
@@ -267,21 +302,18 @@ A showcase preset that tightens the bucket thresholds and rewrites the
 suggested-action text with concrete SLAs ships at
 [`src/ramen_cve/config/presets/aggressive.yaml`](src/ramen_cve/config/presets/aggressive.yaml).
 
-### Email digests via YAML
-
-When the YAML `email:` block has `enabled: true`, the preset's SMTP settings
-populate the `RAMEN_SMTP_*` environment variables and `--digest` is
-implicitly enabled. A real `.env` always wins over the YAML value, so
-production deployments keep secrets out of the preset file. Schema in the
-`config.yaml` template above.
+**Email digests via YAML.** When the `email:` block has `enabled: true`, the
+preset's SMTP settings populate the `RAMEN_SMTP_*` environment variables and
+`--digest` is implicitly enabled. A real `.env` always wins over the YAML
+value, so production deployments keep secrets out of the preset file.
 
 ---
 
 ## Scheduled runs
 
 The `schedule` subcommand turns a saved preset into a recurring run by
-emitting an **OS-native scheduler artefact** — there's no fragile
-long-lived process to keep alive.
+emitting an **OS-native scheduler artefact** — no fragile long-lived process
+to keep alive.
 
 **Windows Task Scheduler:**
 
@@ -309,9 +341,9 @@ A bundled GitHub-Actions equivalent lives at
 ## Daemon mode
 
 When you'd rather run **one long-lived process** than wire up an external
-scheduler, the `daemon` subcommand loops a saved preset at a fixed
-interval. It complements `schedule` (use `schedule` if you already have
-systemd / cron / Task Scheduler; reach for `daemon` inside a container).
+scheduler, the `daemon` subcommand loops a saved preset at a fixed interval.
+It complements `schedule` (use `schedule` if you already have systemd / cron /
+Task Scheduler; reach for `daemon` inside a container).
 
 ```bash
 # 1. Save the recurring invocation once.
@@ -322,8 +354,8 @@ ramen-cve daemon --for-config daily-opml --interval 21600 \
     --out-dir ~/ramen-history --prune-after-days 30
 ```
 
-`--for-config` is required and must name a preset whose subcommand is
-`opml`, `url`, `cve`, or `stix`.
+`--for-config` is required and must name a preset whose subcommand is `opml`,
+`url`, `cve`, or `stix`.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -334,27 +366,16 @@ ramen-cve daemon --for-config daily-opml --interval 21600 \
 | `--out-dir DIR` | cwd | Each iteration writes to `<DIR>/ramen-cve-<UTC timestamp>/` |
 | `--prune-after-days N` | `0` (off) | Delete iteration subdirs older than `N` days |
 
-SIGTERM / SIGINT finish the in-flight iteration then exit cleanly. The
+SIGTERM / SIGINT finish the in-flight iteration, then exit cleanly. The
 inter-iteration wait is interruptible, so shutdown latency stays sub-second
 even on a 6-hour interval.
 
 > **Security — long-lived secrets.** A daemon keeps `NVD_API_KEY`,
-> `RAMEN_SMTP_PASS`, and `SLACK_WEBHOOK_URL` resident for its lifetime.
-> Prefer a systemd `EnvironmentFile`, a launchd `EnvironmentVariables`
-> block, or container/orchestrator secrets over a committed `.env`. Run
-> **one daemon per cache file** — the SQLite cache isn't built for
-> concurrent writers (use `Restart=on-failure`, not `always`).
-
-Bundled service templates are summarised in the `daemon --help` text and
-in the [Operations](#operations) docs cell below.
-
-### Operations
-
-- **systemd unit, launchd plist, GitHub-Actions workflow** — see
-  [`examples/github-actions-daily-triage.yml`](examples/github-actions-daily-triage.yml)
-  for the Actions form. systemd / launchd snippets sit in the previous
-  README revision (git history: `git log -p README.md`) and will rejoin a
-  dedicated `docs/operations.md` if a future PR requests them.
+> `RAMEN_SMTP_PASS`, and `SLACK_WEBHOOK_URL` resident for its lifetime. Prefer
+> a systemd `EnvironmentFile`, a launchd `EnvironmentVariables` block, or
+> container/orchestrator secrets over a committed `.env`. Run **one daemon per
+> cache file** — the SQLite cache isn't built for concurrent writers (use
+> `Restart=on-failure`, not `always`).
 
 ---
 
@@ -363,26 +384,25 @@ in the [Operations](#operations) docs cell below.
 `ramen-cve web --site-dir ./_site` generates a fully static HTML tree
 covering every run in the cache:
 
-- `index.html` — bucket breakdown + Task-6 CVSS×EPSS quadrant + run-history
-  strip linking to per-run pages and per-CVE detail pages.
+- `index.html` — bucket breakdown + CVSS×EPSS quadrant + a run-history strip
+  linking to per-run and per-CVE pages.
 - `runs/<ts>.html` — per-run bucket counts, quadrant, and an "added /
   removed / reclassified since previous run" diff block.
 - `cve/<CVE-ID>.html` — header + NVD summary + EPSS trajectory (SVG above 2
-  snapshots, sparkline below) + exploit status + linked actors / campaigns
-  / malware + IOCs from the most recent run's sidecar + affected hosts.
-
-Flags:
+  snapshots, sparkline below) + exploit status + linked actors / campaigns /
+  malware + IOCs from the most recent run's sidecar + affected hosts.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--site-dir DIR` | *(required)* | Where the site is written. No default — explicit by design |
-| `--out-dir DIR` | from cache | Override the per-run artefact directory recorded in `run_artefacts`; useful when CSV/MD/STIX files have been moved since the original pipeline run |
+| `--site-dir DIR` | *(required)* | Where the site is written — no default, explicit by design |
+| `--out-dir DIR` | from cache | Override the per-run artefact directory recorded in `run_artefacts`; useful when CSV/MD/STIX files have moved since the original run |
 
-Zero JavaScript, zero new runtime dependency, no server. Open
-`index.html` directly in a browser, or rsync `_site/` behind any static
-host. A committed showcase bundle lives at
-[`examples/_web-sample/`](examples/_web-sample/) — clone the repo and open
-`examples/_web-sample/index.html` for a first look.
+Zero JavaScript, zero new runtime dependency, no server. Open `index.html`
+directly in a browser, or rsync `_site/` behind any static host. A committed
+showcase bundle lives at [`examples/_web-sample/`](examples/_web-sample/) —
+clone the repo and open `examples/_web-sample/index.html` for a first look.
+Design rationale and locked invariants are in
+[`docs/web_ui_design.md`](docs/web_ui_design.md).
 
 ---
 
@@ -398,39 +418,64 @@ Every CVE lands in exactly one bucket, checked top to bottom:
 | **Watch Closely** | CVSS < τ_cvss **and** EPSS ≥ τ_epss | Low severity but actively exploited |
 | **Deprioritize** | everything else | Low severity + low exploitation probability |
 
-Thresholds and decision tree are flat by design — they fit in the analyst's
-head. Labels / thresholds / action text can be customised per-bucket via
-the YAML `buckets:` block (see `config.yaml`). KEV precedence is
-non-configurable.
+CVSS answers *how bad if exploited*; EPSS answers *how likely in the next 30
+days*; KEV answers *is it being exploited right now*. Using all three avoids
+the classic CVSS-only failure mode (patching a 9.8 nobody exploits while
+ignoring a 6.5 in every exploit kit).
+
+The decision tree is flat by design — it fits in the analyst's head. Labels,
+thresholds, and action text are customisable per-bucket via the YAML
+`buckets:` block (see `config.yaml`). **KEV precedence is non-configurable.**
 
 ---
 
 ## Outputs
 
-A single run can produce up to seven artefacts. Pick what you want with
+A single run can produce up to seven artefact types. Pick what you want with
 `--format`:
 
 | Artefact | Trigger | Shape |
 | --- | --- | --- |
-| CVE CSV | `csv` / `both` / `all` | One row per CVE, 30 columns; UTF-8 BOM for Excel |
+| CVE CSV | `csv` / `both` / `all` | One row per CVE, 31 columns; UTF-8 BOM for Excel, formula-injection neutralised |
 | IOC CSV | (when IOCs found) | One row per non-CVE indicator |
 | EPSS trajectory CSV | (when `--date-mode epss` spans >1 day) | One row per `(cve_id, date)` |
 | Markdown report | `md` / `both` / `all` | Bucket sections + ATT&CK cross-tab + Linked Adversaries + Affected Hosts + sparklines |
-| STIX 2.1 bundle | `stix` / `all` | Vulnerability + Note + Indicator + Identity SDOs (deterministic UUIDv4) |
+| STIX 2.1 bundle | `stix` / `all` | Vulnerability + Note + Indicator + Identity SDOs (deterministic IDs) |
 | Sigma stubs | `sigma` / `all` | One YAML stub per KEV / Patch-Now CVE, pre-tagged |
 | YARA stubs | `yara` / `all` | One YARA rule scaffold per linked-malware family |
 | Inline-SVG quadrant HTML | `html` / `all` | Single-file CVSS×EPSS scatter |
 
 `--basename my-report` writes `my-report.csv` / `my-report.md` /
 `my-report-iocs.csv` / `my-report.stix.json` / `my-report-sigma/` /
-`my-report-yara/` / `my-report.html`. Existing files are never
-overwritten; a `-1`, `-2`, … suffix is appended on collision. A redundant
-extension on `--basename` is stripped before re-applying the right one, so
+`my-report-yara/` / `my-report.html`. **Existing files are never
+overwritten** — a `-1`, `-2`, … suffix is appended on collision. A redundant
+extension on `--basename` is stripped before the right one is re-applied, so
 you never get `my-report.csv.csv`.
 
-A reference Markdown report lives at
-[`examples/sample-report.md`](examples/sample-report.md); its CSV
-counterpart at [`examples/sample-output.csv`](examples/sample-output.csv).
+Reference artefacts ship under [`examples/`](examples/): a Markdown report at
+[`examples/sample-report.md`](examples/sample-report.md), its CSV counterpart
+at [`examples/sample-output.csv`](examples/sample-output.csv), and a quadrant
+at [`examples/sample-quadrant.html`](examples/sample-quadrant.html).
+
+---
+
+## What's bundled
+
+`src/ramen_cve/data/` ships a working lookup set. **None of it is required**
+— every default path can be overridden — but the bundled values let
+`python threat_intel_hunter.py` work out of the box:
+
+- **`associations.json`** — 12 well-known CVEs (Log4Shell, ProxyLogon,
+  PrintNightmare, ZeroLogon, Equation Editor, EternalBlue, Fortinet SSL VPN,
+  Pulse Secure, Sandworm PowerPoint, Follina, Outlook NTLM, Barracuda ESG)
+  mapped to MITRE ATT&CK Groups, ransomware operators, malware families,
+  named campaigns, and per-actor sector targeting.
+- **`hunts/log4shell-evidence.json`** — a sample threat-hunt hypothesis.
+- **`pirs/log4j-exposure.json`** — a sample Priority Intelligence Requirement.
+
+Add or correct entries directly in those JSON files; the package reads them
+on every run. Provenance for the bundled data is documented in
+[`docs/SBOM.md`](docs/SBOM.md) §1.
 
 ---
 
@@ -445,19 +490,19 @@ counterpart at [`examples/sample-output.csv`](examples/sample-output.csv).
 ├── threat_intel_hunter.py     # entry-point shim → ramen_cve.cli:main
 │
 ├── src/ramen_cve/             # installable package (src layout)
-│   ├── __init__.py            #   pure re-export façade with locked __all__
+│   ├── __init__.py            #   pure re-export façade with a locked __all__
 │   ├── __main__.py            #   python -m ramen_cve
 │   ├── cli.py                 #   argparse tree + main + per-subcommand runners
 │   ├── config/                #   YAML config system
 │   │   ├── config.yaml        #     fully-commented schema / template
 │   │   └── presets/           #     bundled + user-saved presets
 │   ├── data/                  #   bundled lookup data (associations, hunts, pirs)
-│   ├── enrich/                #   nvd / epss / kev / exploits / iocs / inventory
-│   ├── output/                #   csv_writer / markdown / stix / sigma / yara / html_quadrant
-│   ├── dispatch/              #   slack / webhook / email sinks + per-owner digest
+│   ├── enrich/                #   nvd · epss · kev · exploits · iocs · inventory · orchestrator
+│   ├── output/                #   csv_writer · markdown · stix · sigma · yara · html_quadrant
+│   ├── dispatch/              #   slack · webhook · email sinks + per-owner digest
 │   └── web/                   #   static-HTML Web UI generator
 │
-├── config/                    # dep manifests + env template
+├── config/                    # dependency manifests + env template
 │   ├── env.example            #   copy to .env at the repo root
 │   ├── requirements.txt
 │   └── requirements-dev.txt
@@ -466,9 +511,9 @@ counterpart at [`examples/sample-output.csv`](examples/sample-output.csv).
 │   ├── CLAUDE.md              #   AI-contributor project rules
 │   ├── SBOM.md                #   software bill of materials
 │   ├── whitepaper.md          #   technical whitepaper (BSidesSLC 2026)
-│   ├── REFACTOR_PLAN.md       #   historical (monolith → package, complete)
-│   ├── web_ui_design.md       #   historical (Web UI design, slices shipped)
-│   └── cti-capability-gap-analysis-v2.md   # forward-looking roadmap
+│   ├── cti-capability-gap-analysis-v2.md   # forward-looking CTI/CTH roadmap
+│   ├── REFACTOR_PLAN.md       #   historical — monolith → package (source-anchored)
+│   └── web_ui_design.md       #   historical — Web UI design (source-anchored)
 │
 ├── examples/                  # sample inputs + outputs + showcase bundle
 │   ├── sample.opml
@@ -482,130 +527,116 @@ counterpart at [`examples/sample-output.csv`](examples/sample-output.csv).
 ├── scripts/
 │   ├── setup.sh               # bootstrap on Linux / macOS
 │   ├── setup.ps1              # bootstrap on Windows PowerShell
-│   └── regen_examples.py      # deterministic showcase regenerator
+│   └── regen_examples.py      # deterministic showcase regenerator (byte-oracle)
 │
 ├── tasks/
-│   ├── todo.md                # forward-looking backlog
-│   └── lessons.md             # recurring failure modes + prevention
+│   ├── todo.md                # forward-looking backlog + templates
+│   └── lessons.md             # recurring failure modes + prevention rules
 │
-├── tests/                     # 778+ pytest cases + fixtures
-└── .claude/                   # Claude Code project settings (gitkept)
+└── tests/                     # 804 pytest cases + fixtures
 ```
-
----
-
-## What's bundled
-
-`src/ramen_cve/data/` ships a working lookup set. None of it is required —
-every default path can be overridden — but the bundled values let
-`python threat_intel_hunter.py` work out of the box:
-
-- **`associations.json`** — 12 well-known CVEs (Log4Shell, ProxyLogon,
-  PrintNightmare, ZeroLogon, EternalBlue, Follina, Pulse Secure, Fortinet,
-  Sandworm PowerPoint, Outlook NTLM, Barracuda ESG) mapped to MITRE Groups
-  threat actors, ransomware operators, malware families, named campaigns,
-  and per-actor sector targeting.
-- **`hunts/log4shell-evidence.json`** — sample threat-hunt hypothesis.
-- **`pirs/log4j-exposure.json`** — sample Priority Intelligence Requirement.
-
-Add or correct entries directly in those JSON files; the package reads them
-on every run.
 
 ---
 
 ## Documentation
 
+This README is the primary reference. The supplementary docs each have a
+single, distinct job and defer back here for anything user-facing:
+
 | Doc | Purpose |
 | --- | --- |
-| `README.md` (this file) | Primary source of truth — install, usage, config, outputs |
+| `README.md` (this file) | **Primary source of truth** — install, usage, config, outputs |
 | [`docs/whitepaper.md`](docs/whitepaper.md) | BSidesSLC 2026 technical whitepaper — problem statement, methodology, security posture |
-| [`docs/SBOM.md`](docs/SBOM.md) | Software bill of materials (runtime + dev deps, transitive, licenses, network endpoints) |
-| [`docs/CLAUDE.md`](docs/CLAUDE.md) | AI-contributor project rules (operating principles, layered architecture, dependency budget) |
-| [`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md) | Forward-looking CTI/CTH capability roadmap |
-| [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) | Historical — monolith → package refactor (complete) |
-| [`docs/web_ui_design.md`](docs/web_ui_design.md) | Historical — Web UI design doc (all slices shipped) |
-| [`tasks/todo.md`](tasks/todo.md) | Forward-looking backlog and templates |
+| [`docs/SBOM.md`](docs/SBOM.md) | Software bill of materials — runtime + dev deps, transitive, licenses, network endpoints |
+| [`docs/CLAUDE.md`](docs/CLAUDE.md) | AI-contributor project rules — operating principles, layered architecture, dependency budget |
+| [`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md) | Forward-looking CTI/CTH capability roadmap (the "why + approach" behind the backlog) |
+| [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) | Historical — monolith → package refactor. Kept as an architectural anchor: ~30 source-file docstrings reference it |
+| [`docs/web_ui_design.md`](docs/web_ui_design.md) | Historical — Web UI design doc (all slices shipped). Kept as an anchor for `cli.py` / `web/` docstrings |
+| [`tasks/todo.md`](tasks/todo.md) | Forward-looking backlog and planning templates |
 | [`tasks/lessons.md`](tasks/lessons.md) | Recurring failure modes + prevention rules captured during development |
 | [`src/ramen_cve/config/config.yaml`](src/ramen_cve/config/config.yaml) | Fully-commented YAML config schema — authoritative for every configuration key |
 | [`config/env.example`](config/env.example) | Environment-variable template (copy to `.env`) |
 
-If you're skimming for the first time: this README + `docs/whitepaper.md`
-+ the `config.yaml` template are the three documents you actually need.
+Skimming for the first time? This README + `docs/whitepaper.md` + the
+`config.yaml` template are the three documents you actually need.
 
 ---
 
 ## Roadmap
 
-The features below are next-up directions, prioritized in
-[`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md):
+Next-up directions, in priority order. The "why it matters + suggested
+implementation approach" for each lives in
+[`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md);
+the operational picking surface is [`tasks/todo.md`](tasks/todo.md).
 
 1. **SSVC** (Stakeholder-Specific Vulnerability Categorization) decision
-   tree, run in parallel with today's bucketing.
-2. **Native SIEM query generation** (KQL / SPL / Elastic EQL) alongside
+   tree — run in parallel with today's bucketing, additive.
+2. **Risk-weighted prioritization** — CVE × asset criticality × exploit
+   availability (one new optional `criticality` inventory column).
+3. **Native SIEM query generation** (KQL / SPL / Elastic EQL) alongside the
    Sigma stubs.
-3. **MISP-native push / pull** via PyMISP.
-4. **Bucket-transition delta alerting** — page only when a CVE *moves up*
-   (the `runs` table already has the data).
-5. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native).
-6. **Risk-weighted prioritization** (CVE × asset criticality × exploit
-   availability).
+4. **MISP-native push / pull** via PyMISP.
+5. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7).
+6. **Hunt analytics library** — reusable, per-ATT&CK-technique queries.
 7. **Backtesting / replay mode** to evaluate model changes safely.
 
-The active backlog with slice plans, acceptance criteria, and effort
-estimates lives at [`tasks/todo.md`](tasks/todo.md).
+*(Bucket-transition delta alerting has already shipped — see
+`--dispatch-on-delta-only` above.)*
 
 ---
 
 ## Contributing
 
-The project is intentionally small enough that one person can hold it
-in their head. PRs that respect that spirit are welcome.
+The project is intentionally small enough that one person can hold it in
+their head. PRs that respect that spirit are welcome.
 
-**Before opening a PR:**
+**Before opening a PR**, run the full verification gate:
 
 ```bash
-pip install -e ".[dev]"           # if you haven't already
-pytest tests/ -q                  # must stay green (778 cases as of this writing)
+pip install -e ".[dev]"                              # if you haven't already
+pytest tests/ -q                                     # must stay green (804 cases)
 ruff check threat_intel_hunter.py conftest.py src/ tests/ scripts/
-python scripts/regen_examples.py --check   # byte-oracle on the showcase bundle
+python scripts/regen_examples.py --check             # byte-oracle on the showcase bundle
 ```
 
-All three are part of the per-commit verification gate documented in
-[`docs/CLAUDE.md`](docs/CLAUDE.md). The byte-oracle catches accidental
-drift in the bundled `examples/sample-output.csv` /
-`examples/sample-report.md` / `examples/_web-sample/` artefacts.
+All three are part of the per-commit gate documented in
+[`docs/CLAUDE.md`](docs/CLAUDE.md). The byte-oracle catches accidental drift
+in the bundled `examples/sample-output.csv` / `examples/sample-report.md` /
+`examples/_web-sample/` artefacts.
 
 **Conventions worth knowing:**
 
-- **Five-runtime-dep budget.** Adding a sixth needs a written
-  justification in `tasks/todo.md`. The current set is `requests`,
+- **Five-runtime-dep budget.** Adding a sixth needs a written justification
+  in [`tasks/todo.md`](tasks/todo.md). The current set is `requests`,
   `feedparser`, `python-dotenv`, `questionary`, `PyYAML` — see
   [`docs/SBOM.md`](docs/SBOM.md).
-- **Layered package.** Modules sit on layers L0–L5; imports point
-  downward only. New modules should pick the lowest layer that fits.
+- **Layered package.** Modules sit on layers L0–L5; imports point downward
+  only. New modules should pick the lowest layer that fits.
   [`src/ramen_cve/__init__.py`](src/ramen_cve/__init__.py) is a pure
-  re-export façade with a locked `__all__`; both halves of the
-  contract are gated by `tests/test_facade.py`.
-- **Thin vertical slices.** Land features in small reviewable steps,
-  each with its own tests + verification story. See
-  [`docs/CLAUDE.md`](docs/CLAUDE.md) §3.
-- **Per-failure-mode lessons.** When you hit a recurring failure
-  pattern, capture it in [`tasks/lessons.md`](tasks/lessons.md) so
-  the next contributor doesn't repeat it.
+  re-export façade with a locked `__all__`; both halves of the contract are
+  gated by `tests/test_facade.py` — never remove a re-export without updating
+  that test.
+- **Thin vertical slices.** Land features in small, reviewable steps, each
+  with its own tests and verification story (see
+  [`docs/CLAUDE.md`](docs/CLAUDE.md)).
+- **Per-failure-mode lessons.** When you hit a recurring failure pattern,
+  capture it in [`tasks/lessons.md`](tasks/lessons.md) so the next
+  contributor doesn't repeat it.
 
-**Reporting issues:** open a GitHub issue with the command you ran,
-the observed output, and the expected output. Redact any real API
-keys before pasting logs (the tool redacts at write time, but
-manually-captured terminal scrollback may not have been).
+**Reporting issues:** open a GitHub issue with the command you ran, the
+observed output, and the expected output. Redact any real API keys before
+pasting logs (the tool redacts at write time, but manually captured terminal
+scrollback may not have been).
 
-**Picking a task:** the prioritized backlog in
+**Picking a task:** the backlog in
 [`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md)
-is sorted by impact-to-effort ratio. Item 1 (bucket-transition delta
-alerting) is the highest-leverage starter task — the infrastructure
-is already in place.
+is sorted by impact-to-effort ratio. Item 1 (the SSVC decision tree) is a
+strong starter — it's additive, has a modest implementation cost, and
+produces an auditor-recognized output.
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). The repo is meant to be forked and adapted by
+anyone who watches the talk.

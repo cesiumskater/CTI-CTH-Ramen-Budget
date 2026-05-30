@@ -115,7 +115,7 @@ the original single-file design in May 2026 (historical detail in
 `docs/REFACTOR_PLAN.md`). The package layers (constants → models → cache →
 extract → … → output / dispatch / config → cli → façade) preserve the flat
 `from ramen_cve import X` contract via a re-export `__init__.py` with a
-locked `__all__`. The 778-case test suite and a golden byte-oracle prove
+locked `__all__`. The 804-case test suite and a golden byte-oracle prove
 that the refactor was zero-behaviour-change end-to-end (regenerated
 CSV/Markdown are byte-identical to the pre-refactor baseline).
 
@@ -236,14 +236,16 @@ The prioritized forward-looking backlog lives in
 `docs/cti-capability-gap-analysis-v2.md` (and the live work-item list at
 `tasks/todo.md`). At a glance:
 
-1. **Bucket-transition delta alerting** — page only when a CVE *moves up*.
-2. **SSVC decision tree** (CISA/CMU) alongside the existing buckets.
-3. **Risk-weighted prioritization** (CVE × asset criticality × exploit).
-4. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside Sigma.
-5. **MISP-native push/pull** via PyMISP.
-6. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7).
-7. **Hunt analytics library** — reusable per-ATT&CK-technique queries.
-8. **Backtesting / replay mode** for evaluating model changes safely.
+1. **SSVC decision tree** (CISA/CMU) alongside the existing buckets.
+2. **Risk-weighted prioritization** (CVE × asset criticality × exploit).
+3. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside Sigma.
+4. **MISP-native push/pull** via PyMISP.
+5. **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7).
+6. **Hunt analytics library** — reusable per-ATT&CK-technique queries.
+7. **Backtesting / replay mode** for evaluating model changes safely.
+
+Bucket-transition delta alerting (page only when a CVE *moves up*) has
+since shipped as `--dispatch-on-delta-only`.
 
 ---
 

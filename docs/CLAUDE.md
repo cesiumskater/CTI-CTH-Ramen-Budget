@@ -439,8 +439,8 @@ current forward-looking backlog lives in two places:
   and verification gates.
 - [`cti-capability-gap-analysis-v2.md`](cti-capability-gap-analysis-v2.md)
   — prioritized capability roadmap (SSVC, native SIEM query generation,
-  MISP push/pull, bucket-transition delta alerting, scanner imports,
-  risk-weighted prioritization, backtesting, hunt analytics library).
+  MISP push/pull, scanner imports, risk-weighted prioritization,
+  backtesting, hunt analytics library).
 
 If a request would expand scope beyond the in-flight task, log it as a
 follow-up in `tasks/todo.md` rather than scope-creeping the current
