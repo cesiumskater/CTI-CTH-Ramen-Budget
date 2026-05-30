@@ -2,7 +2,7 @@
 
 Per-source TTL tables + non-purged `runs` history + append-only
 `audit_log`. Depends only on stdlib + the constants/models leaves.
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

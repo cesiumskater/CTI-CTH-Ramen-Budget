@@ -4,7 +4,7 @@ Houses primitives that need to be callable from both Layer-3 output
 writers (`output/markdown.py`) and Layer-4 surfaces (`trend.py`).
 Living in a lower layer keeps the arrows pointing downward and avoids
 an `output/` → `trend.py` (L3 → L4) violation; see
-`docs/REFACTOR_PLAN.md` §4 layering.
+the layered design in README.md and src/ramen_cve/__init__.py.
 
 Pure stdlib only. No first-party imports.
 """

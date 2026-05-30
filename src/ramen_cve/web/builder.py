@@ -32,7 +32,7 @@ on `runs/<slug>.html`. Compares each run against the immediately-prior
 gets a "First recorded run" placeholder. All CVE links resolve to
 `../cve/<CVE-ID>.html` (Slice D-emitted pages).
 
-Slice G extends per `docs/web_ui_design.md`:
+Slice G (see README.md, Web UI):
   - G: bucket-policy threading + showcase regen extension
 """
 from __future__ import annotations
@@ -834,7 +834,7 @@ def build_site(
     # Lazy import — `cli.VERSION` is L4, importing it at module load
     # creates a cli ↔ web cycle (cli imports from web; web would import
     # from cli). The deferred-lookup pattern documented in
-    # docs/REFACTOR_PLAN.md §5.2 resolves the cycle at call time.
+    # src/ramen_cve/__init__.py resolves the cycle at call time.
     from ..cli import VERSION
 
     active_policy = policy or DEFAULT_BUCKET_POLICY

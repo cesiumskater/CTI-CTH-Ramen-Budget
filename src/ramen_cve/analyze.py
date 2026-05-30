@@ -2,7 +2,7 @@
 
 CWE→ATT&CK / →Kill-Chain mappers, TLP + NATO-Admiralty math, the
 5-bucket triage and the date-window filter. No I/O. Depends only on
-the constants/models leaves. See docs/REFACTOR_PLAN.md.
+the constants/models leaves. See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Public-surface contract lock for the monolith → package refactor.
 
-See docs/REFACTOR_PLAN.md. These tests pass NOW (monolith) and must keep
+See README.md and src/ramen_cve/__init__.py. These tests pass NOW (monolith) and must keep
 passing at every one of the 26 split steps. The instant a step forgets to
 re-export a name from ``ramen_cve/__init__.py``, the relevant assertion
 here fails loudly at that step instead of silently in some unrelated test.
@@ -12,7 +12,7 @@ hand-typo here is caught immediately because the symbol genuinely exists
 in the current monolith (the suite is green), so a spurious entry fails
 on day one rather than masking a real regression later.
 
-The ``ramen_cve.DEFAULT_CACHE_PATH`` late-binding risk (REFACTOR_PLAN §5.2)
+The ``ramen_cve.DEFAULT_CACHE_PATH`` late-binding risk (see src/ramen_cve/__init__.py)
 is already covered by the six existing ``DEFAULT_CACHE_PATH`` tests in
 test_ramen_cve.py, so it is not re-implemented here.
 """
@@ -122,7 +122,7 @@ def test_no_duplicate_contract_entries():
 def test_requests_patch_target_is_the_shared_module():
     """patch("ramen_cve.requests.get") must mutate the one shared
     ``requests`` module every submodule resolves at call time
-    (REFACTOR_PLAN §5.1). Identity + reach, no network."""
+    (see src/ramen_cve/__init__.py). Identity + reach, no network."""
     import requests
 
     assert ramen_cve.requests is requests

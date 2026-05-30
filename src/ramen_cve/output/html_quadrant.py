@@ -4,7 +4,7 @@ inline-SVG CVSS×EPSS quadrant scatter (Layer-3 serialization).
 No external assets, no JS frameworks: a single `<svg>` block wrapped in
 a minimal HTML5 doc with inline `<style>`. Tooltips via SVG `<title>`.
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

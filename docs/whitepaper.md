@@ -111,8 +111,7 @@ caches, a non-purged `runs` history (for trending), and an append-only
 (`src/ramen_cve/data/`); YAML presets ship under `src/ramen_cve/config/`.
 
 The codebase is a ~30-module package under `src/ramen_cve/`, refactored from
-the original single-file design in May 2026 (historical detail in
-`docs/REFACTOR_PLAN.md`). The package layers (constants → models → cache →
+the original single-file design in May 2026. The package layers (constants → models → cache →
 extract → … → output / dispatch / config → cli → façade) preserve the flat
 `from ramen_cve import X` contract via a re-export `__init__.py` with a
 locked `__all__`. The 804-case test suite and a golden byte-oracle prove

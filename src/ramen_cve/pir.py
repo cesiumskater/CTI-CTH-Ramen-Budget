@@ -1,5 +1,5 @@
 """ramen_cve.pir — Priority Intelligence Requirement (PIR) definition
-I/O and the `pir` subcommand runner (Layer-4). See docs/REFACTOR_PLAN.md."""
+I/O and the `pir` subcommand runner (Layer-4). See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import argparse

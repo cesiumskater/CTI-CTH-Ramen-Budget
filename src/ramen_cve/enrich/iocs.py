@@ -1,7 +1,7 @@
 """ramen_cve.enrich.iocs — IOC reputation enrichers (Layer-2).
 
 VirusTotal / AbuseIPDB / OTX / MalwareBazaar lookups. Network.
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """ramen_cve.enrich.orchestrator — per-CVE enrichment pipeline (L2).
 
 Joins NVD/EPSS/KEV fetch + associations + ATT&CK/kill-chain mapping
-into EnrichedCve. See docs/REFACTOR_PLAN.md.
+into EnrichedCve. See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

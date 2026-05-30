@@ -1,6 +1,6 @@
 """ramen_cve.dispatch.digest — per-owner inventory e-mail digest:
 group enriched CVEs by asset owner, render the body, send via the
-Email dispatcher (Layer-3). See docs/REFACTOR_PLAN.md.
+Email dispatcher (Layer-3). See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

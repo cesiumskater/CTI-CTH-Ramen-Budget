@@ -2,7 +2,7 @@
 
 Parsing + regex extraction + defang. Depends on the constants/models
 leaves and analyze._normalize_tlp (TLP inheritance). No network.
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

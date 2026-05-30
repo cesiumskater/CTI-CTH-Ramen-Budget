@@ -1,7 +1,7 @@
 """ramen_cve.associations — threat-actor/campaign/malware assoc loader.
 
 Layer-1.5: local JSON association file → typed models. No network.
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

@@ -2,7 +2,7 @@
 
 Leaf module (stdlib only): interactive key prompt, .env persistence,
 and log-safe URL redaction so secrets never reach logs. Used by the
-network fetchers. See docs/REFACTOR_PLAN.md.
+network fetchers. See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

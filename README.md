@@ -401,8 +401,6 @@ Zero JavaScript, zero new runtime dependency, no server. Open `index.html`
 directly in a browser, or rsync `_site/` behind any static host. A committed
 showcase bundle lives at [`examples/_web-sample/`](examples/_web-sample/) —
 clone the repo and open `examples/_web-sample/index.html` for a first look.
-Design rationale and locked invariants are in
-[`docs/web_ui_design.md`](docs/web_ui_design.md).
 
 ---
 
@@ -511,9 +509,7 @@ on every run. Provenance for the bundled data is documented in
 │   ├── CLAUDE.md              #   AI-contributor project rules
 │   ├── SBOM.md                #   software bill of materials
 │   ├── whitepaper.md          #   technical whitepaper (BSidesSLC 2026)
-│   ├── cti-capability-gap-analysis-v2.md   # forward-looking CTI/CTH roadmap
-│   ├── REFACTOR_PLAN.md       #   historical — monolith → package (source-anchored)
-│   └── web_ui_design.md       #   historical — Web UI design (source-anchored)
+│   └── cti-capability-gap-analysis-v2.md   # forward-looking CTI/CTH roadmap
 │
 ├── examples/                  # sample inputs + outputs + showcase bundle
 │   ├── sample.opml
@@ -550,8 +546,6 @@ single, distinct job and defer back here for anything user-facing:
 | [`docs/SBOM.md`](docs/SBOM.md) | Software bill of materials — runtime + dev deps, transitive, licenses, network endpoints |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | AI-contributor project rules — operating principles, layered architecture, dependency budget |
 | [`docs/cti-capability-gap-analysis-v2.md`](docs/cti-capability-gap-analysis-v2.md) | Forward-looking CTI/CTH capability roadmap (the "why + approach" behind the backlog) |
-| [`docs/REFACTOR_PLAN.md`](docs/REFACTOR_PLAN.md) | Historical — monolith → package refactor. Kept as an architectural anchor: ~30 source-file docstrings reference it |
-| [`docs/web_ui_design.md`](docs/web_ui_design.md) | Historical — Web UI design doc (all slices shipped). Kept as an anchor for `cli.py` / `web/` docstrings |
 | [`tasks/todo.md`](tasks/todo.md) | Forward-looking backlog and planning templates |
 | [`tasks/lessons.md`](tasks/lessons.md) | Recurring failure modes + prevention rules captured during development |
 | [`src/ramen_cve/config/config.yaml`](src/ramen_cve/config/config.yaml) | Fully-commented YAML config schema — authoritative for every configuration key |

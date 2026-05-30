@@ -1,7 +1,7 @@
 """ramen_cve.dispatch.runner — dispatch orchestrator: fan records out
 to every enabled dispatcher, count successful posts (Layer-3).
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

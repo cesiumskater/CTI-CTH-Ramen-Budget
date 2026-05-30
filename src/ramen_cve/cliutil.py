@@ -1,6 +1,6 @@
 """ramen_cve.cliutil — argparse type/validator helpers: ISO date,
 CVE id, path de-quoting, opml-input validation (Layer-4 leaf, no
-logging). See docs/REFACTOR_PLAN.md."""
+logging). See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import argparse

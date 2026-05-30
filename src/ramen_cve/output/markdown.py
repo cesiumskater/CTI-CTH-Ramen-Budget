@@ -1,7 +1,7 @@
 """ramen_cve.output.markdown — human-readable Markdown triage
 report grouped by action bucket (Layer-3 serialization).
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

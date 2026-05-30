@@ -37,7 +37,7 @@ jobs:
           # module object. `from requests import get` / `from time import
           # sleep` would bind a private name the patch can't reach.
           if grep -rnE '^[[:space:]]*from (requests|time) import' src/ramen_cve/; then
-            echo "::error::Use 'import requests' / 'import time' with qualified calls (see docs/REFACTOR_PLAN.md §5.1)."
+            echo "::error::Use 'import requests' / 'import time' with qualified calls (see src/ramen_cve/__init__.py)."
             exit 1
           fi
 
