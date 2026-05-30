@@ -59,9 +59,9 @@ this list is the operational picking surface.
    historical `runs` table for that day. Biggest cost is a soft-
    versioning column on cache rows.
 
-For Web UI extensions (search, filtering, `--latest-only` incremental
-builds, mobile-responsive CSS, audit-log view) see the "Explicit
-deferrals" section in [`docs/web_ui_design.md`](../docs/web_ui_design.md).
+Web UI extensions (search, filtering, `--latest-only` incremental builds,
+mobile-responsive CSS, audit-log view) remain deferred — each would need
+JavaScript or a server, which is out of scope for the static generator.
 
 ---
 

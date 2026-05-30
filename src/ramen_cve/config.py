@@ -1,6 +1,6 @@
 """ramen_cve.config — YAML preset load/save, the flat-key⇄attr map,
 value coercion, applying a config onto argparse.Namespace, and
-remembered-OPML persistence (Layer-4). See docs/REFACTOR_PLAN.md.
+remembered-OPML persistence (Layer-4). See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

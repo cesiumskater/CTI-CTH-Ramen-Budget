@@ -1,7 +1,7 @@
 """ramen_cve.enrich.inventory — local asset inventory / CPE match (L1.5).
 
 Loads an inventory CSV and correlates CPEs to owned products. No net.
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

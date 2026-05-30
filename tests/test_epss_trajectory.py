@@ -6,7 +6,7 @@ and stores the time-series on each `EnrichedCve.epss_trajectory`, with the
 scalar `epss_*` fields pinned to the end-date value. Single-date and
 no-range invocations remain byte-identical to pre-feature behaviour.
 
-See `docs/REFACTOR_PLAN.md`-era plans in `tasks/todo.md` (task 1).
+See tasks/todo.md for the forward-looking backlog.
 """
 
 from __future__ import annotations

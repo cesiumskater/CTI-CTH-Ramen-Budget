@@ -1,5 +1,5 @@
 """ramen_cve.hunt — threat-hunt definition I/O (load/save) and the
-`hunt` subcommand runner (Layer-4). See docs/REFACTOR_PLAN.md."""
+`hunt` subcommand runner (Layer-4). See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import argparse

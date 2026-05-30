@@ -1,6 +1,6 @@
 """ramen_cve.wizard — interactive `wizard` subcommand: questionary
 prompts that build and return an argv list for main() (Layer-4).
-See docs/REFACTOR_PLAN.md."""
+See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import re

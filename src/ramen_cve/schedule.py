@@ -1,6 +1,6 @@
 """ramen_cve.schedule — emit a Windows Task Scheduler XML / cron line
 for recurring runs, plus the `schedule` subcommand runner (Layer-4).
-See docs/REFACTOR_PLAN.md."""
+See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import argparse

@@ -270,10 +270,9 @@ This section is project-specific and applies only to the `ramen-cve` tool that l
 ### Project shape
 
 > **Status:** the codebase is a ~30-module package under `src/ramen_cve/`
-> behind a pure re-export façade with a locked `__all__`. The historical
-> monolith → package refactor is summarised in `docs/REFACTOR_PLAN.md`;
-> the current architecture reference is `src/ramen_cve/__init__.py`
-> itself and `README.md` (Repository layout section).
+> behind a pure re-export façade with a locked `__all__`. The current
+> architecture reference is `src/ramen_cve/__init__.py` itself and
+> `README.md` (Repository layout section).
 
 - **Layered package.** Implementation lives under `src/ramen_cve/` as
   ~30 focused, layered modules: `constants`, `models`, `cache`,
@@ -424,7 +423,7 @@ planning templates and forward-looking work; together with
   output-shape drift. Run as part of the per-commit gate.
 - **Web UI determinism** — `tests/test_web_ui.py` locks byte-stability
   across two builds, HTML-escape invariants, no-JS / no-external-asset
-  invariants, and the layout described in `docs/web_ui_design.md`.
+  invariants, and the Web UI layout (see README.md).
 - **Coverage target:** not measured. The above gates are enough to
   catch behaviour drift; coverage as a number adds noise.
 

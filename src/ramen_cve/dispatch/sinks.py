@@ -2,7 +2,7 @@
 dispatchers + default-dispatcher factory (Layer-3 notification sinks).
 
 Email MIME imports are intentionally function-local. See
-docs/REFACTOR_PLAN.md.
+README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

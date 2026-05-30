@@ -1,6 +1,6 @@
 """ramen_cve.pipeline — post-enrichment glue: optional IOC enrich,
 sector/decay filters, associations, dispatch, inventory digest, and
-the multi-format `_output` writer (Layer-4). See docs/REFACTOR_PLAN.md.
+the multi-format `_output` writer (Layer-4). See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

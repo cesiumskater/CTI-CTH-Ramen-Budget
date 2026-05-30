@@ -3,7 +3,7 @@ optional one-row-per-(CVE,date) EPSS trajectory sidecar (Layer-3
 serialization). Column orders are the CSV_COLUMNS /
 EPSS_TRAJECTORY_COLUMNS contracts.
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

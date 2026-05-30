@@ -7,7 +7,7 @@ associations, keyring, enrich/*, output/*, dispatch/*, config, cliutil,
 pipeline, wizard, hunt, pir, trend, audit, schedule, cli). This module
 is a pure re-export façade: it preserves the flat
 ``from ramen_cve import X`` / ``ramen_cve.X`` contract that tests and
-users depend on, with zero behaviour change. See docs/REFACTOR_PLAN.md.
+users depend on, with zero behaviour change. See README.md and src/ramen_cve/__init__.py.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """ramen_cve.decay — IOC confidence decay + floor filter (Layer-1).
 
 Half-life exponential decay over IOC age and the confidence-floor
-filter. Pure; depends only on the models leaf. See docs/REFACTOR_PLAN.md.
+filter. Pure; depends only on the models leaf. See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

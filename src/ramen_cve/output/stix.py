@@ -1,7 +1,7 @@
 """ramen_cve.output.stix — IOC-CSV writer + STIX 2.1 / TAXII import &
 export (Layer-3 serialization). pull_taxii is the only networked path.
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

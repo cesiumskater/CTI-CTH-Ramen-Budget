@@ -3,7 +3,7 @@
 Layer-0 leaf: zero first-party dependencies. Path(__file__).resolve()
 .parent stays at src/ramen_cve/, so DEFAULT_DATA_DIR / DEFAULT_CONFIG_DIR
 resolve byte-identically to the pre-split monolith. See
-docs/REFACTOR_PLAN.md.
+README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

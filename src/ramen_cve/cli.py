@@ -1,7 +1,7 @@
 """ramen_cve.cli — argparse tree (`build_parser`/`_shared_flags`),
 logging/validation, `main`, and the opml/url/cve/stix subcommand
 runners (Layer-5, top of the graph). DEFAULT_CACHE_PATH is read
-late via the facade inside main() — see REFACTOR_PLAN.md §5.2.
+late via the facade inside main() — see src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 
@@ -529,7 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # web subcommand: static-HTML triage navigator over the SQLite cache
     # (Task 8). Slice A: --site-dir only; later slices add --out-dir,
-    # --config, --max-runs-on-home, --cache. See docs/web_ui_design.md.
+    # --config, --max-runs-on-home, --cache. See README.md (Web UI).
     web_p = sub.add_parser(
         "web",
         help="Render a static-HTML site over the SQLite runs history "
@@ -541,7 +541,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--site-dir", type=_path_arg, required=True, metavar="DIR",
         help="Required. Site is written to <DIR>/index.html + "
              "<DIR>/static/style.css. No default — explicit by design "
-             "(no surprise overwrites; see docs/web_ui_design.md §D5).",
+             "(no surprise overwrites).",
     )
     web_p.add_argument(
         "--out-dir", type=_path_arg, metavar="DIR",
@@ -726,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # web subcommand: static-HTML renderer over the SQLite cache. No API
     # key needed (no network) — dispatch alongside daemon, before the
-    # key-resolution block below. See docs/web_ui_design.md.
+    # key-resolution block below. See README.md (Web UI).
     if args.subcommand == "web":
         cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
         return _audit_dispatch(
@@ -922,7 +922,7 @@ def _fetch_url_with_rate_limit(url: str, delay_ms: int = 500) -> str:
     links from a single seed so one global bucket suffices. `time.sleep`
     and `time.monotonic` are looked up through the shared `time` module
     so `patch("ramen_cve.time.sleep")` continues to work in tests
-    (REFACTOR_PLAN §5.1).
+    (see src/ramen_cve/__init__.py).
 
     Raises `OpmlError` on any HTTP-level failure, with the safe-logged
     URL embedded, so callers can fail-soft per followed link via a
@@ -1255,7 +1255,7 @@ def _run_web(args: argparse.Namespace, cache: Cache, api_key: str | None) -> int
 
     Slice A: minimal `index.html` (H1 + "N runs recorded.") plus an
     empty `static/style.css`. Slices B-G extend per
-    `docs/web_ui_design.md`.
+    README.md (Web UI).
 
     Returns rc=1 when the cache's `runs` table is empty — there's
     nothing to render, and the empty-state landing page would obscure

@@ -3,7 +3,7 @@
 Zero first-party deps except the constants leaf. `_utcnow` lives here
 because EnrichedCve's default_factory needs it at instance-build time
 and models is its lowest consumer; analyze/cache/etc. import it from
-the facade. See docs/REFACTOR_PLAN.md.
+the facade. See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 

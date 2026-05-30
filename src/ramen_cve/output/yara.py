@@ -1,7 +1,7 @@
 """ramen_cve.output.yara — YARA rule stub writer for patch-now /
 KEV-override CVEs with linked malware (Layer-3 serialization, offline).
 
-See docs/REFACTOR_PLAN.md.
+See README.md and src/ramen_cve/__init__.py.
 """
 from __future__ import annotations
 
