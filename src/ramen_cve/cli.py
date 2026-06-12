@@ -105,7 +105,9 @@ from .wizard import _run_wizard
 _log = logging.getLogger(__name__)
 
 
-VERSION = "0.1"
+# Must match [project] version in pyproject.toml — locked by
+# tests/test_smoke.py::test_version_constant_matches_pyproject.
+VERSION = "0.2.0"
 
 
 def _shared_flags(parser: argparse.ArgumentParser) -> None:
