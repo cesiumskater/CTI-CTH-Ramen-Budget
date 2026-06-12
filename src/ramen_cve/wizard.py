@@ -8,7 +8,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from .cliutil import _strip_path_quotes, _validate_opml_input
+from .cliutil import _normalize_format_spec, _strip_path_quotes, _validate_opml_input
 from .constants import CVE_REGEX, DEFAULT_CVSS_THRESHOLD, DEFAULT_EPSS_THRESHOLD
 from .pipeline import _safe_basename
 
@@ -148,12 +148,26 @@ def _run_wizard() -> list[str]:
         str(Path(out_dir_clean).expanduser()) if out_dir_clean else ".",
     ])
 
-    fmt = questionary.select(
-        "Output format:",
-        choices=["both", "csv", "md", "html", "all"],
-        default="both",
+    # Multi-select checkbox: the user picks any combination of concrete
+    # formats (space toggles, enter confirms) instead of a fixed either/or
+    # list. csv + md start checked to match the historical "both" default;
+    # the selection is normalised to the canonical --format spec ("both",
+    # "all", or a comma combo like "csv,html") before it lands in argv.
+    fmt_selected = questionary.checkbox(
+        "Output formats (space toggles, enter confirms):",
+        choices=[
+            questionary.Choice("csv — CVE spreadsheet (+ IOC sidecar)", value="csv", checked=True),
+            questionary.Choice("md — Markdown triage report", value="md", checked=True),
+            questionary.Choice("stix — STIX 2.1 bundle", value="stix"),
+            questionary.Choice("sigma — Sigma rule stubs", value="sigma"),
+            questionary.Choice("yara — YARA rule stubs", value="yara"),
+            questionary.Choice("html — CVSS x EPSS quadrant chart", value="html"),
+        ],
+        validate=lambda sel: True if sel else "Select at least one format (space toggles).",
     ).unsafe_ask()
-    argv.extend(["--format", fmt])
+    # The validator blocks an empty confirm in real questionary; the fallback
+    # keeps faked/odd prompt backends safe by restoring the default pair.
+    argv.extend(["--format", _normalize_format_spec(set(fmt_selected or ("csv", "md")))])
 
     if questionary.confirm("Skip the local SQLite cache?", default=False).unsafe_ask():
         argv.append("--no-cache")

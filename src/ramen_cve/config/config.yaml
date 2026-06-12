@@ -47,7 +47,9 @@ output:
   # Filename stem (no extension). The writer adds .csv / .md / .json / etc.
   # Blank → "ramen-cve-<UTC timestamp>".
   basename: ""
-  # One of: csv | md | both | stix | sigma | yara | all
+  # Output format(s): one value or a comma-separated combination of
+  #   csv | md | stix | sigma | yara | html
+  # Aliases: both = csv,md · all = every format. Examples: "both", "csv,html".
   format: both
   # Set true to keep TLP:RED records in the output. Default strips them.
   allow_tlp_red: false

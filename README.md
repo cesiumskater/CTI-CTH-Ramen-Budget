@@ -181,7 +181,9 @@ trust surface is enumerated in [`docs/SBOM.md`](docs/SBOM.md) §6.
 
 The fastest way in is the no-args **wizard** — `python threat_intel_hunter.py`
 walks you through every prompt, accepts quoted Windows paths and `~`, and
-lets you pick the output basename before any files are written.
+lets you pick the output basename before any files are written. Output
+formats are a **checkbox list** (space toggles, enter confirms), so you can
+pick any combination — csv + md start ticked.
 
 Eleven subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
 `pir`, `trend`, `audit`, `web`, `schedule`, and `daemon`.
@@ -252,7 +254,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--epss-threshold N` | `0.10` | EPSS cutoff for "likely exploited" |
 | `--out-dir PATH` | cwd | Output directory (quote-stripped, `~`-expanded) |
 | `--basename NAME` | timestamped | Output filename stem |
-| `--format {csv,md,both,stix,sigma,yara,html,all}` | `both` | Output formats |
+| `--format SPEC` | `both` | One or more output formats, comma-separated: `csv`, `md`, `stix`, `sigma`, `yara`, `html` (e.g. `--format csv,html`). Aliases: `both` = csv,md; `all` = everything |
 | `--no-cache` | off | Skip the SQLite cache (always re-fetch) |
 | `--no-exploit-lookup` | off | Skip Exploit-DB / Nuclei / GitHub PoC lookups |
 | `--no-enrich-iocs` | off | Skip VT / AbuseIPDB / OTX / MalwareBazaar enrichment |
@@ -430,7 +432,8 @@ thresholds, and action text are customisable per-bucket via the YAML
 ## Outputs
 
 A single run can produce up to seven artefact types. Pick what you want with
-`--format`:
+`--format` — a single value or any comma-separated combination
+(`--format csv,html`); `both` (= csv,md) and `all` work as aliases:
 
 | Artefact | Trigger | Shape |
 | --- | --- | --- |
@@ -529,7 +532,7 @@ on every run. Provenance for the bundled data is documented in
 │   ├── todo.md                # forward-looking backlog + templates
 │   └── lessons.md             # recurring failure modes + prevention rules
 │
-└── tests/                     # 804 pytest cases + fixtures
+└── tests/                     # 809 pytest cases + fixtures
 ```
 
 ---
@@ -588,7 +591,7 @@ their head. PRs that respect that spirit are welcome.
 
 ```bash
 pip install -e ".[dev]"                              # if you haven't already
-pytest tests/ -q                                     # must stay green (804 cases)
+pytest tests/ -q                                     # must stay green (809 cases)
 ruff check threat_intel_hunter.py conftest.py src/ tests/ scripts/
 python scripts/regen_examples.py --check             # byte-oracle on the showcase bundle
 ```

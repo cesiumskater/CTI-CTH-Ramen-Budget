@@ -114,7 +114,7 @@ The codebase is a ~30-module package under `src/ramen_cve/`, refactored from
 the original single-file design in May 2026. The package layers (constants → models → cache →
 extract → … → output / dispatch / config → cli → façade) preserve the flat
 `from ramen_cve import X` contract via a re-export `__init__.py` with a
-locked `__all__`. The 804-case test suite and a golden byte-oracle prove
+locked `__all__`. The 809-case test suite and a golden byte-oracle prove
 that the refactor was zero-behaviour-change end-to-end (regenerated
 CSV/Markdown are byte-identical to the pre-refactor baseline).
 

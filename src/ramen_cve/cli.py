@@ -28,6 +28,7 @@ from .audit import (
 from .cache import Cache
 from .cliutil import (
     _collect_opml_files,
+    _format_spec,
     _parse_iso_date,
     _path_arg,
     _validate_cve_id,
@@ -139,13 +140,14 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--format",
-        choices=["csv", "md", "both", "stix", "sigma", "yara", "html", "all"],
+        type=_format_spec,
         default="both",
+        metavar="SPEC",
         help=(
-            "Output format. 'both' = CSV + Markdown; 'sigma' = Sigma stubs only; "
-            "'yara' = YARA stubs only (one per linked malware family); "
-            "'html' = self-contained CVSS x EPSS quadrant chart; "
-            "'all' = CSV + Markdown + STIX + Sigma + YARA + HTML."
+            "Output format(s) — a single value or a comma-separated combination "
+            "of: csv, md, stix, sigma, yara, html (e.g. --format csv,html). "
+            "Aliases: 'both' = csv,md (default); 'all' = every format. "
+            "'html' is the self-contained CVSS x EPSS quadrant chart."
         ),
     )
     parser.add_argument("--no-cache", action="store_true")

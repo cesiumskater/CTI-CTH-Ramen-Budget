@@ -134,6 +134,91 @@ def _collect_opml_files(path: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
+# --format multi-select spec
+# ---------------------------------------------------------------------------
+
+#: Concrete output formats in canonical writer order — combos normalise to
+#: this order, matching the writer blocks in pipeline._output.
+FORMAT_TOKENS: tuple[str, ...] = ("csv", "md", "stix", "sigma", "yara", "html")
+
+#: Legacy single-choice aliases, accepted anywhere a concrete token is.
+_FORMAT_ALIASES: dict[str, tuple[str, ...]] = {
+    "both": ("csv", "md"),
+    "all": FORMAT_TOKENS,
+}
+
+
+def _expand_format_spec(spec: str | None) -> set[str]:
+    """Expand a --format spec string into its concrete token set.
+
+    Accepts a single token (``csv``), an alias (``both`` / ``all``), or a
+    comma-separated combination (``csv,html``), case-insensitively. Unknown
+    tokens are silently dropped *here* — boundary validation happens in
+    :func:`_format_spec` at parse time, so a stale value arriving from a
+    hand-edited YAML preset degrades to "that writer is skipped" instead of
+    crashing a saved scheduled run.
+    """
+    out: set[str] = set()
+    for raw in (spec or "").split(","):
+        token = raw.strip().lower()
+        if token in _FORMAT_ALIASES:
+            out.update(_FORMAT_ALIASES[token])
+        elif token in FORMAT_TOKENS:
+            out.add(token)
+    return out
+
+
+def _normalize_format_spec(tokens: set[str]) -> str:
+    """Collapse a concrete token set to its canonical spec string.
+
+    The full set collapses to ``all`` and exactly ``{csv, md}`` to ``both``,
+    so wizard-built argv and saved presets keep the familiar legacy
+    spellings; any other combination joins in FORMAT_TOKENS order
+    (``csv,html``).
+    """
+    if tokens == set(FORMAT_TOKENS):
+        return "all"
+    if tokens == {"csv", "md"}:
+        return "both"
+    return ",".join(t for t in FORMAT_TOKENS if t in tokens)
+
+
+def _format_spec(value: str) -> str:
+    """Argparse type for --format: validate every token, return canonical spec.
+
+    Single values round-trip unchanged (``csv`` → ``csv``, ``both`` →
+    ``both``, ``all`` → ``all``) so existing presets, scripts, and docs keep
+    their exact spelling; combinations are deduped and normalised
+    (``html,csv`` → ``csv,html``, ``csv,md`` → ``both``, ``all,csv`` →
+    ``all``).
+    """
+    parts = [p.strip().lower() for p in (value or "").split(",")]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise argparse.ArgumentTypeError("expected at least one output format")
+    known = set(FORMAT_TOKENS) | set(_FORMAT_ALIASES)
+    bad = sorted({p for p in parts if p not in known})
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"unknown format(s): {', '.join(bad)} "
+            f"(valid: {', '.join(FORMAT_TOKENS)}; aliases: both = csv,md, "
+            "all = everything; combine with commas, e.g. csv,html)"
+        )
+    if len(parts) == 1:
+        return parts[0]
+    return _normalize_format_spec(_expand_format_spec(value))
+
+
+def _format_includes(spec: str | None, kind: str) -> bool:
+    """True when --format spec ``spec`` selects the concrete format ``kind``.
+
+    Replaces the old ``args.format in ("csv", "both", "all")`` membership
+    checks; understands aliases and comma-separated combinations.
+    """
+    return kind in _expand_format_spec(spec)
+
+
+# ---------------------------------------------------------------------------
 # YAML configuration system
 # ---------------------------------------------------------------------------
 #
