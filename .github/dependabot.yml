@@ -1,0 +1,30 @@
+# Dependabot configuration — keeps runtime, dev, and CI dependencies fresh
+# without flooding the PR queue.
+version: 2
+updates:
+  # Python: requests / feedparser / python-dotenv / questionary / PyYAML
+  # plus the dev extras (pytest, ruff). Floor-and-ceiling pins in
+  # pyproject.toml mean only same-major bumps land here.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions: actions/checkout, actions/setup-python, etc.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"

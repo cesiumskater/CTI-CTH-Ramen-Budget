@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a new capability, subcommand, output format, or workflow.
+title: "[feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests that name a concrete problem and a sketched solution
+        land faster than open-ended wishes. Please also skim
+        [`docs/ROADMAP.md`](../docs/ROADMAP.md) — your idea may already be on
+        deck.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        What can't you do today? Who are you (analyst / SOC engineer / hobbyist),
+        what's the workflow, and where does ramen-cve fall short?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: |
+        How would you like this to work? A new flag, a new subcommand, an
+        existing output's shape — be concrete.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you look at? Is there a workaround today?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: |
+        Where does this belong? Core means it ships in every install; extra
+        means an opt-in (`pip install ramen-cve[xyz]`); plugin means an
+        external package.
+      options:
+        - Core (justify against the five-dep budget)
+        - Optional extra
+        - Plugin / external package
+        - Documentation only
+        - Unsure — please advise
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I have skimmed [`docs/ROADMAP.md`](../docs/ROADMAP.md).
+          required: true
