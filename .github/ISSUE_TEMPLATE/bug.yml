@@ -1,0 +1,105 @@
+name: Bug report
+description: Something doesn't work the way the README / --help says it should.
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more concrete this is,
+        the faster it gets fixed.
+
+        **Before submitting:** please confirm this isn't a security issue.
+        Vulnerabilities go through [SECURITY.md](../SECURITY.md), not public
+        issues.
+
+  - type: input
+    id: version
+    attributes:
+      label: ramen-cve version
+      description: Output of `ramen-cve --version` (or the commit SHA).
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`.
+      placeholder: "Python 3.11.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other (please describe in the repro)
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: |
+        Paste the exact invocation. Redact any real API keys, OPML URLs that
+        identify a real environment, and inventory paths.
+      placeholder: |
+        ramen-cve opml ~/feeds --format csv,html --out-dir ~/out
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What did you expect to happen, and where in the docs is that documented?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: |
+        What happened? Paste any error message verbatim. If a traceback was
+        printed, include the WHOLE traceback (not just the last frame).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output (optional)
+      description: |
+        If reproducible with `--verbose`, paste the relevant log lines.
+        Redact any keys, real IOCs, or TLP:AMBER+ material first.
+      render: shell
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context (optional)
+      description: |
+        YAML preset used, scheduler / daemon mode, anything else that might
+        matter.
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Confirmations
+      options:
+        - label: I have searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I have read [SECURITY.md](../SECURITY.md) and this is NOT a security vulnerability.
+          required: true
+        - label: I have redacted any real API keys, IOCs, and TLP:AMBER+ material from this report.
+          required: true

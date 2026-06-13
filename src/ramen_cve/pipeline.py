@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .associations import load_associations
 from .cache import Cache
-from .cliutil import _resolve_out_dir
+from .cliutil import _format_includes, _resolve_out_dir
 from .decay import apply_ioc_decay, filter_iocs_by_confidence
 from .dispatch.runner import dispatch_records
 from .enrich.inventory import correlate_inventory, load_inventory
@@ -276,7 +276,7 @@ def _output(
         "stix": None, "sigma_dir": None, "yara_dir": None, "html": None,
     }
 
-    if args.format in ("csv", "both", "all"):
+    if _format_includes(args.format, "csv"):
         csv_path = _unique_output_path(out_dir, ts, "csv", basename=basename)
         _log.info("Writing CVE CSV report → %s", csv_path)
         write_csv(enriched, csv_path)
@@ -313,7 +313,7 @@ def _output(
             print(str(traj_path))
             paths["epss_trajectory_csv"] = traj_path
 
-    if args.format in ("md", "both", "all"):
+    if _format_includes(args.format, "md"):
         md_path = _unique_output_path(out_dir, ts, "md", basename=basename)
         _log.info("Writing Markdown report → %s", md_path)
         write_markdown(
@@ -326,14 +326,14 @@ def _output(
         print(str(md_path))
         paths["md"] = md_path
 
-    if args.format in ("stix", "all"):
+    if _format_includes(args.format, "stix"):
         stix_path = _unique_output_path(out_dir, ts, "stix.json", basename=basename)
         _log.info("Writing STIX 2.1 bundle → %s", stix_path)
         write_stix(enriched, stix_path, iocs=iocs, run_metadata=metadata)
         print(str(stix_path))
         paths["stix"] = stix_path
 
-    if args.format in ("sigma", "all"):
+    if _format_includes(args.format, "sigma"):
         sigma_dir = out_dir / f"{sigma_stem}-sigma"
         _log.info("Writing Sigma rule stubs → %s", sigma_dir)
         files = write_sigma_stubs(enriched, sigma_dir)
@@ -345,7 +345,7 @@ def _output(
                 "No kev_override / patch_now CVEs in this run; no Sigma stubs written."
             )
 
-    if args.format in ("yara", "all"):
+    if _format_includes(args.format, "yara"):
         yara_dir = out_dir / f"{sigma_stem}-yara"
         _log.info("Writing YARA rule stubs → %s", yara_dir)
         files = write_yara_stubs(enriched, yara_dir)
@@ -358,7 +358,7 @@ def _output(
                 "no YARA stubs written."
             )
 
-    if args.format in ("html", "all"):
+    if _format_includes(args.format, "html"):
         html_path = _unique_output_path(out_dir, ts, "html", basename=basename)
         _log.info("Writing HTML quadrant report → %s", html_path)
         write_quadrant_html(enriched, html_path, metadata)

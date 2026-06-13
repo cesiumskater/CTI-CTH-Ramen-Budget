@@ -1,0 +1,60 @@
+name: CTI data — association / feed / mapping update
+description: Correct or extend bundled associations, feeds, or ATT&CK mappings.
+title: "[cti] "
+labels: ["cti-data", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bundled CTI data lives in `src/ramen_cve/data/`. Everything we ship must
+        be **public-source-citable** and **MIT-shareable** — no proprietary,
+        paywalled, or TLP:AMBER+ material. See
+        [`CONTRIBUTING.md`](../CONTRIBUTING.md#contributing-cti-data).
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: What are you updating?
+      options:
+        - associations.json (CVE → actor / campaign / malware)
+        - hunts/*.json (bundled hunt template)
+        - pirs/*.json (bundled PIR template)
+        - CWE → ATT&CK mapping (in code — discuss first)
+        - CWE → Kill Chain mapping (in code — discuss first)
+        - examples/community-feeds.opml (RSS / Atom feed entry)
+    validations:
+      required: true
+
+  - type: textarea
+    id: change
+    attributes:
+      label: Proposed change
+      description: |
+        For an association: which CVE, which actor / campaign / malware, what
+        link. For a feed: the OPML entry (text, xmlUrl).
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: sources
+    attributes:
+      label: Public sources
+      description: |
+        Cite at least one **public**, ideally authoritative source per claim:
+        MITRE ATT&CK Groups page, CISA advisory, peer-reviewed vendor report,
+        primary news source. URLs.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirms
+    attributes:
+      label: Confirmations
+      options:
+        - label: Every source I cited is publicly accessible (no paywall, no leaked dump).
+          required: true
+        - label: This is not TLP:AMBER+ or proprietary intel.
+          required: true
+        - label: I am willing to license this contribution under the project's MIT licence.
+          required: true

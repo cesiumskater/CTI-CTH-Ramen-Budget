@@ -147,3 +147,21 @@ def test_smoke_opml_warns_on_bozo_feed(tmp_path, caplog):
 
     assert exit_code == 0
     assert any("parsed with errors" in rec.message for rec in caplog.records)
+
+
+def test_version_constant_matches_pyproject():
+    """cli.VERSION must stay in lockstep with [project] version in pyproject.toml.
+
+    Regression lock: the two drifted (0.1 vs 0.2.0) until 2026-06; the report
+    footer, Web UI footer, and packaging metadata silently disagreed. A regex
+    read keeps this 3.10-compatible (tomllib is 3.11+).
+    """
+    import re
+    from pathlib import Path
+
+    from ramen_cve.cli import VERSION
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
+    assert match, "no [project] version found in pyproject.toml"
+    assert match.group(1) == VERSION

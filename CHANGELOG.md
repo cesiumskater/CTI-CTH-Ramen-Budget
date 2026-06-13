@@ -1,0 +1,83 @@
+# Changelog
+
+All notable changes to **ramen-cve** are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+The single source of truth for usage / config / outputs is
+[`README.md`](README.md); this file is the *what changed when*.
+
+---
+
+## [Unreleased]
+
+### Added
+- Multi-select `--format` SPEC: comma-separated combinations of `csv`, `md`,
+  `stix`, `sigma`, `yara`, `html` (e.g. `--format csv,html`). `both` and
+  `all` survive as aliases, so every legacy single-value spelling round-trips
+  unchanged.
+- **Wizard** now uses a `questionary.checkbox` for the output-format prompt:
+  space toggles, enter confirms, any combination allowed. `csv` and `md` start
+  pre-checked (the historical `both` default); `stix` / `sigma` / `yara` are
+  wizard-reachable for the first time.
+- Governance & community: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
+  `SECURITY.md`, this changelog, `docs/ROADMAP.md`, GitHub issue templates
+  (bug / feature / CTI-data), pull-request template, `CODEOWNERS`,
+  `dependabot.yml`.
+- CI: advisory `mypy` and `pip-audit` jobs (non-blocking — the documented
+  charter doesn't enforce type-strictness).
+- Regression lock: `tests/test_smoke.py::test_version_constant_matches_pyproject`
+  guards against `cli.VERSION` drifting from `[project] version` again.
+
+### Fixed
+- `cli.VERSION` was `"0.1"` while `pyproject [project] version` was `"0.2.0"`,
+  so the Markdown footer, Web UI footer, and packaging metadata silently
+  disagreed. Aligned to `0.2.0` and regenerated the showcase bundle (the
+  only delta is the version string `v0.1` → `v0.2.0`).
+
+### Changed
+- `--format` argument is now parsed by a validating type (`_format_spec`)
+  with a friendlier "unknown format(s)" error message.
+
+---
+
+## [0.2.0] — 2026-05-30
+
+### Added
+- Bucket-transition delta detection + `--dispatch-on-delta-only` mode
+  (page only when a CVE moves *up*).
+- Wizard offers `html` and `all` output formats interactively.
+- Post-merge security hardening sweep — 5 audit findings.
+
+### Fixed
+- CSV formula-injection neutralisation across every CSV writer (CWE-1236).
+
+### Documentation
+- README rewritten as the single source of truth; stale facts corrected
+  (test count, CSV column count); shipped roadmap items removed.
+- Completed historical plans retired (`docs/REFACTOR_PLAN.md`,
+  `docs/web_ui_design.md`); their ~45 source-docstring references redirected
+  to `README.md` + `src/ramen_cve/__init__.py`.
+
+---
+
+## [0.1.0] — 2026-05-20
+
+### Added
+- Initial public release. Monolith → ~30-module package behind a pure
+  re-export façade with a locked `__all__`.
+- Inputs: OPML feeds, single-URL crawl, hand-supplied CVE lists, STIX 2.1
+  bundle import, TAXII 2.x pull.
+- Enrichment: NVD, EPSS, CISA KEV, Exploit-DB / Nuclei / GitHub PoC, VT /
+  AbuseIPDB / OTX / MalwareBazaar IOC reputation, inventory correlation.
+- Analysis frames: MITRE ATT&CK, Cyber Kill Chain, Diamond Model, TLP +
+  NATO Admiralty.
+- Outputs: CVE CSV, IOC CSV sidecar, Markdown report, STIX 2.1 bundle,
+  Sigma / YARA stubs, inline-SVG quadrant HTML, static Web UI.
+- Workflow primitives: `hunt`, `pir`, `trend`, `audit`.
+- Operations: YAML preset system, native scheduler emitters (Windows Task
+  Scheduler / cron), long-running `daemon` subcommand.
+
+[Unreleased]: https://github.com/cesiumskater/cti-cth-ramen-budget/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cesiumskater/cti-cth-ramen-budget/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/cesiumskater/cti-cth-ramen-budget/releases/tag/v0.1.0
