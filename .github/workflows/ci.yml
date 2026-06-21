@@ -143,3 +143,38 @@ jobs:
             echo "**Result:** \`$summary\` (rc=$rc)"
           } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
+
+  # ----- Docker image build --------------------------------------------------
+  # NOT advisory — a broken Dockerfile is a broken release. Buildx is enabled
+  # so we get layer caching across runs.
+
+  docker:
+    name: Docker image (build only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # Build, don't push — registry credentials live behind tag-based
+          # releases (release.yml), not every PR.
+          push: false
+          load: true
+          tags: ramen-cve:ci
+          # Layer cache keyed off the run; subsequent runs reuse it.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke — --version + --help + subcommand routing
+        run: |
+          docker run --rm ramen-cve:ci --version
+          docker run --rm ramen-cve:ci --help | head -5
+          # hunt list reads the bundled JSON — proves package data is
+          # actually inside the image, not just the wheel metadata.
+          docker run --rm ramen-cve:ci hunt list

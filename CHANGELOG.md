@@ -12,6 +12,15 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- Docker image + `docker-compose.yml` for one-command deployment.
+  Multi-stage `Dockerfile` (Python 3.12-slim, non-root user, venv
+  copied across stages), runs the `ramen-cve` console script as the
+  entry-point, has a `--version` healthcheck, and mounts `/data` for the
+  SQLite cache + per-run output. Compose defines a one-shot `ramen-cve`
+  service and an opt-in `--profile daemon` service that runs `daemon
+  --log-format json` against a mounted preset. CI builds the image and
+  smoke-tests it on every push (not advisory — a broken Dockerfile is a
+  broken release).
 - `--log-format {text,json}` top-level flag for SIEM ingestion. `text`
   (default) preserves the historical `LEVEL message` stderr shape
   byte-identically; `json` emits one JSON line per record (`ts`, `level`,

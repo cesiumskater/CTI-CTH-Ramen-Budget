@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# ramen-cve — docker compose for one-command local deployment.
+# ---------------------------------------------------------------------------
+#
+# Use cases:
+#   * Single-shot triage:
+#       docker compose run --rm ramen-cve opml /data/feeds.opml \
+#         --out-dir /data/out --format csv,html
+#   * Long-running daemon (override `command:` below):
+#       docker compose up daemon
+#
+# Notes:
+#   * The default `ramen-cve` service is one-shot; no `restart:` — it exits
+#     after one run and the container disappears.
+#   * The `daemon` service is opt-in (--profile daemon) so `docker compose
+#     up` doesn't spawn a long-running process by accident. Run it
+#     explicitly: `docker compose --profile daemon up`.
+#   * Secrets live in .env (read by compose automatically) — never bake
+#     them into the image.
+# ---------------------------------------------------------------------------
+
+services:
+  ramen-cve:
+    image: ghcr.io/cesiumskater/ramen-cve:latest
+    # Override the image with a local build:
+    #   docker compose build
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Read from .env on the host (compose loads it automatically). Each
+      # variable is gated `${VAR:-}` so an unset key stays empty rather
+      # than fails the start.
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      VT_API_KEY: "${VT_API_KEY:-}"
+      ABUSEIPDB_API_KEY: "${ABUSEIPDB_API_KEY:-}"
+      OTX_API_KEY: "${OTX_API_KEY:-}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+      RAMEN_DISPATCH_WEBHOOK: "${RAMEN_DISPATCH_WEBHOOK:-}"
+      RAMEN_SMTP_HOST: "${RAMEN_SMTP_HOST:-}"
+      RAMEN_SMTP_USER: "${RAMEN_SMTP_USER:-}"
+      RAMEN_SMTP_PASS: "${RAMEN_SMTP_PASS:-}"
+      RAMEN_SMTP_FROM: "${RAMEN_SMTP_FROM:-}"
+      RAMEN_SMTP_USE_TLS: "${RAMEN_SMTP_USE_TLS:-true}"
+      RAMEN_DIGEST_TO: "${RAMEN_DIGEST_TO:-}"
+    volumes:
+      # Host ./data ↔ container /data. The default ENTRYPOINT writes the
+      # SQLite cache under /data/cache and per-run output under /data/out
+      # (see Dockerfile ENV).
+      - ./data:/data
+    # No default `command:` — the Dockerfile's ENTRYPOINT exposes the
+    # `ramen-cve` console script, so `docker compose run --rm ramen-cve
+    # <subcommand> <args>` works exactly like the CLI.
+
+  daemon:
+    image: ghcr.io/cesiumskater/ramen-cve:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["daemon"]
+    environment:
+      # Same env passthrough as the one-shot service.
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      VT_API_KEY: "${VT_API_KEY:-}"
+      ABUSEIPDB_API_KEY: "${ABUSEIPDB_API_KEY:-}"
+      OTX_API_KEY: "${OTX_API_KEY:-}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+      RAMEN_DISPATCH_WEBHOOK: "${RAMEN_DISPATCH_WEBHOOK:-}"
+    volumes:
+      - ./data:/data
+      # The daemon needs a preset; mount it read-only.
+      - ./presets:/presets:ro
+    # The preset name (e.g. "daily-opml") and the interval can be tuned per
+    # deployment. SIGTERM cleanly finishes the in-flight iteration.
+    command: >
+      daemon
+      --for-config /presets/daily-opml.yaml
+      --interval 21600
+      --out-dir /data/runs
+      --prune-after-days 30
+      --log-format json
+    # Restart on crash, but not "always" (the daemon obeys SIGTERM and we
+    # don't want a healthy stop to be undone). One daemon per host /
+    # cache file — the SQLite cache isn't built for concurrent writers.
+    restart: on-failure
+    stop_signal: SIGTERM
+    stop_grace_period: 30s

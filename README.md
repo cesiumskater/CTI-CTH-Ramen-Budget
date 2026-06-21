@@ -152,6 +152,26 @@ Three equivalent entry points after install:
 authoritative dependency manifest is
 [`pyproject.toml`](pyproject.toml).
 
+### Docker
+
+If you'd rather not manage a Python toolchain, a multi-stage
+[`Dockerfile`](Dockerfile) ships in the repo. The image runs as a non-root
+user, mounts `/data` for the cache + per-run output, and exposes the
+`ramen-cve` console script as its entry-point.
+
+```bash
+docker build -t ramen-cve .                         # ~1 minute, one-off
+docker run --rm -v $PWD/data:/data ramen-cve --version
+
+# Run a triage straight from the image:
+docker run --rm -v $PWD/data:/data ramen-cve \
+    opml /data/feeds.opml --out-dir /data/out --format csv,html
+```
+
+`docker-compose.yml` provides one-shot and `--profile daemon` services with
+all API-key env-vars wired from a host-side `.env`. CI builds and
+smoke-tests the image on every push.
+
 ---
 
 ## API keys
