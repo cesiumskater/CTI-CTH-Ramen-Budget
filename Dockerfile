@@ -69,6 +69,11 @@ RUN groupadd --system --gid ${GID} ramen \
 # and bundled package data to resolve at runtime.
 COPY --from=build /opt/venv /opt/venv
 
+# /data is the runtime working tree — SQLite cache, audit log, per-run
+# output. Create it owned by the ramen user BEFORE the USER directive
+# so writes succeed both when the host bind-mounts /data and when it
+# doesn't (e.g. `docker run --rm image hunt list` writes one audit row).
+RUN mkdir -p /data && chown -R ramen:ramen /data
 WORKDIR /data
 
 # Mount points so a simple `docker run -v $PWD/data:/data` surfaces both
