@@ -165,3 +165,21 @@ def test_version_constant_matches_pyproject():
     match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), re.M)
     assert match, "no [project] version found in pyproject.toml"
     assert match.group(1) == VERSION
+
+
+def test_version_flag_prints_to_stdout_and_exits_zero(capsys):
+    """`ramen-cve --version` is the standard "what release am I running?"
+    affordance referenced in CONTRIBUTING.md and the bug-report template.
+    Regression lock so a future argparse refactor can't silently drop it.
+    """
+    import pytest
+
+    from ramen_cve.cli import VERSION, build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--version"])
+    # argparse's `action="version"` exits 0 and prints to stdout.
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert VERSION in out
+    assert out.startswith("ramen-cve ")

@@ -263,6 +263,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ramen_cve",
         description="Threat intel triage on a ramen budget.",
     )
+    # --version is the standard "what release am I running?" affordance for
+    # bug reports + scripts. Reads the same VERSION constant pyproject is
+    # gated against by tests/test_smoke.py.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"ramen-cve {VERSION}",
+    )
     # YAML configuration plumbing — top-level (works before any subcommand).
     parser.add_argument(
         "--config",
