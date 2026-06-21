@@ -67,12 +67,10 @@ def discover_writers() -> dict[str, Callable[..., Path | None]]:
     directly from :mod:`ramen_cve.pipeline`.
     """
     out: dict[str, Callable[..., Path | None]] = {}
-    try:
-        eps = importlib.metadata.entry_points(group=WRITER_ENTRY_POINT_GROUP)
-    except TypeError:
-        # Python 3.10 lacks the `group=` kwarg in older importlib.metadata
-        # variants; fall back to the dict-style API.
-        eps = importlib.metadata.entry_points().get(WRITER_ENTRY_POINT_GROUP, [])  # type: ignore[assignment]
+    # importlib.metadata.entry_points(group=…) is available on every
+    # supported interpreter (pyproject requires Python >=3.10, which
+    # introduced the kwarg). No legacy fallback needed.
+    eps = importlib.metadata.entry_points(group=WRITER_ENTRY_POINT_GROUP)
     for ep in eps:
         try:
             out[ep.name] = ep.load()
