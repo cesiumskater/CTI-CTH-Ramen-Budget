@@ -86,7 +86,21 @@ jobs:
         # Lenient: third-party stubs aren't part of the dep budget. Errors
         # surface in the CI summary but do not block. See docs/ROADMAP.md
         # for the type-strictness trajectory.
-        run: mypy src/ramen_cve --ignore-missing-imports
+        id: mypy
+        run: |
+          set +e
+          mypy src/ramen_cve --ignore-missing-imports | tee mypy.out
+          rc=${PIPESTATUS[0]}
+          tail_summary=$(tail -1 mypy.out)
+          {
+            echo "### mypy (advisory)"
+            echo ""
+            echo "> Charter: type hints are present for readability; mypy-strictness"
+            echo "> is not enforced (docs/ROADMAP.md). This job is **advisory**."
+            echo ""
+            echo "**Result:** \`$tail_summary\` (rc=$rc)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
   pip-audit:
     name: pip-audit (advisory)
@@ -103,10 +117,29 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --retries 5 --timeout 30 pip-audit
-      - name: Audit declared dependencies
-        # Audit the project's declared dependency set (pyproject.toml +
-        # extras). Disable network on PyPI metadata only as advisory; the
-        # vulnerability DB is fetched fresh each run. --strict turns
-        # informational findings into non-zero, but the job is
+      - name: Audit declared runtime dependencies
+        # Audit the pinned runtime requirements mirror. `-r` is what makes
+        # `pip-audit` audit the manifest rather than the active environment
+        # — without it the tool drops back to the interpreter and tries to
+        # audit ramen-cve itself (an editable local install) which is
+        # noisy and not what we want. --strict turns informational findings
+        # (e.g. skipped editables) into non-zero exits; the job remains
         # continue-on-error so a fresh advisory is surfaced, not blocking.
-        run: pip-audit --strict --disable-pip
+        id: audit
+        run: |
+          set +e
+          pip-audit --strict -r config/requirements.txt | tee audit.out
+          rc=${PIPESTATUS[0]}
+          # Last non-empty line is pip-audit's "Found N vulnerabilities…" /
+          # "No known vulnerabilities found" summary.
+          summary=$(awk 'NF{last=$0} END{print last}' audit.out)
+          {
+            echo "### pip-audit (advisory)"
+            echo ""
+            echo "> Vulnerability scan over \`config/requirements.txt\`. This job"
+            echo "> is **advisory** — fresh advisories surface here for the"
+            echo "> maintainer to triage, but don't auto-block PRs."
+            echo ""
+            echo "**Result:** \`$summary\` (rc=$rc)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
