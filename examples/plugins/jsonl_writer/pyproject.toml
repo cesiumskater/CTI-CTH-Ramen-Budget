@@ -1,0 +1,32 @@
+# Example ramen-cve writer plugin: line-delimited JSON.
+#
+# Build + install editable for a local trial:
+#
+#     pip install -e examples/plugins/jsonl_writer
+#
+# Then `ramen-cve cve CVE-2021-44228 --format jsonl --out-dir ./out`
+# emits one JSON object per CVE record to <out>/<basename>-jsonl.jsonl.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ramen-cve-jsonl-writer"
+version = "0.1.0"
+description = "Example writer plugin for ramen-cve — line-delimited JSON output."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+# The ramen-cve runtime is a peer, not a dep — installed alongside, not
+# transitively pulled in (so the plugin stays useful in a dev tree).
+dependencies = []
+
+[project.entry-points."ramen_cve.writers"]
+# The token on the left becomes the --format value users pass:
+#     --format jsonl
+# The right-hand side is "module:callable" matching WRITER_CONTRACT.
+jsonl = "ramen_cve_jsonl_writer:write_jsonl"
+
+[tool.setuptools]
+py-modules = ["ramen_cve_jsonl_writer"]

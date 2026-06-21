@@ -450,6 +450,34 @@ thresholds, and action text are customisable per-bucket via the YAML
 
 ---
 
+## Plugins
+
+Third-party output writers can extend `--format` without modifying core
+code. Authors publish a separate package whose `pyproject.toml` declares:
+
+```toml
+[project.entry-points."ramen_cve.writers"]
+jsonl = "my_ramen_writer:write_jsonl"
+```
+
+`ramen-cve` discovers installed plugins on the next invocation; the new
+token (`jsonl`) becomes a valid `--format` value (alone or in combos:
+`--format csv,jsonl`). A broken plugin logs a WARNING and is skipped —
+the rest of the pipeline runs unaffected.
+
+A reference plugin lives at
+[`examples/plugins/jsonl_writer/`](examples/plugins/jsonl_writer/) —
+install editable with `pip install -e examples/plugins/jsonl_writer`,
+then `ramen-cve cve CVE-2021-44228 --format jsonl --out-dir ./out`
+writes line-delimited JSON to `./out/ramen-cve-<ts>-jsonl.jsonl`. The
+[contract](src/ramen_cve/plugins.py) (`WRITER_CONTRACT`) is the
+stability boundary — see the plugin's README for the authoring walkthrough.
+
+Other extension points (parsers, enrichers, dispatchers, bucket
+policies) are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+---
+
 ## Outputs
 
 A single run can produce up to seven artefact types. Pick what you want with

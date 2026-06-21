@@ -24,6 +24,7 @@ from .output.markdown import write_markdown
 from .output.sigma import write_sigma_stubs
 from .output.stix import write_iocs_csv, write_stix
 from .output.yara import write_yara_stubs
+from .plugins import discover_writers, invoke_writer
 
 _log = logging.getLogger(__name__)
 
@@ -364,6 +365,29 @@ def _output(
         write_quadrant_html(enriched, html_path, metadata)
         print(str(html_path))
         paths["html"] = html_path
+
+    # Third-party plugin writers (entry-point group ramen_cve.writers).
+    # Discovered lazily — calling discover_writers() with no plugins
+    # installed is ~microseconds and produces an empty dict. Each plugin
+    # whose token is in --format gets a suggested path under out_dir; the
+    # plugin returns the actual path it wrote (may have a different
+    # extension), or None to skip. Failures are fail-soft per the
+    # documented contract: a bad plugin warns and is skipped, never
+    # aborts the run.
+    for token, writer in discover_writers().items():
+        if not _format_includes(args.format, token):
+            continue
+        plugin_stem = basename or f"ramen-cve-{ts}"
+        suggested = out_dir / f"{plugin_stem}-{token}.out"
+        _log.info("Invoking plugin writer %r → %s", token, suggested)
+        actual = invoke_writer(
+            token, writer, enriched, suggested,
+            run_metadata=metadata, iocs=iocs,
+            policy=getattr(args, "bucket_policy", None),
+        )
+        if actual is not None:
+            print(str(actual))
+            paths[f"plugin:{token}"] = actual
 
     # Slice B: stamp the run_artefacts row only if a cache is plumbed
     # through AND we actually wrote at least one file. A run that

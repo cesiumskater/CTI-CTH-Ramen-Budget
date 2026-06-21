@@ -193,31 +193,57 @@ def _format_spec(value: str) -> str:
     their exact spelling; combinations are deduped and normalised
     (``html,csv`` → ``csv,html``, ``csv,md`` → ``both``, ``all,csv`` →
     ``all``).
+
+    Tokens registered by an installed writer plugin (entry-point group
+    ``ramen_cve.writers``) are also accepted — community plugins extend
+    the validator's vocabulary without a core code change. Plugin tokens
+    in a combo pass through to ``args.format`` verbatim so the dispatcher
+    can find them at write time.
     """
     parts = [p.strip().lower() for p in (value or "").split(",")]
     parts = [p for p in parts if p]
     if not parts:
         raise argparse.ArgumentTypeError("expected at least one output format")
-    known = set(FORMAT_TOKENS) | set(_FORMAT_ALIASES)
-    bad = sorted({p for p in parts if p not in known})
-    if bad:
-        raise argparse.ArgumentTypeError(
-            f"unknown format(s): {', '.join(bad)} "
-            f"(valid: {', '.join(FORMAT_TOKENS)}; aliases: both = csv,md, "
-            "all = everything; combine with commas, e.g. csv,html)"
-        )
+    # Plugin discovery is deferred to the point of need: only run it when
+    # the spec contains a token we'd otherwise reject.
+    builtin = set(FORMAT_TOKENS) | set(_FORMAT_ALIASES)
+    unknown = {p for p in parts if p not in builtin}
+    if unknown:
+        from .plugins import writer_tokens
+        plugin_tokens = writer_tokens()
+        bad = sorted(unknown - plugin_tokens)
+        if bad:
+            valid = ", ".join(sorted(builtin | plugin_tokens))
+            raise argparse.ArgumentTypeError(
+                f"unknown format(s): {', '.join(bad)} (valid: {valid}; "
+                "combine with commas, e.g. csv,html)"
+            )
     if len(parts) == 1:
         return parts[0]
-    return _normalize_format_spec(_expand_format_spec(value))
+    # Normalise only the built-in subset; plugin tokens append unchanged
+    # so the canonical spec stays roundtrip-stable.
+    builtin_part = _normalize_format_spec(_expand_format_spec(value))
+    plugin_part = sorted({p for p in parts if p not in builtin})
+    canonical = ",".join(p for p in (builtin_part, *plugin_part) if p)
+    return canonical or builtin_part
 
 
 def _format_includes(spec: str | None, kind: str) -> bool:
     """True when --format spec ``spec`` selects the concrete format ``kind``.
 
     Replaces the old ``args.format in ("csv", "both", "all")`` membership
-    checks; understands aliases and comma-separated combinations.
+    checks; understands aliases and comma-separated combinations. Plugin
+    tokens (raw, no aliasing) are recognised when ``kind`` is itself a
+    plugin token — the dispatcher in :mod:`ramen_cve.pipeline` uses this
+    in the plugin loop.
     """
-    return kind in _expand_format_spec(spec)
+    expanded = _expand_format_spec(spec)
+    if kind in expanded:
+        return True
+    # Plugin tokens never alias — a direct substring check of the raw spec
+    # is enough and cheap (avoids loading plugins on every call).
+    tokens = {p.strip().lower() for p in (spec or "").split(",")}
+    return kind in tokens
 
 
 # ---------------------------------------------------------------------------

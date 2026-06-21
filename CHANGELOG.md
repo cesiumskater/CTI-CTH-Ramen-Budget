@@ -12,6 +12,17 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Plugin system (writers).** Third-party output writers register via the
+  `[project.entry-points."ramen_cve.writers"]` group; ramen-cve discovers
+  them on the next run, accepts the plugin's token in `--format`
+  (`--format jsonl`, `--format csv,jsonl`), and dispatches to the
+  plugin's callable. Fail-soft: a broken plugin logs a WARNING and is
+  skipped, never aborts the run. New `src/ramen_cve/plugins.py` (~100
+  LOC, stdlib-only) exposes `discover_writers`, `writer_tokens`,
+  `invoke_writer`, and the `WRITER_CONTRACT` signature constant. An
+  end-to-end example plugin ships at
+  `examples/plugins/jsonl_writer/` — an installable pip package whose
+  README documents the authoring path.
 - Docker image + `docker-compose.yml` for one-command deployment.
   Multi-stage `Dockerfile` (Python 3.12-slim, non-root user, venv
   copied across stages), runs the `ramen-cve` console script as the
