@@ -4,7 +4,9 @@ logging). See README.md and src/ramen_cve/__init__.py."""
 from __future__ import annotations
 
 import argparse
-from datetime import date
+import json
+import logging
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .constants import CVE_REGEX
@@ -216,6 +218,95 @@ def _format_includes(spec: str | None, kind: str) -> bool:
     checks; understands aliases and comma-separated combinations.
     """
     return kind in _expand_format_spec(spec)
+
+
+# ---------------------------------------------------------------------------
+# Structured (JSON-line) logging for SIEM ingestion
+# ---------------------------------------------------------------------------
+
+#: Attributes the stdlib LogRecord constructor always sets — used to filter
+#: which keys count as "extra" data the caller passed via ``extra={…}``.
+_STDLIB_LOG_RECORD_ATTRS: frozenset[str] = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+})
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit one JSON object per log record (newline-separated).
+
+    Designed for SIEM ingestion: stable keys, ISO-8601 UTC timestamps with
+    timezone, lowercase level names, exception tracebacks captured as a
+    single ``exception`` field. Any ``extra={...}`` kwargs on the call site
+    pass through as top-level keys (silently ``repr()``-ed if not
+    JSON-serialisable, so a stringly-typed value never crashes the log
+    pipeline mid-run).
+
+    The output is one ``json.dumps(...)`` per record with ``separators=
+    (",", ":")`` — compact, no trailing whitespace, parseable line-by-line
+    by Splunk, Elastic, Loki, jq, etc.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: D401
+        payload: dict[str, object] = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack"] = record.stack_info
+        # Pass through any ``extra={…}`` keys the caller supplied. Stringify
+        # non-JSON-serialisable values rather than dropping or crashing —
+        # SIEM ingestion is "best-effort lossless".
+        for key, value in record.__dict__.items():
+            if key in _STDLIB_LOG_RECORD_ATTRS or key in payload:
+                continue
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                value = repr(value)
+            payload[key] = value
+        return json.dumps(payload, separators=(",", ":"))
+
+
+#: Sentinel attribute used to identify root-logger handlers WE installed,
+#: so re-entrant calls can replace them without nuking coexisting handlers
+#: (pytest's caplog, structlog, library-supplied handlers, etc.).
+_RAMEN_HANDLER_TAG = "_ramen_cve_handler"
+
+
+def _install_logging(stream, level: int, fmt: str) -> None:
+    """Idempotently install root-logger handlers per ``fmt`` and ``level``.
+
+    ``fmt`` is ``"text"`` (the historical human-readable shape:
+    ``"LEVEL message"``) or ``"json"`` (one ``_JsonFormatter`` line per
+    record). ``stream`` is normally ``sys.stderr``; tests inject a buffer.
+
+    Only handlers tagged with :data:`_RAMEN_HANDLER_TAG` are removed, so
+    coexisting handlers — pytest's caplog, a downstream structlog handler,
+    a daemon's previous iteration — survive. The daemon's re-entrant
+    invocations therefore stay clean (one handler per format), while a
+    test's caplog still captures every record.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, _RAMEN_HANDLER_TAG, False):
+            root.removeHandler(handler)
+    handler = logging.StreamHandler(stream)
+    setattr(handler, _RAMEN_HANDLER_TAG, True)
+    if fmt == "json":
+        handler.setFormatter(_JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(level)
 
 
 # ---------------------------------------------------------------------------

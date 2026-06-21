@@ -12,6 +12,15 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- `--log-format {text,json}` top-level flag for SIEM ingestion. `text`
+  (default) preserves the historical `LEVEL message` stderr shape
+  byte-identically; `json` emits one JSON line per record (`ts`, `level`,
+  `logger`, `message`, plus any `extra={}` keys) — Splunk / Elastic / Loki
+  / jq-friendly. Wired through the YAML preset key `logging.format`. New
+  `_JsonFormatter` + `_install_logging` helpers in `cliutil` (stdlib-only;
+  zero new deps).
+- `--version` prints `ramen-cve <VERSION>` and exits 0 — referenced by the
+  bug-report template and CONTRIBUTING.
 - Multi-select `--format` SPEC: comma-separated combinations of `csv`, `md`,
   `stix`, `sigma`, `yara`, `html` (e.g. `--format csv,html`). `both` and
   `all` survive as aliases, so every legacy single-value spelling round-trips

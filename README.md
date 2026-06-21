@@ -267,6 +267,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included); suppresses every-run repeats |
 | `--digest` | off | Batch-mail a daily digest per asset owner (SMTP via env) |
 | `--quiet` / `--verbose` | off | Logging level |
+| `--log-format {text,json}` | `text` | Stderr log shape. `text` keeps the human-readable `LEVEL message` format; `json` emits one JSON line per record (`ts`, `level`, `logger`, `message`, plus any extras) for SIEM ingestion |
 
 Three top-level flags are valid before any subcommand: `--config NAME`,
 `--save-config NAME`, and `--list-configs`. See the next section.
