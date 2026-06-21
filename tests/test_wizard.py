@@ -496,6 +496,35 @@ def test_wizard_format_prompt_is_checkbox_offering_all_concrete_formats():
     assert src.count("checked=True") == 2
 
 
+def test_wizard_format_prompt_disambiguates_checkbox_markers():
+    """The checkbox prompt must explain its ● / ○ markers explicitly.
+
+    Regression lock for the UX fix: the bare "(space toggles, enter
+    confirms)" instruction did not say which marker meant selected vs.
+    unselected, which read ambiguously on dim/dark themes. The fix moves
+    the parenthetical out of the question into questionary's `instruction`
+    kwarg AND spells the legend out; it also opportunistically applies a
+    bold-green Style so the selected rows are perceptibly distinct.
+    """
+    import inspect
+
+    import ramen_cve
+
+    src = inspect.getsource(ramen_cve._run_wizard)
+    # Legend is present and explicit — both glyphs and their meanings.
+    assert "● = selected" in src
+    assert "○ = unselected" in src
+    # The legend lives in questionary's instruction kwarg, not jammed into
+    # the question text, so the wording renders in a distinct style.
+    assert "instruction" in src
+    # The Style application exists; even if a future questionary refactor
+    # ignores it, the legend in `instruction` still disambiguates.
+    assert "Style" in src
+    assert "selected" in src  # style token for ticked rows
+    # And the question text is the short, clean form — no parenthetical.
+    assert '"Output formats:"' in src
+
+
 # ---------------------------------------------------------------------------
 # --format multi-select spec: combos, aliases, validation, wizard checkbox
 # ---------------------------------------------------------------------------

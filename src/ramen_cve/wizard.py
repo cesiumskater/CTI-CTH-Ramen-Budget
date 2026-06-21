@@ -149,13 +149,25 @@ def _run_wizard() -> list[str]:
     ])
 
     # Multi-select checkbox: the user picks any combination of concrete
-    # formats (space toggles, enter confirms) instead of a fixed either/or
-    # list. csv + md start checked to match the historical "both" default;
-    # the selection is normalised to the canonical --format spec ("both",
-    # "all", or a comma combo like "csv,html") before it lands in argv.
-    fmt_selected = questionary.checkbox(
-        "Output formats (space toggles, enter confirms):",
-        choices=[
+    # formats. csv + md start checked to match the historical "both"
+    # default; the selection is normalised to the canonical --format spec
+    # ("both", "all", or a comma combo like "csv,html") before it lands in
+    # argv.
+    #
+    # UX: questionary's default ● (selected) and ○ (unselected) glyphs read
+    # ambiguously on some themes/fonts. Three layers disambiguate them:
+    #   1. The `instruction` text spells out the legend explicitly.
+    #   2. A Style that paints ticked rows bold green so the contrast is
+    #      perceptible at a glance.
+    #   3. The validator's error mentions "tick" not just "select", so the
+    #      remediation hint is consistent with the visual language.
+    # The style import is wrapped defensively — a future questionary
+    # refactor can break Style without breaking the wizard.
+    fmt_checkbox_kwargs: dict = {
+        "instruction": (
+            "(space toggles · enter confirms · ● = selected, ○ = unselected)"
+        ),
+        "choices": [
             questionary.Choice("csv — CVE spreadsheet (+ IOC sidecar)", value="csv", checked=True),
             questionary.Choice("md — Markdown triage report", value="md", checked=True),
             questionary.Choice("stix — STIX 2.1 bundle", value="stix"),
@@ -163,8 +175,21 @@ def _run_wizard() -> list[str]:
             questionary.Choice("yara — YARA rule stubs", value="yara"),
             questionary.Choice("html — CVSS x EPSS quadrant chart", value="html"),
         ],
-        validate=lambda sel: True if sel else "Select at least one format (space toggles).",
-    ).unsafe_ask()
+        "validate": (
+            lambda sel: True if sel else "Tick at least one format (space toggles, enter confirms)."
+        ),
+    }
+    try:
+        from questionary import Style as _QStyle
+        fmt_checkbox_kwargs["style"] = _QStyle([
+            ("highlighted", "bold"),
+            ("pointer", "fg:ansigreen bold"),
+            ("selected", "fg:ansigreen bold"),
+            ("instruction", "fg:ansibrightblack"),
+        ])
+    except Exception:  # pragma: no cover — defensive against API drift
+        pass
+    fmt_selected = questionary.checkbox("Output formats:", **fmt_checkbox_kwargs).unsafe_ask()
     # The validator blocks an empty confirm in real questionary; the fallback
     # keeps faked/odd prompt backends safe by restoring the default pair.
     argv.extend(["--format", _normalize_format_spec(set(fmt_selected or ("csv", "md")))])
