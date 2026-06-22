@@ -62,6 +62,8 @@ CSV_COLUMNS = [
     "diamond_victim",
     "ssvc_action",
     "ssvc_decision_points",
+    "affected_host_criticality",
+    "risk_score",
     "nvd_published",
     "enriched_at",
 ]
@@ -125,6 +127,8 @@ def write_csv(enriched: list[EnrichedCve], path: Path) -> None:
                             )
                         )
                     ),
+                    _csv_safe(rec.affected_host_criticality or ""),
+                    f"{rec.risk_score:.4f}" if rec.risk_score is not None else "",
                     _csv_safe(str(rec.nvd_published) if rec.nvd_published else ""),
                     _csv_safe(rec.enriched_at.isoformat()),
                 ]

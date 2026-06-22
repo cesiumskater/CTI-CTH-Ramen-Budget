@@ -298,6 +298,12 @@ from .pir import (  # noqa: F401
     load_pir,
     save_pir,
 )
+from .risk import (  # noqa: F401
+    CRITICALITY_TIERS,
+    apply_risk_scores,
+    compute_risk_score,
+    worst_criticality,
+)
 from .schedule import (  # noqa: F401
     _build_schedule_command,
     _emit_cron_line,
@@ -582,6 +588,11 @@ __all__ = [
     "apply_ssvc",
     "compute_ssvc",
     "normalize_profile",
+    # Risk-weighted prioritization
+    "CRITICALITY_TIERS",
+    "apply_risk_scores",
+    "compute_risk_score",
+    "worst_criticality",
 ]
 
 _log = logging.getLogger(__name__)

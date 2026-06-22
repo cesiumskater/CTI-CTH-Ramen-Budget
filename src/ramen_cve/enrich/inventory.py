@@ -9,6 +9,7 @@ import csv
 from pathlib import Path
 
 from ..models import EnrichedCve, OpmlError
+from ..risk import worst_criticality
 
 
 def load_inventory(path: Path) -> list[dict[str, str]]:
@@ -18,6 +19,9 @@ def load_inventory(path: Path) -> list[dict[str, str]]:
       - `cpe`: explicit CPE 2.3 string (skips product/version inference).
       - `owner`: an email address used by the --digest dispatcher to route
         per-asset patch summaries to the right recipient.
+      - `criticality`: tier1 / tier2 / tier3 (case-insensitive). Drives the
+        risk-weighted prioritization score (see src/ramen_cve/risk.py).
+        Empty / missing → treated as "no criticality data" (neutral weight).
     Raises OpmlError on missing or unreadable files.
     """
     if not path.exists():
@@ -34,6 +38,7 @@ def load_inventory(path: Path) -> list[dict[str, str]]:
                         "version": (r.get("version") or "").strip(),
                         "cpe": (r.get("cpe") or "").strip(),
                         "owner": (r.get("owner") or "").strip(),
+                        "criticality": (r.get("criticality") or "").strip().lower(),
                     }
                 )
     except OSError as exc:
@@ -75,10 +80,15 @@ def correlate_inventory(
 
     For each (cve, host) pair: if any of the CVE's CPEs matches the host's
     product+version (or its explicit cpe column), the host is added to
-    rec.affected_hosts. Returns the same list for chaining.
+    rec.affected_hosts. When the inventory carries a ``criticality`` column,
+    the most-critical tier across the matched hosts is recorded on
+    ``rec.affected_host_criticality`` (tier1 > tier2 > tier3); missing /
+    empty criticality cells contribute nothing to that pick. Returns the
+    same list for chaining.
     """
     for rec in enriched:
         hits: list[str] = []
+        host_tiers: list[str | None] = []
         for inv in inventory:
             host = inv["host"]
             if not host or host in hits:
@@ -86,7 +96,6 @@ def correlate_inventory(
             matched = False
             inv_cpe = inv.get("cpe") or ""
             if inv_cpe:
-                # Direct CPE compare: lowercase substring match against any rec CPE.
                 inv_cpe_l = inv_cpe.lower()
                 matched = any(inv_cpe_l in c.lower() or c.lower() in inv_cpe_l for c in rec.cpes)
             else:
@@ -96,6 +105,7 @@ def correlate_inventory(
                         break
             if matched:
                 hits.append(host)
+                host_tiers.append(inv.get("criticality") or None)
         rec.affected_hosts = hits
+        rec.affected_host_criticality = worst_criticality(host_tiers)
     return enriched
-

@@ -12,6 +12,18 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Risk-weighted prioritization.** The existing `--inventory` flag now
+  accepts an optional `criticality` column (`tier1` / `tier2` / `tier3`);
+  every CVE gets a `risk_score` computed as
+  `host_criticality_weight × cvss × (1 + 2·epss) × (10 if kev else 1)`.
+  Score is **always** populated (no inventory data → host weight collapses
+  to 1.0 so CVSS/EPSS/KEV still differentiate); two new CSV columns
+  (`affected_host_criticality`, `risk_score`) and a Markdown line per CVE.
+  The Markdown report **re-ranks CVEs *within* each bucket by risk_score
+  descending** — bucket boundaries unchanged, intra-bucket ordering now
+  surfaces "which one first?" at a glance. New `src/ramen_cve/risk.py`
+  (~80 LOC, stdlib only) re-exported on the façade. CSV column count
+  33 → 35.
 - **SSVC v2 (Stakeholder-Specific Vulnerability Categorization).** New
   `--ssvc-profile PATH` flag activates the CISA / CMU SEI Deployer-tree
   scoring alongside the existing CVSS×EPSS buckets. Each CVE gets an

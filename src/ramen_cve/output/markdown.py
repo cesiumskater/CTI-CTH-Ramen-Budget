@@ -223,6 +223,16 @@ def write_markdown(
         recs = by_bucket[bucket]
         if not recs:
             continue
+        # Re-rank within each bucket by risk_score (descending), so the
+        # CVE the analyst should patch *first within the bucket* surfaces
+        # at the top. The bucket boundaries themselves are unchanged —
+        # this is intra-bucket prioritisation only. Records with no
+        # risk_score (legacy / pre-correlation) sort last.
+        recs = sorted(
+            recs,
+            key=lambda r: (r.risk_score if r.risk_score is not None else -1.0),
+            reverse=True,
+        )
         lines += [f"## {policy.label(bucket)}", ""]
         for rec in recs:
             lines.append(f"### {rec.cve_id}")
@@ -270,6 +280,17 @@ def write_markdown(
                 lines.append(f"- **ATT&CK:** {techniques_display}")
             if rec.exploit_status and rec.exploit_status != "none":
                 lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
+            if rec.risk_score is not None:
+                # Risk-weighted prioritization: bucket-internal ranking
+                # signal. Always populated; the cell shows whichever crit-
+                # tier carried the heaviest affected host (or empty if no
+                # inventory data was supplied).
+                crit = (
+                    f" (host criticality `{rec.affected_host_criticality}`)"
+                    if rec.affected_host_criticality
+                    else ""
+                )
+                lines.append(f"- **Risk score:** `{rec.risk_score:.2f}`{crit}")
             if rec.ssvc_action:
                 # Surfaces only when --ssvc-profile populated the field; the
                 # decision points back the action up so an auditor can replay.

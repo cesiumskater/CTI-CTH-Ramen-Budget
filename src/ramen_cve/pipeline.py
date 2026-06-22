@@ -297,6 +297,15 @@ def _output(
                 stripped_ioc,
             )
 
+    # Risk-weighted prioritization — always on. Reads CVSS / EPSS / KEV
+    # (already populated) plus rec.affected_host_criticality (which
+    # correlate_inventory has filled in earlier when --inventory was
+    # supplied with a `criticality` column). With no inventory data the
+    # host-weight collapses to 1.0 so the score still differentiates by
+    # CVSS / EPSS / KEV — the field is never blank.
+    from .risk import apply_risk_scores
+    apply_risk_scores(enriched)
+
     # SSVC scoring (additive, opt-in via --ssvc-profile). Runs AFTER the
     # TLP filter so we don't waste cycles scoring records that won't be
     # written, BEFORE every writer so the new fields land in CSV / MD /

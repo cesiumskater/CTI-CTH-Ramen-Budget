@@ -62,6 +62,7 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.9757 (0.9997 pct)
 - **CWE:** CWE-502, CWE-917
 - **ATT&CK:** T1059 (Command and Scripting Interpreter), T1190 (Exploit Public-Facing Application)
+- **Risk score:** `295.13`
 - **Linked Actors:** [APT41](https://attack.mitre.org/groups/G0096/), [HAFNIUM](https://attack.mitre.org/groups/G1011/), [Aquatic Panda](https://attack.mitre.org/groups/G0143/)
 - **Linked Malware:** Cobalt Strike
 - **Affected in your environment:** 2 host(s) — web-prod-01, web-prod-02
@@ -84,6 +85,7 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.9432 (0.9901 pct)
 - **CWE:** CWE-918
 - **ATT&CK:** T1090 (Proxy), T1190 (Exploit Public-Facing Application)
+- **Risk score:** `28.29`
 - **Linked Actors:** [HAFNIUM](https://attack.mitre.org/groups/G1011/), [APT27](https://attack.mitre.org/groups/G0027/)
 - **Linked Malware:** China Chopper
 - **Affected in your environment:** 1 host(s) — mail-01
@@ -101,6 +103,7 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.6210 (0.9730 pct)
 - **CWE:** CWE-79
 - **ATT&CK:** T1059.007 (Command and Scripting Interpreter: JavaScript)
+- **Risk score:** `12.11`
 - **NVD Published:** 2024-03-19
 - **Source:** BleepingComputer
 
@@ -114,6 +117,7 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.0184 (0.7800 pct)
 - **CWE:** CWE-22
 - **ATT&CK:** T1083 (File and Directory Discovery)
+- **Risk score:** `8.50`
 - **Affected in your environment:** 1 host(s) — app-05
 - **NVD Published:** 2024-02-11
 - **Source:** BleepingComputer
@@ -128,6 +132,7 @@ EPSS threshold: `0.1`
 - **EPSS:** 0.0004 (0.0700 pct)
 - **CWE:** CWE-200
 - **ATT&CK:** T1083 (File and Directory Discovery)
+- **Risk score:** `4.30`
 - **NVD Published:** 2024-01-05
 - **Source:** BleepingComputer
 
