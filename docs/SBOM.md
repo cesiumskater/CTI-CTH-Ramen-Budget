@@ -65,7 +65,7 @@ Declared in `pyproject.toml` `[project.optional-dependencies] dev` and
 
 | Package | Resolved version | License | Purpose |
 | --- | --- | --- | --- |
-| pytest | 9.0.3 | MIT | 809-case test suite. |
+| pytest | 9.0.3 (range widened to <10) | MIT | 831-case test suite. |
 | ruff | 0.15.12 | MIT | Lint + import-sort gate (rules E,F,W,I,UP,B,SIM). |
 
 ---

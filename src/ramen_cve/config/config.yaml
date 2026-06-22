@@ -120,6 +120,11 @@ email:
 logging:
   # One of: quiet | normal | verbose
   level: normal
+  # One of: text | json
+  # 'text' (default) keeps the human-readable "LEVEL message" stderr shape.
+  # 'json' emits one JSON line per record (ts, level, logger, message, plus
+  # any extras) for ingestion by Splunk / Elastic / Loki / jq.
+  format: text
 
 # ----- Bucket policy (optional) -------------------------------------------
 # Customise the per-bucket display label, suggested-action prose, ordering,

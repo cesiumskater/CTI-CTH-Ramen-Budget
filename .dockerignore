@@ -1,0 +1,73 @@
+# Build-context exclusions — keep the layer small and avoid leaking dev
+# state into the image.
+
+# Local virtualenvs and toolchains.
+.venv/
+venv/
+env/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Compiled Python.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build outputs.
+build/
+dist/
+*.egg-info/
+
+# IDE / editor cruft.
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets and local config — defence in depth (also .gitignored).
+.env
+.env.local
+.env.*.local
+*.secret
+secrets.json
+secrets.yaml
+secrets.yml
+credentials.json
+credentials.yaml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime artefacts the image should generate fresh.
+.ramen-cache.db
+*.db
+ramen-cve-*.csv
+ramen-cve-*.md
+
+# Git internals — `docker build` doesn't need them.
+.git/
+.gitattributes
+.github/
+
+# CI / docs / examples we don't want inside the image.
+.claude/
+docs/
+examples/
+scripts/
+tests/
+tasks/
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+CODEOWNERS
+
+# Docker artefacts themselves shouldn't be in the context.
+Dockerfile
+docker-compose.yml
+.dockerignore

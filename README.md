@@ -152,6 +152,26 @@ Three equivalent entry points after install:
 authoritative dependency manifest is
 [`pyproject.toml`](pyproject.toml).
 
+### Docker
+
+If you'd rather not manage a Python toolchain, a multi-stage
+[`Dockerfile`](Dockerfile) ships in the repo. The image runs as a non-root
+user, mounts `/data` for the cache + per-run output, and exposes the
+`ramen-cve` console script as its entry-point.
+
+```bash
+docker build -t ramen-cve .                         # ~1 minute, one-off
+docker run --rm -v $PWD/data:/data ramen-cve --version
+
+# Run a triage straight from the image:
+docker run --rm -v $PWD/data:/data ramen-cve \
+    opml /data/feeds.opml --out-dir /data/out --format csv,html
+```
+
+`docker-compose.yml` provides one-shot and `--profile daemon` services with
+all API-key env-vars wired from a host-side `.env`. CI builds and
+smoke-tests the image on every push.
+
 ---
 
 ## API keys
@@ -267,6 +287,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included); suppresses every-run repeats |
 | `--digest` | off | Batch-mail a daily digest per asset owner (SMTP via env) |
 | `--quiet` / `--verbose` | off | Logging level |
+| `--log-format {text,json}` | `text` | Stderr log shape. `text` keeps the human-readable `LEVEL message` format; `json` emits one JSON line per record (`ts`, `level`, `logger`, `message`, plus any extras) for SIEM ingestion |
 
 Three top-level flags are valid before any subcommand: `--config NAME`,
 `--save-config NAME`, and `--list-configs`. See the next section.
@@ -426,6 +447,34 @@ ignoring a 6.5 in every exploit kit).
 The decision tree is flat by design — it fits in the analyst's head. Labels,
 thresholds, and action text are customisable per-bucket via the YAML
 `buckets:` block (see `config.yaml`). **KEV precedence is non-configurable.**
+
+---
+
+## Plugins
+
+Third-party output writers can extend `--format` without modifying core
+code. Authors publish a separate package whose `pyproject.toml` declares:
+
+```toml
+[project.entry-points."ramen_cve.writers"]
+jsonl = "my_ramen_writer:write_jsonl"
+```
+
+`ramen-cve` discovers installed plugins on the next invocation; the new
+token (`jsonl`) becomes a valid `--format` value (alone or in combos:
+`--format csv,jsonl`). A broken plugin logs a WARNING and is skipped —
+the rest of the pipeline runs unaffected.
+
+A reference plugin lives at
+[`examples/plugins/jsonl_writer/`](examples/plugins/jsonl_writer/) —
+install editable with `pip install -e examples/plugins/jsonl_writer`,
+then `ramen-cve cve CVE-2021-44228 --format jsonl --out-dir ./out`
+writes line-delimited JSON to `./out/ramen-cve-<ts>-jsonl.jsonl`. The
+[contract](src/ramen_cve/plugins.py) (`WRITER_CONTRACT`) is the
+stability boundary — see the plugin's README for the authoring walkthrough.
+
+Other extension points (parsers, enrichers, dispatchers, bucket
+policies) are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

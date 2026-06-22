@@ -29,6 +29,7 @@ from .cache import Cache
 from .cliutil import (
     _collect_opml_files,
     _format_spec,
+    _install_logging,
     _parse_iso_date,
     _path_arg,
     _validate_cve_id,
@@ -263,6 +264,14 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ramen_cve",
         description="Threat intel triage on a ramen budget.",
     )
+    # --version is the standard "what release am I running?" affordance for
+    # bug reports + scripts. Reads the same VERSION constant pyproject is
+    # gated against by tests/test_smoke.py.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"ramen-cve {VERSION}",
+    )
     # YAML configuration plumbing — top-level (works before any subcommand).
     parser.add_argument(
         "--config",
@@ -289,6 +298,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-configs",
         action="store_true",
         help="List every saved YAML preset and exit.",
+    )
+    # Structured logging — designed for SIEM ingestion. Default ``text`` keeps
+    # the historical "LEVEL message" stderr shape byte-identical; ``json``
+    # emits one JSON-line per record (ts, level, logger, message, +extras).
+    # Top-level so it works before any subcommand: `ramen-cve --log-format
+    # json opml feeds.opml`.
+    parser.add_argument(
+        "--log-format",
+        choices=["text", "json"],
+        default=None,
+        help=(
+            "Logging output shape on stderr. 'text' (default) keeps the human-"
+            "readable 'LEVEL message' format; 'json' emits one JSON line per "
+            "record (ts/level/logger/message + extras) for SIEM ingestion."
+        ),
     )
     parser.add_argument(
         "--reset-config",
@@ -571,10 +595,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
-    """Set log level from --quiet / --verbose flags.
+    """Set log level + format from --quiet / --verbose / --log-format.
 
     The hunt subcommand doesn't share the analysis flags, so we read them
-    defensively via getattr so logging works for every subcommand.
+    defensively via getattr so logging works for every subcommand. The
+    ``--log-format`` flag is top-level (any subcommand sees it) and
+    defaults to ``text`` so the historical stderr shape is preserved
+    byte-identically.
     """
     if getattr(args, "quiet", False):
         level = logging.WARNING
@@ -582,7 +609,8 @@ def _configure_logging(args: argparse.Namespace) -> None:
         level = logging.DEBUG
     else:
         level = logging.INFO
-    logging.basicConfig(level=level, stream=sys.stderr, format="%(levelname)s %(message)s")
+    log_format = getattr(args, "log_format", None) or "text"
+    _install_logging(sys.stderr, level, log_format)
 
 
 def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:

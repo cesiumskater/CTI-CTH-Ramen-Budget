@@ -231,6 +231,13 @@ def apply_yaml_config(args: argparse.Namespace, config: dict) -> None:
             args.quiet = True
         elif log_level == "verbose":
             args.verbose = True
+    # Logging format: YAML's logging.format maps to args.log_format only
+    # when --log-format was not passed on the CLI. Default "text" keeps the
+    # historical stderr shape byte-identical.
+    log_fmt = (config.get("logging") or {}).get("format")
+    if isinstance(log_fmt, str) and log_fmt in ("text", "json") \
+            and not getattr(args, "log_format", None):
+        args.log_format = log_fmt
 
     # Bucket policy: read the optional `buckets:` block via
     # `BucketPolicy.from_yaml` and stamp it on `args.bucket_policy`. An
