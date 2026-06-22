@@ -202,8 +202,15 @@ trust surface is enumerated in [`docs/SBOM.md`](docs/SBOM.md) §6.
 The fastest way in is the no-args **wizard** — `python threat_intel_hunter.py`
 walks you through every prompt, accepts quoted Windows paths and `~`, and
 lets you pick the output basename before any files are written. Output
-formats are a **checkbox list** (space toggles, enter confirms), so you can
-pick any combination — csv + md start ticked.
+formats are a **checkbox list** (space toggles, enter confirms; green =
+selected, red = unselected), so you can pick any combination — csv + md
+start ticked.
+
+**Made a mistake? Go back.** Every prompt is back-navigable: choose the
+`← back` row on a menu, or type **`select ..`** at a text/path prompt, to
+return to the previous question. Going back **hard-clears** that answer, so
+the prompt is re-asked fresh — no stale default to accidentally re-accept.
+`Ctrl-C` aborts the whole wizard.
 
 Eleven subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
 `pir`, `trend`, `audit`, `web`, `schedule`, and `daemon`.
