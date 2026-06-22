@@ -254,6 +254,19 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
             "path to disable adversary attribution."
         ),
     )
+    parser.add_argument(
+        "--ssvc-profile",
+        type=_path_arg,
+        metavar="PATH",
+        help=(
+            "Path to an SSVC (Stakeholder-Specific Vulnerability Categorization) "
+            "profile JSON. Activates SSVC v2 Deployer-tree scoring alongside the "
+            "existing buckets — populates ssvc_action (defer / scheduled / "
+            "out-of-cycle / immediate) and ssvc_decision_points in CSV + the "
+            "Markdown report. Omitting the flag keeps SSVC inert. Schema docs: "
+            "src/ramen_cve/ssvc.py."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 

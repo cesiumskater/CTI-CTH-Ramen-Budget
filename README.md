@@ -289,6 +289,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--inventory PATH` | none | CSV of `host,product,version,[cpe],[owner]` for asset correlation |
 | `--sector NAME` | none | Drop CVEs whose only attribution targets a *different* sector |
 | `--associations-file PATH` | bundled | Override the CVE→actor/malware lookup |
+| `--ssvc-profile PATH` | off | Activate **SSVC v2** (Stakeholder-Specific Vulnerability Categorization) Deployer-tree scoring alongside the existing buckets. JSON profile sets the org-specific decision points (mission_impact, safety_impact, value_density, exposure_default); see [`src/ramen_cve/ssvc.py`](src/ramen_cve/ssvc.py). Emits `ssvc_action` ∈ {`defer`, `scheduled`, `out-of-cycle`, `immediate`} in CSV + Markdown |
 | `--allow-tlp-red` | off | Permit writing TLP:RED records (otherwise stripped) |
 | `--dispatch` | off | Push per-finding alerts to Slack / generic webhook |
 | `--dispatch-on-delta-only` | off | With `--dispatch`, only push CVEs whose bucket *upgraded* since the previous run (first-seen included); suppresses every-run repeats |
@@ -493,7 +494,7 @@ A single run can produce up to eight artefact types. Pick what you want with
 
 | Artefact | Trigger | Shape |
 | --- | --- | --- |
-| CVE CSV | `csv` / `both` / `all` | One row per CVE, 31 columns; UTF-8 BOM for Excel, formula-injection neutralised |
+| CVE CSV | `csv` / `both` / `all` | One row per CVE, 33 columns; UTF-8 BOM for Excel, formula-injection neutralised |
 | IOC CSV | (when IOCs found) | One row per non-CVE indicator |
 | EPSS trajectory CSV | (when `--date-mode epss` spans >1 day) | One row per `(cve_id, date)` |
 | Markdown report | `md` / `both` / `all` | Bucket sections + ATT&CK cross-tab + Linked Adversaries + Affected Hosts + sparklines |

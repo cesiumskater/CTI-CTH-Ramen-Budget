@@ -12,6 +12,18 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **SSVC v2 (Stakeholder-Specific Vulnerability Categorization).** New
+  `--ssvc-profile PATH` flag activates the CISA / CMU SEI Deployer-tree
+  scoring alongside the existing CVSS×EPSS buckets. Each CVE gets an
+  `ssvc_action` (`defer` / `scheduled` / `out-of-cycle` / `immediate`)
+  and the four decision-point values that justify it. Surfaces in the
+  CSV (two new columns → 33 total) and the Markdown report. The
+  profile JSON parameterises the org-specific values
+  (`mission_impact`, `safety_impact`, `value_density`,
+  `exposure_default`); unknown keys flow through for forward-compat,
+  bad values fall back to safe defaults. New `src/ramen_cve/ssvc.py`
+  (~230 LOC, stdlib only) exposes `compute_ssvc`, `apply_ssvc`,
+  `normalize_profile`, and the SSVC value sets on the façade.
 - **MITRE ATT&CK Navigator export.** New `--format navigator` writer emits
   an `*.attack-layer.json` file the analyst drops straight into
   [Navigator](https://mitre-attack.github.io/attack-navigator/) — every

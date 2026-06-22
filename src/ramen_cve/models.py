@@ -327,4 +327,10 @@ class EnrichedCve:
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
 
+    # SSVC v2 (Deployer tree) — populated when --ssvc-profile is loaded; stays
+    # None / empty otherwise, so the column is empty for analysts who don't
+    # opt in. See src/ramen_cve/ssvc.py.
+    ssvc_action: str | None = None
+    ssvc_decision_points: dict[str, str] = field(default_factory=dict)
+
     enriched_at: datetime = field(default_factory=lambda: _utcnow())

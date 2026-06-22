@@ -307,6 +307,16 @@ from .schedule import (  # noqa: F401
     _quote_for_task_scheduler,
     _run_schedule,
 )
+from .ssvc import (  # noqa: F401
+    EXPLOITATION_VALUES,
+    EXPOSURE_VALUES,
+    HUMAN_IMPACT_VALUES,
+    SSVC_ACTIONS,
+    UTILITY_VALUES,
+    apply_ssvc,
+    compute_ssvc,
+    normalize_profile,
+)
 from .trend import (  # noqa: F401
     _SPARKLINE_CHARS,
     _record_runs,
@@ -563,6 +573,15 @@ __all__ = [
     "write_sigma_stubs",
     "write_stix",
     "write_yara_stubs",
+    # SSVC
+    "EXPLOITATION_VALUES",
+    "EXPOSURE_VALUES",
+    "HUMAN_IMPACT_VALUES",
+    "SSVC_ACTIONS",
+    "UTILITY_VALUES",
+    "apply_ssvc",
+    "compute_ssvc",
+    "normalize_profile",
 ]
 
 _log = logging.getLogger(__name__)

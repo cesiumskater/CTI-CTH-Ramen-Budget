@@ -270,6 +270,18 @@ def write_markdown(
                 lines.append(f"- **ATT&CK:** {techniques_display}")
             if rec.exploit_status and rec.exploit_status != "none":
                 lines.append(f"- **Exploit Status:** `{rec.exploit_status}`")
+            if rec.ssvc_action:
+                # Surfaces only when --ssvc-profile populated the field; the
+                # decision points back the action up so an auditor can replay.
+                points = ", ".join(
+                    f"{k}={v}" for k, v in sorted(
+                        (rec.ssvc_decision_points or {}).items()
+                    )
+                )
+                lines.append(
+                    f"- **SSVC:** `{rec.ssvc_action}`"
+                    + (f"  ({points})" if points else "")
+                )
             if rec.linked_actors:
                 actors_disp = ", ".join(
                     f"[{_md_safe(a.name)}]({a.url})" if a.url else _md_safe(a.name)
