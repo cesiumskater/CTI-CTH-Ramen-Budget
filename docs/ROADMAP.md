@@ -51,8 +51,9 @@ The current pick order, ranked by impact-to-effort:
    optional `criticality` column; emit `risk_score`.
 3. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside the
    Sigma stubs.
-4. **MITRE ATT&CK Navigator export** — drop a `layer.json` straight into
-   the public Navigator. High-leverage, low-cost.
+4. ~~**MITRE ATT&CK Navigator export**~~ — shipped as `--format
+   navigator`; drop the emitted `*.attack-layer.json` into the public
+   Navigator and CVE-touched techniques light up the matrix.
 5. **Plugin system** — entry-point–discovered parsers, enrichers, output
    writers, and dispatchers. The right shape for community contribution
    to grow without bloating the core. An example plugin under

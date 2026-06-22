@@ -1,0 +1,173 @@
+"""ramen_cve.output.navigator — MITRE ATT&CK Navigator layer JSON.
+
+Exports the EnrichedCve set as a Navigator layer (`.attack-layer.json`):
+the analyst drops the file into https://mitre-attack.github.io/attack-navigator/
+and sees every technique their triaged CVEs touch coloured on the matrix.
+Higher-priority buckets get hotter colours; the tooltip on each technique
+lists the contributing CVE IDs and the worst bucket among them.
+
+Layer-3 serialization, offline, stdlib only. Deterministic: same enriched
+input + same metadata → byte-identical JSON.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from ..models import EnrichedCve
+
+#: Navigator layer schema we target. v4.5 is the current stable schema
+#: (Navigator 5.x reads it natively).
+_LAYER_VERSIONS = {"layer": "4.5", "navigator": "5.1.0", "attack": "16"}
+
+#: Per-bucket score on the heatmap (Navigator scales colours across this
+#: range). Higher = patch-sooner; KEV is hottest.
+_BUCKET_SCORE = {
+    "kev_override": 100,
+    "patch_now": 75,
+    "plan_and_patch": 50,
+    "watch_closely": 25,
+    "deprioritize": 10,
+    "unknown": 0,
+}
+
+#: Bucket-rank ordering for picking the "worst" bucket per technique.
+_BUCKET_RANK = {b: i for i, b in enumerate(_BUCKET_SCORE)}
+
+
+def _worst_bucket(buckets: list[str]) -> str:
+    """Return the highest-priority bucket from a list (lowest rank = worst)."""
+    return min(buckets, key=lambda b: _BUCKET_RANK.get(b, len(_BUCKET_RANK)))
+
+
+def _technique_id(token: str) -> tuple[str, str | None]:
+    """Split an ATT&CK technique token into ``(techniqueID, subtechniqueID)``.
+
+    Navigator's layer schema wants the *parent* technique in ``techniqueID``
+    and sets a separate row for sub-techniques. ``"T1059.001"`` → ``("T1059",
+    "T1059.001")``; ``"T1190"`` → ``("T1190", None)``. Anything that doesn't
+    parse as a valid technique is dropped silently — the source mappings
+    are heuristic and a stale token shouldn't crash a triage.
+    """
+    raw = (token or "").strip().upper()
+    if not raw.startswith("T") or not raw[1:].replace(".", "").isdigit():
+        return ("", None)
+    if "." in raw:
+        parent = raw.split(".", 1)[0]
+        return (parent, raw)
+    return (raw, None)
+
+
+def build_navigator_layer(
+    records: list[EnrichedCve],
+    *,
+    run_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Pure function: convert enriched CVEs to a Navigator layer dict.
+
+    The dict is JSON-serialisable as-is. Separated from :func:`write_navigator`
+    so tests can inspect the shape without touching the filesystem.
+    """
+    run_metadata = run_metadata or {}
+    # Aggregate by parent technique. Each entry tracks the CVE IDs that
+    # contributed and every bucket they fell into, so the tooltip can show
+    # provenance and the score can pick the worst bucket.
+    by_parent: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        for raw in rec.attack_techniques or []:
+            parent, full = _technique_id(raw)
+            if not parent:
+                continue
+            slot = by_parent.setdefault(parent, {"cves": [], "buckets": [], "subs": set()})
+            slot["cves"].append(rec.cve_id)
+            slot["buckets"].append(rec.bucket or "unknown")
+            if full and full != parent:
+                slot["subs"].add(full)
+
+    techniques: list[dict[str, Any]] = []
+    # Sort the per-parent entries (deterministic byte output); same for the
+    # CVE list per row.
+    for parent in sorted(by_parent):
+        slot = by_parent[parent]
+        cves_unique = sorted(set(slot["cves"]))
+        worst = _worst_bucket(slot["buckets"])
+        score = _BUCKET_SCORE.get(worst, 0)
+        comment = (
+            f"{len(cves_unique)} CVE(s) — worst bucket: {worst}\n"
+            + "\n".join(cves_unique)
+        )
+        techniques.append(
+            {
+                "techniqueID": parent,
+                "score": score,
+                "comment": comment,
+                "enabled": True,
+            }
+        )
+        for sub in sorted(slot["subs"]):
+            techniques.append(
+                {
+                    "techniqueID": sub,
+                    "score": score,
+                    "comment": comment,
+                    "enabled": True,
+                }
+            )
+
+    # Colour gradient: deprioritize → KEV. Picked so red ≠ deprioritize (which
+    # would invert the visual language of the wizard) — KEV is the deepest
+    # red. The Navigator interpolates between stops linearly across the
+    # gradient over the [minValue, maxValue] range.
+    gradient = {
+        "colors": ["#d4eed4", "#ffe28a", "#ff9b3c", "#e63946", "#7a0010"],
+        "minValue": 0,
+        "maxValue": 100,
+    }
+
+    layer: dict[str, Any] = {
+        "name": "ramen-cve triage",
+        "description": (
+            "Generated by ramen-cve "
+            f"v{run_metadata.get('version', '0.0')}"
+        ),
+        "domain": "enterprise-attack",
+        "versions": _LAYER_VERSIONS,
+        "sorting": 3,                    # Navigator: sort by score desc
+        "showTacticRowBackground": False,
+        "tacticRowBackground": "#dddddd",
+        "selectTechniquesAcrossTactics": True,
+        "selectSubtechniquesWithParent": False,
+        "gradient": gradient,
+        "legendItems": [
+            {"label": "KEV override", "color": "#7a0010"},
+            {"label": "Patch now",    "color": "#e63946"},
+            {"label": "Plan & patch", "color": "#ff9b3c"},
+            {"label": "Watch closely","color": "#ffe28a"},
+            {"label": "Deprioritize", "color": "#d4eed4"},
+        ],
+        "techniques": techniques,
+    }
+    return layer
+
+
+def write_navigator(
+    records: list[EnrichedCve],
+    path: Path,
+    *,
+    run_metadata: dict[str, Any] | None = None,
+) -> Path:
+    """Write the Navigator layer to ``path``.
+
+    Returns the path written. JSON is dumped with sorted keys + 2-space
+    indent so a diff across runs reads cleanly and the byte-oracle stays
+    happy. Empty layers (no ATT&CK techniques mapped) are still written —
+    Navigator will just show an unhighlighted matrix.
+    """
+    layer = build_navigator_layer(records, run_metadata=run_metadata)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(layer, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path

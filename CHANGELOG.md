@@ -12,6 +12,17 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **MITRE ATT&CK Navigator export.** New `--format navigator` writer emits
+  an `*.attack-layer.json` file the analyst drops straight into
+  [Navigator](https://mitre-attack.github.io/attack-navigator/) — every
+  ATT&CK technique a triaged CVE touches lights up on the matrix,
+  heat-mapped by the worst bucket among the CVEs that point at it.
+  Aggregates parent + sub-techniques per Navigator's schema, lists the
+  contributing CVE IDs in each cell's tooltip, drops unparseable
+  technique tokens silently (fail-soft for heuristic CWE→ATT&CK
+  mappings), and produces byte-deterministic JSON. Stdlib only; the
+  `build_navigator_layer` pure function + `write_navigator` are
+  re-exported on the façade for plugin / library use.
 - **Back-navigable wizard.** Every wizard prompt can now return to the
   previous question: choose the `← back` row on a menu, or type
   `select ..` at a text/path prompt. Going back **hard-clears** that

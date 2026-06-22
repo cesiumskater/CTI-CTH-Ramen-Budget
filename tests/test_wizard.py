@@ -499,7 +499,8 @@ def test_wizard_all_format_round_trips(tmp_path):
         "7.0", "0.10",
         "",                   # basename
         str(tmp_path),
-        ["csv", "md", "stix", "sigma", "yara", "html"],   # every box ticked → "all"
+        # every concrete format ticked → normalises to "all"
+        ["csv", "md", "stix", "sigma", "yara", "html", "navigator"],
         False, "normal",
     ]
     fake_q = _make_questionary(answers)
@@ -785,7 +786,7 @@ def test_format_spec_combo_normalisation():
     # Combos that equal an alias collapse to the alias.
     assert parse_fmt("csv,md") == "both"
     assert parse_fmt("md,csv") == "both"
-    assert parse_fmt("csv,md,stix,sigma,yara,html") == "all"
+    assert parse_fmt("csv,md,stix,sigma,yara,html,navigator") == "all"
     # Aliases union with extra tokens.
     assert parse_fmt("all,csv") == "all"
     assert parse_fmt("both,html") == "csv,md,html"

@@ -247,6 +247,10 @@ from .output.markdown import (  # noqa: F401
     _summarize_enrichment,
     write_markdown,
 )
+from .output.navigator import (  # noqa: F401
+    build_navigator_layer,
+    write_navigator,
+)
 from .output.sigma import (  # noqa: F401
     SIGMA_ELIGIBLE_BUCKETS,
     _build_sigma_stub,
@@ -553,6 +557,8 @@ __all__ = [
     "write_epss_trajectory_csv",
     "write_iocs_csv",
     "write_markdown",
+    "write_navigator",
+    "build_navigator_layer",
     "write_quadrant_html",
     "write_sigma_stubs",
     "write_stix",

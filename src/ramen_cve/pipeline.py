@@ -21,6 +21,7 @@ from .models import EnrichedCve, IocRecord, OpmlError, _utcnow
 from .output.csv_writer import write_csv, write_epss_trajectory_csv
 from .output.html_quadrant import write_quadrant_html
 from .output.markdown import write_markdown
+from .output.navigator import write_navigator
 from .output.sigma import write_sigma_stubs
 from .output.stix import write_iocs_csv, write_stix
 from .output.yara import write_yara_stubs
@@ -275,6 +276,7 @@ def _output(
     paths: dict[str, Path | None] = {
         "csv": None, "iocs_csv": None, "epss_trajectory_csv": None, "md": None,
         "stix": None, "sigma_dir": None, "yara_dir": None, "html": None,
+        "navigator": None,
     }
 
     if _format_includes(args.format, "csv"):
@@ -365,6 +367,18 @@ def _output(
         write_quadrant_html(enriched, html_path, metadata)
         print(str(html_path))
         paths["html"] = html_path
+
+    if _format_includes(args.format, "navigator"):
+        # `<basename>.attack-layer.json` so the extension reads as ATT&CK
+        # Navigator to anyone in a file picker (the layer JSON spec
+        # recognises any *.json — the dual suffix is convention, not strict).
+        nav_path = _unique_output_path(
+            out_dir, ts, "attack-layer.json", basename=basename
+        )
+        _log.info("Writing ATT&CK Navigator layer → %s", nav_path)
+        write_navigator(enriched, nav_path, run_metadata=metadata)
+        print(str(nav_path))
+        paths["navigator"] = nav_path
 
     # Third-party plugin writers (entry-point group ramen_cve.writers).
     # Discovered lazily — calling discover_writers() with no plugins

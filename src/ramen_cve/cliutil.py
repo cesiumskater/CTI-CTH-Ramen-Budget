@@ -141,7 +141,7 @@ def _collect_opml_files(path: Path) -> list[Path]:
 
 #: Concrete output formats in canonical writer order — combos normalise to
 #: this order, matching the writer blocks in pipeline._output.
-FORMAT_TOKENS: tuple[str, ...] = ("csv", "md", "stix", "sigma", "yara", "html")
+FORMAT_TOKENS: tuple[str, ...] = ("csv", "md", "stix", "sigma", "yara", "html", "navigator")
 
 #: Legacy single-choice aliases, accepted anywhere a concrete token is.
 _FORMAT_ALIASES: dict[str, tuple[str, ...]] = {
