@@ -12,6 +12,30 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Risk-weighted prioritization.** The existing `--inventory` flag now
+  accepts an optional `criticality` column (`tier1` / `tier2` / `tier3`);
+  every CVE gets a `risk_score` computed as
+  `host_criticality_weight × cvss × (1 + 2·epss) × (10 if kev else 1)`.
+  Score is **always** populated (no inventory data → host weight collapses
+  to 1.0 so CVSS/EPSS/KEV still differentiate); two new CSV columns
+  (`affected_host_criticality`, `risk_score`) and a Markdown line per CVE.
+  The Markdown report **re-ranks CVEs *within* each bucket by risk_score
+  descending** — bucket boundaries unchanged, intra-bucket ordering now
+  surfaces "which one first?" at a glance. New `src/ramen_cve/risk.py`
+  (~80 LOC, stdlib only) re-exported on the façade. CSV column count
+  33 → 35.
+- **SSVC v2 (Stakeholder-Specific Vulnerability Categorization).** New
+  `--ssvc-profile PATH` flag activates the CISA / CMU SEI Deployer-tree
+  scoring alongside the existing CVSS×EPSS buckets. Each CVE gets an
+  `ssvc_action` (`defer` / `scheduled` / `out-of-cycle` / `immediate`)
+  and the four decision-point values that justify it. Surfaces in the
+  CSV (two new columns → 33 total) and the Markdown report. The
+  profile JSON parameterises the org-specific values
+  (`mission_impact`, `safety_impact`, `value_density`,
+  `exposure_default`); unknown keys flow through for forward-compat,
+  bad values fall back to safe defaults. New `src/ramen_cve/ssvc.py`
+  (~230 LOC, stdlib only) exposes `compute_ssvc`, `apply_ssvc`,
+  `normalize_profile`, and the SSVC value sets on the façade.
 - **MITRE ATT&CK Navigator export.** New `--format navigator` writer emits
   an `*.attack-layer.json` file the analyst drops straight into
   [Navigator](https://mitre-attack.github.io/attack-navigator/) — every

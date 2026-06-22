@@ -99,6 +99,30 @@ def _resolve_associations(args: argparse.Namespace) -> dict[str, dict[str, list]
     return load_associations(args.associations_file)
 
 
+def _maybe_apply_ssvc(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
+    """If --ssvc-profile is set, populate ssvc_action + ssvc_decision_points.
+
+    Inert unless the flag was passed. A missing / malformed profile JSON
+    logs a WARNING and the run continues without SSVC populated — same
+    fail-soft pattern as every network fetcher; SSVC is auxiliary, not
+    load-bearing.
+    """
+    import json as _json
+
+    from .ssvc import apply_ssvc
+
+    profile_path = getattr(args, "ssvc_profile", None)
+    if profile_path is None:
+        return
+    try:
+        raw = _json.loads(Path(profile_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        _log.warning("Skipping SSVC: profile %r unreadable (%s)", str(profile_path), exc)
+        return
+    apply_ssvc(enriched, raw if isinstance(raw, dict) else None)
+    _log.info("SSVC applied to %d CVE(s) using profile %s", len(enriched), profile_path)
+
+
 def _maybe_dispatch(args: argparse.Namespace, enriched: list[EnrichedCve]) -> None:
     """If --dispatch is set, push high-priority records to configured dispatchers.
 
@@ -272,6 +296,21 @@ def _output(
                 stripped_cve,
                 stripped_ioc,
             )
+
+    # Risk-weighted prioritization — always on. Reads CVSS / EPSS / KEV
+    # (already populated) plus rec.affected_host_criticality (which
+    # correlate_inventory has filled in earlier when --inventory was
+    # supplied with a `criticality` column). With no inventory data the
+    # host-weight collapses to 1.0 so the score still differentiates by
+    # CVSS / EPSS / KEV — the field is never blank.
+    from .risk import apply_risk_scores
+    apply_risk_scores(enriched)
+
+    # SSVC scoring (additive, opt-in via --ssvc-profile). Runs AFTER the
+    # TLP filter so we don't waste cycles scoring records that won't be
+    # written, BEFORE every writer so the new fields land in CSV / MD /
+    # STIX / Web UI consistently.
+    _maybe_apply_ssvc(args, enriched)
 
     paths: dict[str, Path | None] = {
         "csv": None, "iocs_csv": None, "epss_trajectory_csv": None, "md": None,

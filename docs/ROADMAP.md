@@ -45,10 +45,13 @@ ranks highest in
 [`docs/cti-capability-gap-analysis-v2.md`](cti-capability-gap-analysis-v2.md).
 The current pick order, ranked by impact-to-effort:
 
-1. **SSVC decision tree** (CISA/CMU). Additive — runs alongside the
-   existing buckets. Auditor-recognised output.
-2. **Risk-weighted prioritization** — extend `--inventory` with an
-   optional `criticality` column; emit `risk_score`.
+1. ~~**SSVC decision tree**~~ (CISA/CMU) — shipped as `--ssvc-profile`;
+   Deployer-tree scoring runs alongside the existing buckets and emits
+   `ssvc_action` + four decision points in CSV + Markdown.
+2. ~~**Risk-weighted prioritization**~~ — shipped. `--inventory` accepts
+   an optional `criticality` column; `risk_score` is always populated
+   (degrades gracefully without inventory data) and re-ranks CVEs within
+   each bucket in the Markdown report.
 3. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside the
    Sigma stubs.
 4. ~~**MITRE ATT&CK Navigator export**~~ — shipped as `--format

@@ -298,6 +298,12 @@ from .pir import (  # noqa: F401
     load_pir,
     save_pir,
 )
+from .risk import (  # noqa: F401
+    CRITICALITY_TIERS,
+    apply_risk_scores,
+    compute_risk_score,
+    worst_criticality,
+)
 from .schedule import (  # noqa: F401
     _build_schedule_command,
     _emit_cron_line,
@@ -306,6 +312,16 @@ from .schedule import (  # noqa: F401
     _parse_schedule_time,
     _quote_for_task_scheduler,
     _run_schedule,
+)
+from .ssvc import (  # noqa: F401
+    EXPLOITATION_VALUES,
+    EXPOSURE_VALUES,
+    HUMAN_IMPACT_VALUES,
+    SSVC_ACTIONS,
+    UTILITY_VALUES,
+    apply_ssvc,
+    compute_ssvc,
+    normalize_profile,
 )
 from .trend import (  # noqa: F401
     _SPARKLINE_CHARS,
@@ -563,6 +579,20 @@ __all__ = [
     "write_sigma_stubs",
     "write_stix",
     "write_yara_stubs",
+    # SSVC
+    "EXPLOITATION_VALUES",
+    "EXPOSURE_VALUES",
+    "HUMAN_IMPACT_VALUES",
+    "SSVC_ACTIONS",
+    "UTILITY_VALUES",
+    "apply_ssvc",
+    "compute_ssvc",
+    "normalize_profile",
+    # Risk-weighted prioritization
+    "CRITICALITY_TIERS",
+    "apply_risk_scores",
+    "compute_risk_score",
+    "worst_criticality",
 ]
 
 _log = logging.getLogger(__name__)

@@ -327,4 +327,18 @@ class EnrichedCve:
     bucket: str = "unknown"
     suggested_action: str = BUCKET_ACTIONS["unknown"]
 
+    # SSVC v2 (Deployer tree) — populated when --ssvc-profile is loaded; stays
+    # None / empty otherwise, so the column is empty for analysts who don't
+    # opt in. See src/ramen_cve/ssvc.py.
+    ssvc_action: str | None = None
+    ssvc_decision_points: dict[str, str] = field(default_factory=dict)
+
+    # Risk-weighted prioritization (--inventory carrying a `criticality` column).
+    # `affected_host_criticality` is the most-critical tier across the
+    # rec.affected_hosts list (tier1 > tier2 > tier3); `risk_score` is the
+    # computed weight (see src/ramen_cve/risk.py). Both stay None when
+    # inventory has no criticality column.
+    affected_host_criticality: str | None = None
+    risk_score: float | None = None
+
     enriched_at: datetime = field(default_factory=lambda: _utcnow())
