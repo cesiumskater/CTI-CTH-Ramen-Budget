@@ -12,6 +12,16 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Back-navigable wizard.** Every wizard prompt can now return to the
+  previous question: choose the `← back` row on a menu, or type
+  `select ..` at a text/path prompt. Going back **hard-clears** that
+  answer, so the prompt is re-asked fresh (no pre-filled default, nothing
+  pre-checked) — a stale value can't be accidentally re-submitted.
+  Internally `_run_wizard` became a small step state machine over an
+  ordered table, with a pure `_build_argv(answers)` that produces the
+  same argv the previous linear wizard did. The three yes/no prompts are
+  now menus (so they can host the back row), and EPSS date mode skips the
+  redundant "restrict to a window?" question.
 - **Plugin system (writers).** Third-party output writers register via the
   `[project.entry-points."ramen_cve.writers"]` group; ramen-cve discovers
   them on the next run, accepts the plugin's token in `--format`

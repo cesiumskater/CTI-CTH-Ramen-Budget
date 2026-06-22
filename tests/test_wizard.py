@@ -28,6 +28,39 @@ def _make_questionary(answers: list):
     return fake
 
 
+def _make_recording_questionary(answers: list):
+    """Like _make_questionary, but records each prompt call so back-navigation
+    tests can assert on the kwargs (defaults, choices) per call.
+
+    Returns ``(fake, calls)`` where each ``calls`` entry is
+    ``{"method", "args", "kwargs"}``. Choice() returns a 4-tuple
+    ``("choice", label, value, checked)`` so the recorded ``choices=`` kwarg is
+    inspectable (e.g. to confirm a ← back row is/ isn't offered).
+    """
+    queue = list(answers)
+    calls: list[dict] = []
+
+    def _make(method: str):
+        def _fn(*args, **kwargs):
+            calls.append({"method": method, "args": args, "kwargs": kwargs})
+            prompt = MagicMock()
+            prompt.unsafe_ask.return_value = queue.pop(0)
+            return prompt
+
+        return _fn
+
+    fake = MagicMock()
+    fake.select.side_effect = _make("select")
+    fake.text.side_effect = _make("text")
+    fake.path.side_effect = _make("path")
+    fake.confirm.side_effect = _make("confirm")
+    fake.checkbox.side_effect = _make("checkbox")
+    fake.Choice.side_effect = (
+        lambda label, value=None, checked=False: ("choice", label, value, checked)
+    )
+    return fake, calls
+
+
 def test_wizard_opml_full_flow(tmp_path):
     """Wizard for OPML mode emits an argv list parseable by build_parser."""
     import ramen_cve
@@ -150,8 +183,8 @@ def test_wizard_epss_mode_forces_single_date():
         False,
         "CVE-2021-44228",
         "epss",
-        # apply_window prompt SKIPPED because epss mode auto-asks for snapshot
-        False,
+        # No apply_window prompt: epss mode skips the window yes/no and asks
+        # the single snapshot date directly.
         "2024-06-01",        # snapshot date
         "7.0",
         "0.10",
@@ -482,18 +515,22 @@ def test_wizard_format_prompt_is_checkbox_offering_all_concrete_formats():
     formats, with no 'both' / 'all' pseudo-entries cluttering the list."""
     import inspect
 
-    import ramen_cve
+    from ramen_cve import wizard
 
-    src = inspect.getsource(ramen_cve._run_wizard)
-    assert "questionary.checkbox" in src
+    src = inspect.getsource(wizard._ask_format)
+    assert "q.checkbox" in src
     for token in ("csv", "md", "stix", "sigma", "yara", "html"):
         assert f'value="{token}"' in src
     # 'both' must no longer be a visible choice (it survives only as the
     # normalised spec the wizard emits when exactly csv+md are ticked).
     assert 'value="both"' not in src
     assert 'value="all"' not in src
-    # csv + md start checked — the historical "both" default.
-    assert src.count("checked=True") == 2
+    # csv + md start checked on a fresh ask — the historical "both" default.
+    # checked=fresh means: pre-checked on first ask, nothing pre-checked when
+    # the prompt is revisited after a back (hard-clear). Exactly csv + md.
+    assert 'value="csv", checked=fresh' in src
+    assert 'value="md", checked=fresh' in src
+    assert src.count("checked=fresh") == 2
 
 
 def test_wizard_format_prompt_disambiguates_checkbox_markers():
@@ -510,9 +547,9 @@ def test_wizard_format_prompt_disambiguates_checkbox_markers():
     """
     import inspect
 
-    import ramen_cve
+    from ramen_cve import wizard
 
-    src = inspect.getsource(ramen_cve._run_wizard)
+    src = inspect.getsource(wizard._ask_format)
     # The legend describes the colour semantics (which match the render),
     # not the glyphs (which can't be individually tinted in one style line).
     assert "green = selected" in src
@@ -528,6 +565,195 @@ def test_wizard_format_prompt_disambiguates_checkbox_markers():
     assert '("text"' in src      # unchecked-row token → red
     # And the question text is the short, clean form — no parenthetical.
     assert '"Output formats:"' in src
+
+
+# ---------------------------------------------------------------------------
+# Back navigation + hard-clear (step state machine)
+# ---------------------------------------------------------------------------
+
+
+def test_wizard_back_via_text_sentinel_hard_clears_and_re_enters(tmp_path):
+    """Typing 'select ..' at a text prompt returns to the previous question,
+    which is hard-cleared and re-asked; the corrected value lands in argv and
+    the abandoned value never leaks."""
+    import ramen_cve
+
+    answers = [
+        "cve",                 # mode
+        False,                 # from_file?
+        "CVE-2021-44228",      # cve list
+        "feed",                # date_mode
+        False,                 # apply_window?
+        "9.9",                 # cvss — first answer, to be abandoned
+        "select ..",           # epss prompt → BACK to cvss
+        "8.8",                 # cvss re-asked fresh — corrected
+        "0.50",                # epss re-asked
+        "",                    # basename
+        str(tmp_path),         # out_dir
+        ["csv"],               # format
+        False,                 # no-cache?
+        "normal",              # verbosity
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.cvss_threshold == 8.8        # corrected, not 9.9
+    assert args.epss_threshold == 0.50
+    assert "9.9" not in argv                 # the abandoned value is gone
+
+
+def test_wizard_back_via_menu_choice_hard_clears(tmp_path):
+    """Choosing the ← back row on a menu returns to the previous question and
+    hard-clears it — the abandoned menu answer doesn't persist."""
+    import ramen_cve
+    from ramen_cve.wizard import _BACK
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10", "", str(tmp_path), ["csv"],
+        True,                  # no-cache? YES — first answer, abandoned
+        _BACK,                 # verbosity menu → ← back to no-cache
+        False,                 # no-cache re-asked → NO
+        "quiet",               # verbosity
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.no_cache is False            # re-answered No; earlier Yes gone
+    assert "--no-cache" not in argv
+    assert args.quiet is True
+
+
+def test_wizard_back_switches_branch_cleanly(tmp_path):
+    """Backing out of a branch and choosing differently re-routes the flow; the
+    abandoned branch's answer never reaches argv."""
+    import ramen_cve
+
+    answers = [
+        "cve",                 # mode
+        True,                  # from_file? YES
+        "select ..",           # file-path prompt → BACK to from_file
+        False,                 # from_file re-asked → NO (switch branch)
+        "CVE-2021-44228",      # the inline cve list now applies
+        "feed", False,
+        "7.0", "0.10", "", str(tmp_path), ["csv"], False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+
+    assert "--from-file" not in argv         # abandoned branch is gone
+    assert "CVE-2021-44228" in argv
+    args = ramen_cve.build_parser().parse_args(argv)
+    assert args.cves == ["CVE-2021-44228"]
+
+
+def test_wizard_back_to_mode_changes_input_type(tmp_path):
+    """The second prompt can back all the way to the (first) mode prompt and
+    pick a different input type."""
+    import ramen_cve
+
+    answers = [
+        "url",                 # mode
+        "select ..",           # url prompt → BACK to mode
+        "cve",                 # mode re-asked → switch to cve
+        False,                 # from_file?
+        "CVE-2021-44228",      # cve list
+        "feed", False,
+        "7.0", "0.10", "", str(tmp_path), ["csv"], False, "normal",
+    ]
+    fake_q = _make_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        argv = ramen_cve._run_wizard()
+
+    assert argv[0] == "cve"
+    assert "https://" not in " ".join(argv)
+    assert "CVE-2021-44228" in argv
+
+
+def test_wizard_hard_clear_drops_default_on_revisit(tmp_path):
+    """A prompt re-asked after a back is fresh: no `default=` is passed, so the
+    user can't reflex-accept the stale value."""
+    import ramen_cve
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "9.9",            # cvss first
+        "select ..",      # epss → back to cvss
+        "8.8",            # cvss re-ask
+        "0.10",           # epss re-ask
+        "", str(tmp_path), ["csv"], False, "normal",
+    ]
+    fake_q, calls = _make_recording_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        ramen_cve._run_wizard()
+
+    cvss_calls = [
+        c for c in calls
+        if c["method"] == "text" and c["args"] and "CVSS threshold" in c["args"][0]
+    ]
+    assert len(cvss_calls) == 2
+    assert cvss_calls[0]["kwargs"].get("default") == "7.0"   # first ask: default
+    assert "default" not in cvss_calls[1]["kwargs"]          # revisit: hard-cleared
+
+
+def test_wizard_back_choice_present_except_on_first_prompt(tmp_path):
+    """The ← back row is offered on every menu except the first (mode), which
+    has nowhere to go back to."""
+    import ramen_cve
+    from ramen_cve.wizard import _BACK
+
+    answers = [
+        "cve", False, "CVE-2021-44228", "feed", False,
+        "7.0", "0.10", "", str(tmp_path), ["csv"], False, "normal",
+    ]
+    fake_q, calls = _make_recording_questionary(answers)
+    with patch.dict("sys.modules", {"questionary": fake_q}):
+        ramen_cve._run_wizard()
+
+    selects = [c for c in calls if c["method"] == "select"]
+    # Choice tuples are ("choice", label, value, checked); value is index 2.
+    mode_choices = selects[0]["kwargs"]["choices"]
+    assert selects[0]["args"][0] == "What would you like to triage?"
+    assert not any(ch[2] is _BACK for ch in mode_choices)    # no back on step 1
+    date_select = next(c for c in selects if "date should" in c["args"][0])
+    assert any(ch[2] is _BACK for ch in date_select["kwargs"]["choices"])
+
+
+def test_build_argv_pure_function():
+    """_build_argv is a pure function of the answers dict; keys belonging to a
+    branch the user backed out of are ignored."""
+    from ramen_cve.wizard import _build_argv
+
+    base = {
+        "mode": "cve", "cve_from_file": False, "cve_list": ["CVE-2021-44228"],
+        "date_mode": "feed", "apply_window": False,
+        "cvss": "7.0", "epss": "0.10", "basename": "", "out_dir": "",
+        "format": "both", "no_cache": False, "verbosity": "normal",
+    }
+    argv = _build_argv(base)
+    assert argv[0] == "cve"
+    assert argv[argv.index("--cvss-threshold") + 1] == "7.0"
+    assert argv[argv.index("--out-dir") + 1] == "."
+    assert "--no-cache" not in argv
+
+    # Stale cve_* keys ignored when mode is url (branch switch via back).
+    u = _build_argv(dict(base, mode="url", url="https://example.com/x"))
+    assert u[0] == "url" and u[1] == "https://example.com/x"
+    assert "CVE-2021-44228" not in u and "--from-file" not in u
+
+    # epss date_mode emits --start == --end from the single snapshot.
+    e = _build_argv(dict(base, date_mode="epss", epss_date="2024-06-01"))
+    assert e[e.index("--start") + 1] == "2024-06-01"
+    assert e[e.index("--end") + 1] == "2024-06-01"
+
+    # no_cache + verbose flags.
+    f = _build_argv(dict(base, no_cache=True, verbosity="verbose"))
+    assert "--no-cache" in f and "--verbose" in f
 
 
 # ---------------------------------------------------------------------------
