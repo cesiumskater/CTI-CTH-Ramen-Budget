@@ -22,6 +22,7 @@ from .output.csv_writer import write_csv, write_epss_trajectory_csv
 from .output.html_quadrant import write_quadrant_html
 from .output.markdown import write_markdown
 from .output.navigator import write_navigator
+from .output.siem_queries import SIEM_QUERY_PLATFORMS, write_siem_query_stubs
 from .output.sigma import write_sigma_stubs
 from .output.stix import write_iocs_csv, write_stix
 from .output.yara import write_yara_stubs
@@ -316,6 +317,7 @@ def _output(
         "csv": None, "iocs_csv": None, "epss_trajectory_csv": None, "md": None,
         "stix": None, "sigma_dir": None, "yara_dir": None, "html": None,
         "navigator": None,
+        "kql_dir": None, "spl_dir": None, "eql_dir": None,
     }
 
     if _format_includes(args.format, "csv"):
@@ -398,6 +400,23 @@ def _output(
             _log.info(
                 "No kev_override / patch_now CVEs with linked malware; "
                 "no YARA stubs written."
+            )
+
+    # Native SIEM query stubs — one writer per platform, same eligibility as
+    # Sigma (KEV / patch-now). Empty result is logged and skipped, no dir.
+    for platform in SIEM_QUERY_PLATFORMS:
+        if not _format_includes(args.format, platform):
+            continue
+        siem_dir = out_dir / f"{sigma_stem}-{platform}"
+        _log.info("Writing %s query stubs → %s", platform.upper(), siem_dir)
+        files = write_siem_query_stubs(enriched, siem_dir, platform)
+        if files:
+            print(str(siem_dir))
+            paths[f"{platform}_dir"] = siem_dir
+        else:
+            _log.info(
+                "No kev_override / patch_now CVEs in this run; no %s stubs written.",
+                platform.upper(),
             )
 
     if _format_includes(args.format, "html"):

@@ -12,6 +12,15 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Native SIEM query generation.** Three new `--format` tokens — `kql`,
+  `spl`, `eql` — emit per-CVE detection scaffolds for Microsoft Sentinel /
+  Defender XDR, Splunk, and Elastic respectively. Same eligibility as Sigma
+  (KEV-listed + Patch-Now); each stub carries a metadata header (bucket,
+  CVSS, EPSS, KEV info, ATT&CK references, NVD URL) and a platform-idiomatic
+  body skeleton the analyst customises. Output is byte-deterministic. New
+  `src/ramen_cve/output/siem_queries.py` (~180 LOC, stdlib only); wizard's
+  format checkbox now lists all 10 concrete formats including `navigator`,
+  `kql`, `spl`, `eql`.
 - **Risk-weighted prioritization.** The existing `--inventory` flag now
   accepts an optional `criticality` column (`tier1` / `tier2` / `tier3`);
   every CVE gets a `risk_score` computed as

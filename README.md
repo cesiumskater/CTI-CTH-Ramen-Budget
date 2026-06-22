@@ -281,7 +281,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--epss-threshold N` | `0.10` | EPSS cutoff for "likely exploited" |
 | `--out-dir PATH` | cwd | Output directory (quote-stripped, `~`-expanded) |
 | `--basename NAME` | timestamped | Output filename stem |
-| `--format SPEC` | `both` | One or more output formats, comma-separated: `csv`, `md`, `stix`, `sigma`, `yara`, `html`, `navigator` (e.g. `--format csv,navigator`). Aliases: `both` = csv,md; `all` = everything |
+| `--format SPEC` | `both` | One or more output formats, comma-separated: `csv`, `md`, `stix`, `sigma`, `yara`, `html`, `navigator`, `kql`, `spl`, `eql` (e.g. `--format csv,kql,navigator`). Aliases: `both` = csv,md; `all` = everything |
 | `--no-cache` | off | Skip the SQLite cache (always re-fetch) |
 | `--no-exploit-lookup` | off | Skip Exploit-DB / Nuclei / GitHub PoC lookups |
 | `--no-enrich-iocs` | off | Skip VT / AbuseIPDB / OTX / MalwareBazaar enrichment |
@@ -503,6 +503,9 @@ A single run can produce up to eight artefact types. Pick what you want with
 | YARA stubs | `yara` / `all` | One YARA rule scaffold per linked-malware family |
 | Inline-SVG quadrant HTML | `html` / `all` | Single-file CVSS×EPSS scatter |
 | ATT&CK Navigator layer | `navigator` / `all` | `*.attack-layer.json` — drop into [Navigator](https://mitre-attack.github.io/attack-navigator/); CVE-touched techniques heat-mapped by worst bucket |
+| KQL query stubs | `kql` / `all` | One pre-tagged `*.kql` scaffold per KEV / Patch-Now CVE for Microsoft Sentinel / Defender XDR (analyst replaces `<TableName>`) |
+| SPL query stubs | `spl` / `all` | One pre-tagged `*.spl` scaffold per KEV / Patch-Now CVE for Splunk (analyst replaces `<index>`) |
+| EQL query stubs | `eql` / `all` | One pre-tagged `*.eql` scaffold per KEV / Patch-Now CVE for Elastic (analyst narrows `event.category`) |
 
 `--basename my-report` writes `my-report.csv` / `my-report.md` /
 `my-report-iocs.csv` / `my-report.stix.json` / `my-report-sigma/` /
