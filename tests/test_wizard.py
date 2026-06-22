@@ -497,30 +497,35 @@ def test_wizard_format_prompt_is_checkbox_offering_all_concrete_formats():
 
 
 def test_wizard_format_prompt_disambiguates_checkbox_markers():
-    """The checkbox prompt must explain its ● / ○ markers explicitly.
+    """The checkbox prompt must signal selected vs. unselected by COLOUR.
 
-    Regression lock for the UX fix: the bare "(space toggles, enter
-    confirms)" instruction did not say which marker meant selected vs.
-    unselected, which read ambiguously on dim/dark themes. The fix moves
-    the parenthetical out of the question into questionary's `instruction`
-    kwarg AND spells the legend out; it also opportunistically applies a
-    bold-green Style so the selected rows are perceptibly distinct.
+    Regression lock for the UX iteration: the filled ● / empty ○ glyphs read
+    ambiguously, and a legend that names the glyphs didn't match what
+    rendered (the instruction line is one dim colour, so its circles can't
+    be tinted green/red). The fix makes colour carry the signal — selected
+    rows green, unselected rows red — and the legend describes the colours,
+    which genuinely match the list. Mapped to questionary 2.1.1's checkbox
+    token classes: class:selected (green) for checked rows, class:text +
+    class:highlighted (red) for unchecked rows.
     """
     import inspect
 
     import ramen_cve
 
     src = inspect.getsource(ramen_cve._run_wizard)
-    # Legend is present and explicit — both glyphs and their meanings.
-    assert "● = selected" in src
-    assert "○ = unselected" in src
-    # The legend lives in questionary's instruction kwarg, not jammed into
-    # the question text, so the wording renders in a distinct style.
+    # The legend describes the colour semantics (which match the render),
+    # not the glyphs (which can't be individually tinted in one style line).
+    assert "green = selected" in src
+    assert "red = unselected" in src
+    # Legend lives in the instruction kwarg, in a distinct (dim) style.
     assert "instruction" in src
-    # The Style application exists; even if a future questionary refactor
-    # ignores it, the legend in `instruction` still disambiguates.
+    # The Style applies BOTH colours: green for the checked rows'
+    # class:selected, red for the unchecked rows' class:text.
     assert "Style" in src
-    assert "selected" in src  # style token for ticked rows
+    assert "ansigreen" in src
+    assert "ansired" in src
+    assert '("selected"' in src  # checked-row token → green
+    assert '("text"' in src      # unchecked-row token → red
     # And the question text is the short, clean form — no parenthetical.
     assert '"Output formats:"' in src
 

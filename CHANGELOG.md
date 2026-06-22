@@ -48,7 +48,10 @@ The single source of truth for usage / config / outputs is
 - **Wizard** now uses a `questionary.checkbox` for the output-format prompt:
   space toggles, enter confirms, any combination allowed. `csv` and `md` start
   pre-checked (the historical `both` default); `stix` / `sigma` / `yara` are
-  wizard-reachable for the first time.
+  wizard-reachable for the first time. Selected rows render **green**,
+  unselected rows **red**, so the selection state is unmistakable at a glance
+  (the legend describes the colours rather than the easily-confused ●/○
+  glyphs).
 - Governance & community: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
   `SECURITY.md`, this changelog, `docs/ROADMAP.md`, GitHub issue templates
   (bug / feature / CTI-data), pull-request template, `CODEOWNERS`,
