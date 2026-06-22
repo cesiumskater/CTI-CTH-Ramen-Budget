@@ -154,18 +154,24 @@ def _run_wizard() -> list[str]:
     # ("both", "all", or a comma combo like "csv,html") before it lands in
     # argv.
     #
-    # UX: questionary's default ● (selected) and ○ (unselected) glyphs read
-    # ambiguously on some themes/fonts. Three layers disambiguate them:
-    #   1. The `instruction` text spells out the legend explicitly.
-    #   2. A Style that paints ticked rows bold green so the contrast is
-    #      perceptible at a glance.
-    #   3. The validator's error mentions "tick" not just "select", so the
-    #      remediation hint is consistent with the visual language.
-    # The style import is wrapped defensively — a future questionary
-    # refactor can break Style without breaking the wizard.
+    # UX: questionary's default ● (selected) / ○ (unselected) glyphs read
+    # ambiguously on some themes/fonts — filled vs empty circle is a subtle
+    # cue. We make COLOR carry the signal: selected rows green, unselected
+    # rows red. Mapping to questionary 2.1.1's checkbox token classes
+    # (prompts/common.py):
+    #   * a checked row's marker + label  → class:selected   → green
+    #   * an unchecked row's marker+label → class:text       → red
+    #   * the cursor row's unchecked label → class:highlighted → red (bold)
+    #   * the cursor arrow itself          → class:pointer    → cyan (neutral)
+    # The legend describes the colours (not the glyphs) so it actually
+    # matches what renders — the instruction line is a single style, so its
+    # circles can't be individually tinted green/red anyway.
+    # The Style import is wrapped defensively — a future questionary
+    # refactor can break Style without breaking the wizard; the colour-word
+    # legend still disambiguates.
     fmt_checkbox_kwargs: dict = {
         "instruction": (
-            "(space toggles · enter confirms · ● = selected, ○ = unselected)"
+            "(space toggles · enter confirms · green = selected, red = unselected)"
         ),
         "choices": [
             questionary.Choice("csv — CVE spreadsheet (+ IOC sidecar)", value="csv", checked=True),
@@ -182,10 +188,11 @@ def _run_wizard() -> list[str]:
     try:
         from questionary import Style as _QStyle
         fmt_checkbox_kwargs["style"] = _QStyle([
-            ("highlighted", "bold"),
-            ("pointer", "fg:ansigreen bold"),
-            ("selected", "fg:ansigreen bold"),
-            ("instruction", "fg:ansibrightblack"),
+            ("selected", "fg:ansigreen bold"),      # checked rows: ● marker + label
+            ("text", "fg:ansired"),                 # unchecked rows: ○ marker + label
+            ("highlighted", "fg:ansired bold"),     # cursor on an unchecked row (label)
+            ("pointer", "fg:ansicyan bold"),        # the cursor arrow itself (neutral)
+            ("instruction", "fg:ansibrightblack"),  # the dim legend line
         ])
     except Exception:  # pragma: no cover — defensive against API drift
         pass
