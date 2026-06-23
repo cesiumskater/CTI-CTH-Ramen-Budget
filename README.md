@@ -220,6 +220,10 @@ Eleven subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
 ```bash
 python threat_intel_hunter.py opml examples/sample.opml
 python threat_intel_hunter.py opml ~/feeds              # directory of *.opml
+
+# A larger curated starter set (CISA, NCSC, MSRC, Project Zero, Talos,
+# abuse.ch, Krebs, BleepingComputer, …) ships in the repo:
+python threat_intel_hunter.py opml examples/community-feeds.opml
 ```
 
 ### Single URL (optionally crawl one hop)

@@ -62,8 +62,10 @@ The current pick order, ranked by impact-to-effort:
    writers, and dispatchers. The right shape for community contribution
    to grow without bloating the core. An example plugin under
    `examples/plugins/` is part of the deliverable.
-6. **Community-curated feed bundle** — `examples/community-feeds.opml`
-   with a CI validator that checks each feed parses + responds.
+6. ~~**Community-curated feed bundle**~~ — shipped. The OPML lives at
+   `examples/community-feeds.opml`; `scripts/validate_feeds.py` enforces
+   the selection rules (HTTPS-only, required attributes, well-formed XML)
+   and runs on every CI push.
 
 ---
 
