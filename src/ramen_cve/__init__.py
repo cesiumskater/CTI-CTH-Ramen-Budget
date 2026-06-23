@@ -251,6 +251,11 @@ from .output.navigator import (  # noqa: F401
     build_navigator_layer,
     write_navigator,
 )
+from .output.siem_queries import (  # noqa: F401
+    SIEM_QUERY_ELIGIBLE_BUCKETS,
+    SIEM_QUERY_PLATFORMS,
+    write_siem_query_stubs,
+)
 from .output.sigma import (  # noqa: F401
     SIGMA_ELIGIBLE_BUCKETS,
     _build_sigma_stub,
@@ -593,6 +598,10 @@ __all__ = [
     "apply_risk_scores",
     "compute_risk_score",
     "worst_criticality",
+    # Native SIEM query stubs
+    "SIEM_QUERY_ELIGIBLE_BUCKETS",
+    "SIEM_QUERY_PLATFORMS",
+    "write_siem_query_stubs",
 ]
 
 _log = logging.getLogger(__name__)

@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ramen-cve — Community-Curated Threat-Intelligence Feed Bundle
+  ============================================================
+
+  A starter OPML the analyst can drop straight into:
+
+      ramen-cve opml examples/community-feeds.opml
+
+  Selection rules (so we know what to keep / refuse in PRs that touch
+  this file — see CONTRIBUTING.md "Contributing CTI data"):
+    1. Publicly accessible — no paywall, no signup, no auth header.
+    2. HTTPS only (the validator at scripts/validate_feeds.py rejects
+       anything else).
+    3. CTI-relevant — original threat intel, vulnerability disclosure,
+       malware research, or government advisories. Not generic infosec
+       news drip.
+    4. Stable publisher with a track record longer than 12 months and
+       a real editorial process.
+    5. RSS or Atom only. JSON Feed is great but feedparser doesn't
+       parse it well enough yet.
+
+  PRs that add a feed must cite the publisher's about / editorial-policy
+  page in the PR description so a reviewer doesn't have to chase it.
+-->
+<opml version="2.0">
+  <head>
+    <title>Ramen CVE — Community Threat Intelligence Feeds</title>
+    <dateCreated>2026-06-23</dateCreated>
+  </head>
+  <body>
+
+    <outline text="Government &amp; Authoritative">
+      <outline
+        type="rss"
+        text="CISA Cybersecurity Advisories"
+        title="CISA Cybersecurity Advisories"
+        xmlUrl="https://www.cisa.gov/cybersecurity-advisories/all.xml"
+        htmlUrl="https://www.cisa.gov/news-events/cybersecurity-advisories"
+      />
+      <outline
+        type="rss"
+        text="CISA Alerts"
+        title="CISA Alerts"
+        xmlUrl="https://www.cisa.gov/news.xml"
+        htmlUrl="https://www.cisa.gov/news-events/news"
+      />
+      <outline
+        type="rss"
+        text="NCSC UK (all)"
+        title="NCSC UK — National Cyber Security Centre (UK)"
+        xmlUrl="https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml"
+        htmlUrl="https://www.ncsc.gov.uk/"
+      />
+    </outline>
+
+    <outline text="Vendor research blogs">
+      <outline
+        type="rss"
+        text="Microsoft Security Response Center"
+        title="MSRC"
+        xmlUrl="https://msrc.microsoft.com/blog/feed/"
+        htmlUrl="https://msrc.microsoft.com/blog/"
+      />
+      <outline
+        type="rss"
+        text="Google Project Zero"
+        title="Google Project Zero"
+        xmlUrl="https://googleprojectzero.blogspot.com/feeds/posts/default"
+        htmlUrl="https://googleprojectzero.blogspot.com/"
+      />
+      <outline
+        type="rss"
+        text="Cisco Talos"
+        title="Cisco Talos Intelligence Blog"
+        xmlUrl="https://blog.talosintelligence.com/feeds/posts/default"
+        htmlUrl="https://blog.talosintelligence.com/"
+      />
+      <outline
+        type="rss"
+        text="Microsoft Security Blog"
+        title="Microsoft Security Blog"
+        xmlUrl="https://www.microsoft.com/en-us/security/blog/feed/"
+        htmlUrl="https://www.microsoft.com/en-us/security/blog/"
+      />
+      <outline
+        type="rss"
+        text="Rapid7 Research"
+        title="Rapid7 Research Blog"
+        xmlUrl="https://www.rapid7.com/blog/topic/research/rss/"
+        htmlUrl="https://www.rapid7.com/blog/topic/research/"
+      />
+    </outline>
+
+    <outline text="Malware &amp; ecosystem tracking">
+      <outline
+        type="rss"
+        text="abuse.ch Blog"
+        title="abuse.ch — Open-source malware tracking"
+        xmlUrl="https://abuse.ch/blog/feed/"
+        htmlUrl="https://abuse.ch/blog/"
+      />
+      <outline
+        type="rss"
+        text="Malwarebytes Labs"
+        title="Malwarebytes Threat Intelligence"
+        xmlUrl="https://www.malwarebytes.com/blog/feed/index.xml"
+        htmlUrl="https://www.malwarebytes.com/blog"
+      />
+    </outline>
+
+    <outline text="Independent journalism &amp; analysis">
+      <outline
+        type="rss"
+        text="Krebs on Security"
+        title="Krebs on Security"
+        xmlUrl="https://krebsonsecurity.com/feed/"
+        htmlUrl="https://krebsonsecurity.com/"
+      />
+      <outline
+        type="rss"
+        text="BleepingComputer"
+        title="BleepingComputer Security"
+        xmlUrl="https://www.bleepingcomputer.com/feed/"
+        htmlUrl="https://www.bleepingcomputer.com/"
+      />
+      <outline
+        type="rss"
+        text="Schneier on Security"
+        title="Schneier on Security"
+        xmlUrl="https://www.schneier.com/feed/atom/"
+        htmlUrl="https://www.schneier.com/"
+      />
+    </outline>
+
+  </body>
+</opml>

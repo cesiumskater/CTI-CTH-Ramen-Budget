@@ -12,6 +12,24 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Community-curated feed bundle.** `examples/community-feeds.opml`
+  ships a starter set of public, HTTPS-only threat-intel RSS / Atom feeds
+  (CISA, NCSC UK, MSRC, Project Zero, Talos, Microsoft Security Blog,
+  Rapid7 Research, abuse.ch, Malwarebytes Labs, Krebs, BleepingComputer,
+  Schneier) grouped into sections — analysts can drop the file straight
+  into `ramen-cve opml`. New stdlib-only `scripts/validate_feeds.py`
+  enforces the selection rules (well-formed OPML, HTTPS-only URLs,
+  required attributes, ≥1 feed); a new non-advisory CI step runs it on
+  every push so a bad feed addition is caught at PR time.
+- **Native SIEM query generation.** Three new `--format` tokens — `kql`,
+  `spl`, `eql` — emit per-CVE detection scaffolds for Microsoft Sentinel /
+  Defender XDR, Splunk, and Elastic respectively. Same eligibility as Sigma
+  (KEV-listed + Patch-Now); each stub carries a metadata header (bucket,
+  CVSS, EPSS, KEV info, ATT&CK references, NVD URL) and a platform-idiomatic
+  body skeleton the analyst customises. Output is byte-deterministic. New
+  `src/ramen_cve/output/siem_queries.py` (~180 LOC, stdlib only); wizard's
+  format checkbox now lists all 10 concrete formats including `navigator`,
+  `kql`, `spl`, `eql`.
 - **Risk-weighted prioritization.** The existing `--inventory` flag now
   accepts an optional `criticality` column (`tier1` / `tier2` / `tier3`);
   every CVE gets a `risk_score` computed as

@@ -61,6 +61,12 @@ jobs:
       - name: Byte-oracle (showcase bundle)
         run: python scripts/regen_examples.py --check
 
+      - name: OPML feed bundle validator
+        # Structural check on the committed examples/*.opml files: well-formed
+        # XML, HTTPS xmlUrl, required `text` + `xmlUrl` attributes. Stdlib
+        # only — fast, offline, deterministic.
+        run: python scripts/validate_feeds.py
+
   # ----- Advisory jobs -------------------------------------------------------
   # These run in parallel with `test` but do NOT block merges. `continue-on-error`
   # makes a non-zero exit visible in the CI summary without failing the workflow

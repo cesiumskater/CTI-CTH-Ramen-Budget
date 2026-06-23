@@ -153,6 +153,10 @@ def _ask_format(q: Any, *, allow_back: bool, fresh: bool) -> Any:
         q.Choice("sigma — Sigma rule stubs", value="sigma"),
         q.Choice("yara — YARA rule stubs", value="yara"),
         q.Choice("html — CVSS x EPSS quadrant chart", value="html"),
+        q.Choice("navigator — MITRE ATT&CK Navigator layer JSON", value="navigator"),
+        q.Choice("kql — KQL query stubs (Sentinel / Defender XDR)", value="kql"),
+        q.Choice("spl — Splunk SPL query stubs", value="spl"),
+        q.Choice("eql — Elastic EQL query stubs", value="eql"),
     ]
     if allow_back:
         choices.append(q.Choice(_BACK_LABEL, value=_BACK))
