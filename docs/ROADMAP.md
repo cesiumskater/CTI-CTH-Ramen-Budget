@@ -52,8 +52,9 @@ The current pick order, ranked by impact-to-effort:
    an optional `criticality` column; `risk_score` is always populated
    (degrades gracefully without inventory data) and re-ranks CVEs within
    each bucket in the Markdown report.
-3. **Native SIEM query generation** (KQL / SPL / Elastic EQL) beside the
-   Sigma stubs.
+3. ~~**Native SIEM query generation**~~ — shipped as `--format kql,spl,eql`.
+   One pre-tagged scaffold per KEV / Patch-Now CVE per platform, alongside
+   the existing Sigma stubs.
 4. ~~**MITRE ATT&CK Navigator export**~~ — shipped as `--format
    navigator`; drop the emitted `*.attack-layer.json` into the public
    Navigator and CVE-touched techniques light up the matrix.
