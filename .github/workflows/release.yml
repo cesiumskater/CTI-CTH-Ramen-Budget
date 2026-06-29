@@ -20,7 +20,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # We never publish a dirty tree, but tags can point at a commit
           # whose CHANGELOG link refs back to compare/<prev>...<tag>.
@@ -82,7 +82,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v8
