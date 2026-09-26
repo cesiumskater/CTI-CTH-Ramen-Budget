@@ -212,8 +212,9 @@ return to the previous question. Going back **hard-clears** that answer, so
 the prompt is re-asked fresh — no stale default to accidentally re-accept.
 `Ctrl-C` aborts the whole wizard.
 
-Twelve subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
-`analytic`, `pir`, `trend`, `audit`, `web`, `schedule`, and `daemon`.
+Thirteen subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
+`analytic`, `import`, `pir`, `trend`, `audit`, `web`, `schedule`, and
+`daemon`.
 
 ### OPML feeds
 
@@ -266,6 +267,28 @@ python threat_intel_hunter.py pir list
 python threat_intel_hunter.py pir coverage
 python threat_intel_hunter.py pir link log4j-exposure CVE-2021-44228
 ```
+
+### Import a scanner export → inventory
+
+Turn a vulnerability-scanner export into the `--inventory` CSV shape, so the
+hosts your scanner already detected drive correlation and risk weighting
+without hand-maintaining an asset list. Currently supports **Nessus**
+(`.nessus`), whose per-host CPE detections map straight onto the inventory's
+`cpe` column; the format dispatcher is structured so Qualys / Rapid7 can be
+added later.
+
+```bash
+python threat_intel_hunter.py import --scanner nessus scan.nessus --out inventory.csv
+# then feed it straight back in:
+python threat_intel_hunter.py opml feeds.opml --inventory inventory.csv
+
+# or pipe it (import writes to stdout when --out is omitted):
+python threat_intel_hunter.py import --scanner nessus scan.nessus > inventory.csv
+```
+
+Each detected `(host, CPE)` pair becomes one row (`host,product,version,cpe,owner,criticality`);
+`owner` and `criticality` are left blank for you to fill in — the latter
+drives `risk_score` (see `--inventory` / `--sector-weight`).
 
 ### Detection analytics
 

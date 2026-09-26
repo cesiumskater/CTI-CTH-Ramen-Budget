@@ -319,6 +319,16 @@ from .risk import (  # noqa: F401
     sector_matches,
     worst_criticality,
 )
+from .scanner import (  # noqa: F401
+    INVENTORY_COLUMNS,
+    SCANNER_FORMATS,
+    _cpe_product_version,
+    _run_import,
+    import_nessus,
+    import_scan,
+    write_inventory_csv,
+    write_inventory_rows,
+)
 from .schedule import (  # noqa: F401
     _build_schedule_command,
     _emit_cron_line,
@@ -621,6 +631,15 @@ __all__ = [
     "_run_analytic",
     "load_analytics",
     "suggest_analytics",
+    # Vulnerability-scanner import
+    "INVENTORY_COLUMNS",
+    "SCANNER_FORMATS",
+    "_cpe_product_version",
+    "_run_import",
+    "import_nessus",
+    "import_scan",
+    "write_inventory_csv",
+    "write_inventory_rows",
 ]
 
 _log = logging.getLogger(__name__)

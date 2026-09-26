@@ -12,6 +12,15 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Vulnerability-scanner import** (v2.0 item). New `import` subcommand
+  converts a scanner export into the `--inventory` CSV shape so scanned
+  hosts drive CPE correlation + risk weighting without a hand-kept asset
+  list: `ramen-cve import --scanner nessus scan.nessus --out inventory.csv`
+  (writes to stdout when `--out` is omitted, for piping). Ships **Nessus**
+  (`.nessus`) support — per-host CPEs from `HostProperties` `cpe*` tags and
+  `ReportItem/cpe`, one `(host, cpe)` row each, product/version parsed from
+  the CPE. New `src/ramen_cve/scanner.py` (stdlib `xml.etree` only); the
+  format dispatcher is structured so Qualys / Rapid7 slot in later.
 - **Detection-analytic library** (v2.0 item). A bundled catalog of
   platform-neutral detection-analytic templates keyed to MITRE ATT&CK
   technique IDs (`src/ramen_cve/data/analytics.json`), plus a new `analytic`

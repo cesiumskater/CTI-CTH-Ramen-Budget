@@ -79,7 +79,9 @@ working core; the "ramen budget" stays the headline.
 - **MISP-native push / pull** via the optional `pymisp` extra. Different
   shape from generic STIX — MISP consumers want events with Galaxy tags.
 - **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native) —
-  `import` subcommand into the existing inventory shape.
+  `import` subcommand into the existing inventory shape. **Nessus shipped**
+  (`import --scanner nessus`, `src/ramen_cve/scanner.py`); Qualys / Rapid7
+  (CVE-centric formats, a different mapping) remain.
 - ~~**Hunt analytics library** — per-ATT&CK-technique query templates;
   `analytic suggest <hunt-id>` surfaces those whose techniques overlap.~~
   **Shipped.** Bundled catalog at `src/ramen_cve/data/analytics.json`; the

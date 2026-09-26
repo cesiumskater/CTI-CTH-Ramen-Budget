@@ -97,6 +97,7 @@ from .pipeline import (
     _resolve_associations,
 )
 from .pir import _run_pir
+from .scanner import SCANNER_FORMATS, _run_import
 from .schedule import _run_schedule
 from .trend import (
     _record_runs,
@@ -498,6 +499,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory of PIR JSON files (default: the package's bundled data/pirs/).",
     )
 
+    # import subcommand: vulnerability-scanner export → inventory CSV shape
+    import_p = sub.add_parser(
+        "import",
+        help="Import a vulnerability-scanner export into the inventory CSV shape.",
+    )
+    import_p.add_argument(
+        "input", type=_path_arg, metavar="SCAN_FILE",
+        help="Path to the scanner export (e.g. a Nessus .nessus file).",
+    )
+    import_p.add_argument(
+        "--scanner",
+        choices=list(SCANNER_FORMATS),
+        default="nessus",
+        help="Scanner export format (default: nessus).",
+    )
+    import_p.add_argument(
+        "--out",
+        type=_path_arg,
+        default=None,
+        help="Write the inventory CSV here (default: stdout, for piping into --inventory).",
+    )
+
     # trend subcommand: historical bucket / CVSS / EPSS for one CVE
     trend_p = sub.add_parser(
         "trend", help="Show historical bucket / CVSS / EPSS trend for one CVE."
@@ -781,6 +804,13 @@ def main(argv: list[str] | None = None) -> int:
         cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
         return _audit_dispatch(
             cache, "analytic", args, lambda: _run_analytic(args, cache, None)
+        )
+
+    # import: scanner export → inventory CSV; pure local-file workflow.
+    if args.subcommand == "import":
+        cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
+        return _audit_dispatch(
+            cache, "import", args, lambda: _run_import(args, cache, None)
         )
 
     if args.subcommand == "pir":
