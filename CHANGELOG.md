@@ -12,6 +12,21 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Detection-analytic library** (v2.0 item). A bundled catalog of
+  platform-neutral detection-analytic templates keyed to MITRE ATT&CK
+  technique IDs (`src/ramen_cve/data/analytics.json`), plus a new `analytic`
+  subcommand: `analytic list`, `analytic show <id>`, and
+  `analytic suggest <hunt-id>` — which reads a hunt's `attack_techniques` and
+  surfaces the templates whose techniques overlap (parent/sub-technique
+  aware: `T1059` matches `T1059.001`), ranked by overlap. New
+  `src/ramen_cve/analytic.py` + `models.Analytic`, stdlib only; overridable
+  with `--analytics-file`.
+- **Sector-weighted risk scoring** (v2.0 item). New `--sector-weight FACTOR`
+  flag multiplies `risk_score` for CVEs whose linked actors target the
+  `--sector` value, floating sector-relevant CVEs up the risk ranking without
+  dropping anything (orthogonal to the existing `--sector` *filter*). Default
+  `1.0` (off). Adds `risk.apply_sector_weight` + `risk.sector_matches`;
+  round-trips through YAML presets.
 - **Community-curated feed bundle.** `examples/community-feeds.opml`
   ships a starter set of public, HTTPS-only threat-intel RSS / Atom feeds
   (CISA, NCSC UK, MSRC, Project Zero, Talos, Microsoft Security Blog,

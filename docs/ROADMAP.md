@@ -80,8 +80,11 @@ working core; the "ramen budget" stays the headline.
   shape from generic STIX — MISP consumers want events with Galaxy tags.
 - **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native) —
   `import` subcommand into the existing inventory shape.
-- **Hunt analytics library** — per-ATT&CK-technique query templates;
-  `analytic suggest <hunt-id>` surfaces those whose techniques overlap.
+- ~~**Hunt analytics library** — per-ATT&CK-technique query templates;
+  `analytic suggest <hunt-id>` surfaces those whose techniques overlap.~~
+  **Shipped.** Bundled catalog at `src/ramen_cve/data/analytics.json`; the
+  `analytic` subcommand (list / show / suggest) with parent/sub-technique
+  aware overlap.
 - **Backtesting / replay mode** — `replay --as-of YYYY-MM-DD` reads
   cache only, re-runs the pipeline, diff-tables against the historical
   `runs` table for that date.
@@ -90,9 +93,11 @@ working core; the "ramen budget" stays the headline.
   Token-auth only; no multi-tenant.
 - **Configurable cache backend** — current SQLite stays the default; an
   optional Redis backend as a `[redis]` extra for shared-host scenarios.
-- **Sector / geopolitical context** weighting — surface the actor sector
+- ~~**Sector / geopolitical context** weighting — surface the actor sector
   list in the Markdown cross-tab; optionally weight `risk_score` by sector
-  match.
+  match.~~ **Shipped.** The Markdown "Linked Adversaries" cross-tab carries a
+  Sectors-Targeted column, and `--sector-weight FACTOR` (with `--sector`)
+  weights `risk_score` by sector match.
 - **Anonymized intelligence sharing** — opt-in mechanism to contribute
   back to the bundled associations dataset (with explicit privacy warnings
   and TLP gating).

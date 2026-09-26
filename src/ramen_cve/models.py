@@ -166,6 +166,57 @@ class Hunt:
 
 
 @dataclass
+class Analytic:
+    """A reusable detection-analytic template keyed to ATT&CK technique IDs.
+
+    Bundled in data/analytics.json and loaded at runtime (see
+    ``ramen_cve.analytic``). ``analytic suggest <hunt-id>`` surfaces the
+    templates whose ``technique_ids`` overlap a hunt's ``attack_techniques``,
+    so an analyst turning a hunt hypothesis into detections gets a starting
+    query per technique instead of a blank page.
+
+    ``pseudo_query`` is deliberately platform-neutral detection logic — not
+    KQL / SPL / EQL, which ``output.siem_queries`` already generates per-CVE —
+    so the analyst adapts it to whatever SIEM they run. ``data_sources`` names
+    the telemetry the analytic needs (e.g. 'process_creation', 'dns_query').
+    """
+
+    id: str
+    name: str
+    technique_ids: list[str] = field(default_factory=list)
+    description: str = ""
+    data_sources: list[str] = field(default_factory=list)
+    pseudo_query: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Analytic:
+        """Build an Analytic from a dict, tolerating missing keys. Technique
+        IDs are upper-cased + trimmed so overlap matching is case-insensitive."""
+        return cls(
+            id=str(d.get("id") or ""),
+            name=str(d.get("name") or ""),
+            technique_ids=[
+                str(t).strip().upper()
+                for t in (d.get("technique_ids") or [])
+                if str(t).strip()
+            ],
+            description=str(d.get("description") or ""),
+            data_sources=list(d.get("data_sources") or []),
+            pseudo_query=str(d.get("pseudo_query") or ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "technique_ids": list(self.technique_ids),
+            "description": self.description,
+            "data_sources": list(self.data_sources),
+            "pseudo_query": self.pseudo_query,
+        }
+
+
+@dataclass
 class Pir:
     """A Priority Intelligence Requirement — the leadership-blessed question
     the CTI program exists to answer.

@@ -18,6 +18,12 @@ import time  # noqa: F401  # monkeypatch seam: tests patch ramen_cve.time.sleep
 
 import requests  # noqa: F401  # monkeypatch seam: tests patch ramen_cve.requests.get
 
+from .analytic import (  # noqa: F401
+    _base_technique,
+    _run_analytic,
+    load_analytics,
+    suggest_analytics,
+)
 from .analyze import (  # noqa: F401
     CWE_TO_KILL_CHAIN,
     KILL_CHAIN_PHASES,
@@ -101,6 +107,7 @@ from .constants import (  # noqa: F401
     CISA_KEV_URL,
     CVE_REGEX,
     CWE_TO_ATTACK,
+    DEFAULT_ANALYTICS_PATH,
     DEFAULT_ASSOCIATIONS_PATH,
     DEFAULT_CACHE_PATH,
     DEFAULT_CACHE_TTL_HOURS,
@@ -214,6 +221,7 @@ from .keyring import (  # noqa: F401
     _save_api_key_to_env,
 )
 from .models import (  # noqa: F401
+    Analytic,
     Campaign,
     CveRecord,
     EnrichedCve,
@@ -306,7 +314,9 @@ from .pir import (  # noqa: F401
 from .risk import (  # noqa: F401
     CRITICALITY_TIERS,
     apply_risk_scores,
+    apply_sector_weight,
     compute_risk_score,
+    sector_matches,
     worst_criticality,
 )
 from .schedule import (  # noqa: F401
@@ -365,6 +375,7 @@ __all__ = [
     "Cache",
     "Campaign",
     "CveRecord",
+    "DEFAULT_ANALYTICS_PATH",
     "DEFAULT_ASSOCIATIONS_PATH",
     "DEFAULT_BUCKET_POLICY",
     "DEFAULT_CACHE_PATH",
@@ -596,12 +607,20 @@ __all__ = [
     # Risk-weighted prioritization
     "CRITICALITY_TIERS",
     "apply_risk_scores",
+    "apply_sector_weight",
     "compute_risk_score",
+    "sector_matches",
     "worst_criticality",
     # Native SIEM query stubs
     "SIEM_QUERY_ELIGIBLE_BUCKETS",
     "SIEM_QUERY_PLATFORMS",
     "write_siem_query_stubs",
+    # Detection-analytic library
+    "Analytic",
+    "_base_technique",
+    "_run_analytic",
+    "load_analytics",
+    "suggest_analytics",
 ]
 
 _log = logging.getLogger(__name__)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import requests
 
+from .analytic import _run_analytic
 from .analyze import (
     _best_admiralty,
     _worst_tlp,
@@ -48,6 +49,7 @@ from .config import (
 )
 from .constants import (
     CVE_REGEX,
+    DEFAULT_ANALYTICS_PATH,
     DEFAULT_CVSS_THRESHOLD,
     DEFAULT_EPSS_THRESHOLD,
     DEFAULT_HUNT_DIR,
@@ -186,6 +188,19 @@ def _shared_flags(parser: argparse.ArgumentParser) -> None:
             "Matches against each linked actor's sectors_targeted in "
             "associations.json. Records with no linked actors are KEPT "
             "(unattributed CVEs are assumed potentially relevant)."
+        ),
+    )
+    parser.add_argument(
+        "--sector-weight",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help=(
+            "Multiply risk_score by FACTOR (e.g. 1.5) for CVEs whose linked "
+            "actors target the --sector value, floating sector-relevant CVEs "
+            "above merely-unattributed ones in the risk ranking. Unlike "
+            "--sector this drops nothing; it only re-weights. Default 1.0 "
+            "(off). Requires --sector and a positive FACTOR; ignored otherwise."
         ),
     )
     parser.add_argument(
@@ -430,6 +445,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=_path_arg,
         default=DEFAULT_HUNT_DIR,
         help="Directory of hunt JSON files (default: the package's bundled data/hunts/).",
+    )
+
+    # analytic subcommand: detection-analytic template library keyed to ATT&CK
+    analytic_p = sub.add_parser(
+        "analytic",
+        help="Detection-analytic templates; suggest ones matching a hunt's techniques.",
+    )
+    analytic_p.add_argument(
+        "action",
+        choices=["list", "show", "suggest"],
+        help="list all templates, show one by id, or suggest ones for a hunt.",
+    )
+    analytic_p.add_argument(
+        "ident",
+        nargs="?",
+        help="analytic id for 'show'; hunt id for 'suggest' (ignored for 'list').",
+    )
+    analytic_p.add_argument(
+        "--analytics-file",
+        type=_path_arg,
+        default=DEFAULT_ANALYTICS_PATH,
+        help="Analytic catalog JSON (default: the package's bundled data/analytics.json).",
+    )
+    analytic_p.add_argument(
+        "--hunt-dir",
+        type=_path_arg,
+        default=DEFAULT_HUNT_DIR,
+        help="Directory of hunt JSON files for 'suggest' (default: bundled data/hunts/).",
     )
 
     # pir subcommand: leadership-blessed Priority Intelligence Requirements
@@ -732,6 +775,13 @@ def main(argv: list[str] | None = None) -> int:
         cache_path = ramen_cve.DEFAULT_CACHE_PATH
         cache = Cache(cache_path)
         return _audit_dispatch(cache, "hunt", args, lambda: _run_hunt(args, cache, None))
+
+    # analytic: pure local-file workflow (catalog + hunt JSON), like hunt.
+    if args.subcommand == "analytic":
+        cache = Cache(ramen_cve.DEFAULT_CACHE_PATH)
+        return _audit_dispatch(
+            cache, "analytic", args, lambda: _run_analytic(args, cache, None)
+        )
 
     if args.subcommand == "pir":
         cache_path = ramen_cve.DEFAULT_CACHE_PATH
