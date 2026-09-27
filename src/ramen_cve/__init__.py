@@ -311,6 +311,11 @@ from .pir import (  # noqa: F401
     load_pir,
     save_pir,
 )
+from .replay import (  # noqa: F401
+    _run_replay,
+    bucket_counts,
+    diff_snapshots,
+)
 from .risk import (  # noqa: F401
     CRITICALITY_TIERS,
     apply_risk_scores,
@@ -640,6 +645,10 @@ __all__ = [
     "import_scan",
     "write_inventory_csv",
     "write_inventory_rows",
+    # Backtesting / replay
+    "_run_replay",
+    "bucket_counts",
+    "diff_snapshots",
 ]
 
 _log = logging.getLogger(__name__)

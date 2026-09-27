@@ -12,6 +12,14 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Backtesting / replay** (v2.0 item). New `replay --as-of YYYY-MM-DD
+  [--to YYYY-MM-DD]` subcommand diffs the CVE bucket picture between two
+  points in the cached run history — bucket distribution at each point, the
+  CVEs that moved bucket, and the ones newly tracked since. A pure read of
+  the never-purged `runs` table (no network, no re-fetch, **no schema
+  change**): new `cache.snapshot_as_of()` reconstructs each CVE's last-known
+  state at/before a cutoff, and `src/ramen_cve/replay.py` diffs two
+  snapshots. History is seeded automatically by every triage run.
 - **Vulnerability-scanner import** (v2.0 item). New `import` subcommand
   converts a scanner export into the `--inventory` CSV shape so scanned
   hosts drive CPE correlation + risk weighting without a hand-kept asset

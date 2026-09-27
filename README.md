@@ -212,9 +212,9 @@ return to the previous question. Going back **hard-clears** that answer, so
 the prompt is re-asked fresh — no stale default to accidentally re-accept.
 `Ctrl-C` aborts the whole wizard.
 
-Thirteen subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
-`analytic`, `import`, `pir`, `trend`, `audit`, `web`, `schedule`, and
-`daemon`.
+Fourteen subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
+`analytic`, `import`, `pir`, `trend`, `replay`, `audit`, `web`, `schedule`,
+and `daemon`.
 
 ### OPML feeds
 
@@ -308,6 +308,22 @@ The `pseudo_query` in each template is deliberately *not* KQL/SPL/EQL (those
 are generated per-CVE by `--format kql,spl,eql`); it is logic you adapt to
 your SIEM. Point `--analytics-file` at your own JSON catalog to extend or
 replace the bundled set.
+
+### Backtesting / replay
+
+Diff the CVE bucket picture between two points in the cached run history —
+"how did our exposure change since then?" It reads the (never-purged) `runs`
+history only: no network, no re-fetch. History is seeded automatically by
+every triage run against the same cache file.
+
+```bash
+python threat_intel_hunter.py replay --as-of 2024-01-01                 # vs now
+python threat_intel_hunter.py replay --as-of 2024-01-01 --to 2024-06-30 # two points
+```
+
+Output is a Markdown backtest: the per-bucket distribution at each point, the
+CVEs that moved bucket (with the transition), and the CVEs newly tracked
+since the `--as-of` date.
 
 ### Trend, audit, web
 

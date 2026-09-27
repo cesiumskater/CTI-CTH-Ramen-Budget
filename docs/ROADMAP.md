@@ -87,9 +87,11 @@ working core; the "ramen budget" stays the headline.
   **Shipped.** Bundled catalog at `src/ramen_cve/data/analytics.json`; the
   `analytic` subcommand (list / show / suggest) with parent/sub-technique
   aware overlap.
-- **Backtesting / replay mode** — `replay --as-of YYYY-MM-DD` reads
+- ~~**Backtesting / replay mode** — `replay --as-of YYYY-MM-DD` reads
   cache only, re-runs the pipeline, diff-tables against the historical
-  `runs` table for that date.
+  `runs` table for that date.~~ **Shipped.** `replay --as-of [--to]` diffs
+  bucket snapshots from the `runs` history (`src/ramen_cve/replay.py`,
+  `cache.snapshot_as_of`); pure cache read, no schema change.
 - **Optional API mode** — a thin FastAPI surface as an `[api]` extra, so
   other tools can integrate ramen-cve without spawning a CLI per request.
   Token-auth only; no multi-tenant.

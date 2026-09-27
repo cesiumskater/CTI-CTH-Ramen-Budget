@@ -97,6 +97,7 @@ from .pipeline import (
     _resolve_associations,
 )
 from .pir import _run_pir
+from .replay import _run_replay
 from .scanner import SCANNER_FORMATS, _run_import
 from .schedule import _run_schedule
 from .trend import (
@@ -521,6 +522,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write the inventory CSV here (default: stdout, for piping into --inventory).",
     )
 
+    # replay subcommand: point-in-time backtest over the runs history
+    replay_p = sub.add_parser(
+        "replay",
+        help="Backtest: diff the CVE bucket snapshot at --as-of against --to (or now).",
+    )
+    replay_p.add_argument(
+        "--as-of",
+        type=_parse_iso_date,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help="The 'from' date; reconstructs each CVE's last-known state on/before it.",
+    )
+    replay_p.add_argument(
+        "--to",
+        type=_parse_iso_date,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="The 'to' date (default: now). Must not precede --as-of.",
+    )
+    replay_p.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Use an in-memory cache (no history; mostly useful for tests).",
+    )
+
     # trend subcommand: historical bucket / CVSS / EPSS for one CVE
     trend_p = sub.add_parser(
         "trend", help="Show historical bucket / CVSS / EPSS trend for one CVE."
@@ -822,6 +848,11 @@ def main(argv: list[str] | None = None) -> int:
         cache_path = ":memory:" if args.no_cache else ramen_cve.DEFAULT_CACHE_PATH
         cache = Cache(cache_path)
         return _audit_dispatch(cache, "trend", args, lambda: _run_trend(args, cache, None))
+
+    if args.subcommand == "replay":
+        cache_path = ":memory:" if args.no_cache else ramen_cve.DEFAULT_CACHE_PATH
+        cache = Cache(cache_path)
+        return _audit_dispatch(cache, "replay", args, lambda: _run_replay(args, cache, None))
 
     # The audit subcommand reads the log; it must NOT log itself (every
     # `ramen_cve audit` would otherwise grow the table it's trying to read).
