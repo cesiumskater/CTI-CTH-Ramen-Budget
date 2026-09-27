@@ -12,6 +12,38 @@ The single source of truth for usage / config / outputs is
 ## [Unreleased]
 
 ### Added
+- **Backtesting / replay** (v2.0 item). New `replay --as-of YYYY-MM-DD
+  [--to YYYY-MM-DD]` subcommand diffs the CVE bucket picture between two
+  points in the cached run history — bucket distribution at each point, the
+  CVEs that moved bucket, and the ones newly tracked since. A pure read of
+  the never-purged `runs` table (no network, no re-fetch, **no schema
+  change**): new `cache.snapshot_as_of()` reconstructs each CVE's last-known
+  state at/before a cutoff, and `src/ramen_cve/replay.py` diffs two
+  snapshots. History is seeded automatically by every triage run.
+- **Vulnerability-scanner import** (v2.0 item). New `import` subcommand
+  converts a scanner export into the `--inventory` CSV shape so scanned
+  hosts drive CPE correlation + risk weighting without a hand-kept asset
+  list: `ramen-cve import --scanner nessus scan.nessus --out inventory.csv`
+  (writes to stdout when `--out` is omitted, for piping). Ships **Nessus**
+  (`.nessus`) support — per-host CPEs from `HostProperties` `cpe*` tags and
+  `ReportItem/cpe`, one `(host, cpe)` row each, product/version parsed from
+  the CPE. New `src/ramen_cve/scanner.py` (stdlib `xml.etree` only); the
+  format dispatcher is structured so Qualys / Rapid7 slot in later.
+- **Detection-analytic library** (v2.0 item). A bundled catalog of
+  platform-neutral detection-analytic templates keyed to MITRE ATT&CK
+  technique IDs (`src/ramen_cve/data/analytics.json`), plus a new `analytic`
+  subcommand: `analytic list`, `analytic show <id>`, and
+  `analytic suggest <hunt-id>` — which reads a hunt's `attack_techniques` and
+  surfaces the templates whose techniques overlap (parent/sub-technique
+  aware: `T1059` matches `T1059.001`), ranked by overlap. New
+  `src/ramen_cve/analytic.py` + `models.Analytic`, stdlib only; overridable
+  with `--analytics-file`.
+- **Sector-weighted risk scoring** (v2.0 item). New `--sector-weight FACTOR`
+  flag multiplies `risk_score` for CVEs whose linked actors target the
+  `--sector` value, floating sector-relevant CVEs up the risk ranking without
+  dropping anything (orthogonal to the existing `--sector` *filter*). Default
+  `1.0` (off). Adds `risk.apply_sector_weight` + `risk.sector_matches`;
+  round-trips through YAML presets.
 - **Community-curated feed bundle.** `examples/community-feeds.opml`
   ships a starter set of public, HTTPS-only threat-intel RSS / Atom feeds
   (CISA, NCSC UK, MSRC, Project Zero, Talos, Microsoft Security Blog,

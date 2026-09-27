@@ -212,8 +212,9 @@ return to the previous question. Going back **hard-clears** that answer, so
 the prompt is re-asked fresh — no stale default to accidentally re-accept.
 `Ctrl-C` aborts the whole wizard.
 
-Eleven subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
-`pir`, `trend`, `audit`, `web`, `schedule`, and `daemon`.
+Fourteen subcommands are available: `opml`, `url`, `cve`, `stix`, `hunt`,
+`analytic`, `import`, `pir`, `trend`, `replay`, `audit`, `web`, `schedule`,
+and `daemon`.
 
 ### OPML feeds
 
@@ -267,6 +268,63 @@ python threat_intel_hunter.py pir coverage
 python threat_intel_hunter.py pir link log4j-exposure CVE-2021-44228
 ```
 
+### Import a scanner export → inventory
+
+Turn a vulnerability-scanner export into the `--inventory` CSV shape, so the
+hosts your scanner already detected drive correlation and risk weighting
+without hand-maintaining an asset list. Currently supports **Nessus**
+(`.nessus`), whose per-host CPE detections map straight onto the inventory's
+`cpe` column; the format dispatcher is structured so Qualys / Rapid7 can be
+added later.
+
+```bash
+python threat_intel_hunter.py import --scanner nessus scan.nessus --out inventory.csv
+# then feed it straight back in:
+python threat_intel_hunter.py opml feeds.opml --inventory inventory.csv
+
+# or pipe it (import writes to stdout when --out is omitted):
+python threat_intel_hunter.py import --scanner nessus scan.nessus > inventory.csv
+```
+
+Each detected `(host, CPE)` pair becomes one row (`host,product,version,cpe,owner,criticality`);
+`owner` and `criticality` are left blank for you to fill in — the latter
+drives `risk_score` (see `--inventory` / `--sector-weight`).
+
+### Detection analytics
+
+A small library of platform-neutral detection-analytic templates, each keyed
+to MITRE ATT&CK technique IDs. `analytic suggest <hunt-id>` reads a hunt's
+`attack_techniques` and surfaces the templates whose techniques overlap
+(parent/sub-technique aware — a hunt tagged `T1059` matches a `T1059.001`
+template), turning a hunt hypothesis into a starting set of detections.
+
+```bash
+python threat_intel_hunter.py analytic list                       # the whole catalog
+python threat_intel_hunter.py analytic show public-facing-exploit-attempt
+python threat_intel_hunter.py analytic suggest log4shell-evidence  # templates for this hunt
+```
+
+The `pseudo_query` in each template is deliberately *not* KQL/SPL/EQL (those
+are generated per-CVE by `--format kql,spl,eql`); it is logic you adapt to
+your SIEM. Point `--analytics-file` at your own JSON catalog to extend or
+replace the bundled set.
+
+### Backtesting / replay
+
+Diff the CVE bucket picture between two points in the cached run history —
+"how did our exposure change since then?" It reads the (never-purged) `runs`
+history only: no network, no re-fetch. History is seeded automatically by
+every triage run against the same cache file.
+
+```bash
+python threat_intel_hunter.py replay --as-of 2024-01-01                 # vs now
+python threat_intel_hunter.py replay --as-of 2024-01-01 --to 2024-06-30 # two points
+```
+
+Output is a Markdown backtest: the per-bucket distribution at each point, the
+CVEs that moved bucket (with the transition), and the CVEs newly tracked
+since the `--as-of` date.
+
 ### Trend, audit, web
 
 ```bash
@@ -292,6 +350,7 @@ python threat_intel_hunter.py web --site-dir ./_site   # static, browseable HTML
 | `--ioc-confidence-floor F` | `0.0` | Drop IOCs whose decayed confidence < `F` |
 | `--inventory PATH` | none | CSV of `host,product,version,[cpe],[owner],[criticality]` for asset correlation. The optional `criticality` column (`tier1`/`tier2`/`tier3`) feeds the **risk_score** that re-ranks CVEs *within* each bucket in the Markdown report |
 | `--sector NAME` | none | Drop CVEs whose only attribution targets a *different* sector |
+| `--sector-weight FACTOR` | `1.0` | Multiply `risk_score` by FACTOR for CVEs whose linked actors target `--sector` (floats sector-relevant CVEs up the ranking without dropping others). Requires `--sector` |
 | `--associations-file PATH` | bundled | Override the CVE→actor/malware lookup |
 | `--ssvc-profile PATH` | off | Activate **SSVC v2** (Stakeholder-Specific Vulnerability Categorization) Deployer-tree scoring alongside the existing buckets. JSON profile sets the org-specific decision points (mission_impact, safety_impact, value_density, exposure_default); see [`src/ramen_cve/ssvc.py`](src/ramen_cve/ssvc.py). Emits `ssvc_action` ∈ {`defer`, `scheduled`, `out-of-cycle`, `immediate`} in CSV + Markdown |
 | `--allow-tlp-red` | off | Permit writing TLP:RED records (otherwise stripped) |

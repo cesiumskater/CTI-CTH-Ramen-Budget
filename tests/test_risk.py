@@ -23,12 +23,25 @@ from datetime import date
 
 import ramen_cve
 from ramen_cve.enrich.inventory import correlate_inventory, load_inventory
+from ramen_cve.models import ThreatActor
 from ramen_cve.risk import (
     CRITICALITY_TIERS,
     apply_risk_scores,
+    apply_sector_weight,
     compute_risk_score,
+    sector_matches,
     worst_criticality,
 )
+
+
+def _mk_actor_cve(sector: str, *, cvss_score: float = 8.0) -> ramen_cve.EnrichedCve:
+    """An EnrichedCve linked to one actor targeting `sector`."""
+    return ramen_cve.EnrichedCve(
+        cve_id="CVE-2024-0001", source="x", first_seen=date(2024, 1, 1),
+        first_seen_type="feed_pub", cvss_score=cvss_score, epss_score=0.0,
+        bucket="patch_now",
+        linked_actors=[ThreatActor(name="Grp", sectors_targeted=[sector])],
+    )
 
 
 def _mk(
@@ -236,8 +249,97 @@ def test_markdown_surfaces_risk_score_line(tmp_path):
     assert "tier1" in body
 
 
+# ---------------------------------------------------------------------------
+# Sector weighting (--sector-weight)
+# ---------------------------------------------------------------------------
+
+
+def test_sector_matches_true_false_and_case_insensitive():
+    rec = _mk_actor_cve("energy")
+    assert sector_matches(rec, "energy") is True
+    assert sector_matches(rec, "ENERGY") is True          # case-insensitive
+    assert sector_matches(rec, "financial") is False
+
+
+def test_sector_matches_blank_and_no_actors():
+    assert sector_matches(_mk_actor_cve("energy"), "") is False
+    no_actors = _mk(bucket="patch_now")
+    assert sector_matches(no_actors, "energy") is False
+
+
+def test_apply_sector_weight_boosts_only_matching_records():
+    match = _mk_actor_cve("energy")
+    miss = _mk_actor_cve("financial")
+    apply_risk_scores([match, miss])
+    base_match, base_miss = match.risk_score, miss.risk_score
+    scaled = apply_sector_weight([match, miss], "energy", 2.0)
+    assert scaled == 1
+    assert match.risk_score == 2 * base_match      # matched → x2
+    assert miss.risk_score == base_miss            # unmatched → untouched
+
+
+def test_apply_sector_weight_returns_count_scaled():
+    recs = [_mk_actor_cve("energy"), _mk_actor_cve("energy"), _mk_actor_cve("retail")]
+    apply_risk_scores(recs)
+    assert apply_sector_weight(recs, "energy", 1.5) == 2
+
+
+def test_apply_sector_weight_noop_cases():
+    """Blank sector, weight of exactly 1.0, or None weight → no-op (returns 0)."""
+    recs = [_mk_actor_cve("energy")]
+    apply_risk_scores(recs)
+    base = recs[0].risk_score
+    assert apply_sector_weight(recs, "", 2.0) == 0
+    assert apply_sector_weight(recs, "energy", 1.0) == 0
+    assert apply_sector_weight(recs, "energy", None) == 0
+    assert recs[0].risk_score == base              # unchanged in every no-op
+
+
+def test_apply_sector_weight_below_one_deprioritizes():
+    """A weight < 1.0 is allowed and de-emphasizes matched CVEs."""
+    recs = [_mk_actor_cve("energy")]
+    apply_risk_scores(recs)
+    base = recs[0].risk_score
+    apply_sector_weight(recs, "energy", 0.5)
+    assert recs[0].risk_score == 0.5 * base
+
+
+def test_apply_sector_weight_skips_records_without_score():
+    """A record whose risk_score was never computed is left alone."""
+    rec = _mk_actor_cve("energy")            # risk_score still None
+    assert rec.risk_score is None
+    assert apply_sector_weight([rec], "energy", 2.0) == 0
+    assert rec.risk_score is None
+
+
+def test_output_wiring_applies_sector_weight(tmp_path):
+    """End-to-end through _output: --sector + --sector-weight scales the score."""
+    rec = _mk_actor_cve("energy")
+    expected = compute_risk_score(rec) * 3.0
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, basename="sw", allow_tlp_red=False,
+        sector="energy", sector_weight=3.0,
+    )
+    ramen_cve._output([rec], args, {"version": "0.2.0"})
+    assert rec.risk_score == expected
+
+
+def test_output_wiring_sector_weight_default_is_noop(tmp_path):
+    """Without --sector-weight (default 1.0) the score equals the base."""
+    rec = _mk_actor_cve("energy")
+    expected = compute_risk_score(rec)
+    args = argparse.Namespace(
+        format="csv", out_dir=tmp_path, basename="sw0", allow_tlp_red=False,
+        sector="energy",  # no sector_weight attr → getattr default 1.0
+    )
+    ramen_cve._output([rec], args, {"version": "0.2.0"})
+    assert rec.risk_score == expected
+
+
 def test_facade_reexports_risk_surface():
     assert ramen_cve.compute_risk_score is compute_risk_score
     assert ramen_cve.apply_risk_scores is apply_risk_scores
+    assert ramen_cve.apply_sector_weight is apply_sector_weight
+    assert ramen_cve.sector_matches is sector_matches
     assert ramen_cve.worst_criticality is worst_criticality
     assert ramen_cve.CRITICALITY_TIERS == CRITICALITY_TIERS

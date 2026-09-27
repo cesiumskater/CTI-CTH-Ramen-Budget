@@ -108,6 +108,9 @@ DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
 DEFAULT_ASSOCIATIONS_PATH = DEFAULT_DATA_DIR / "associations.json"
 DEFAULT_HUNT_DIR = DEFAULT_DATA_DIR / "hunts"
 DEFAULT_PIR_DIR = DEFAULT_DATA_DIR / "pirs"
+# Bundled detection-analytic template catalog (per-ATT&CK-technique query
+# skeletons). Loaded by ramen_cve.analytic; overridable with --analytics-file.
+DEFAULT_ANALYTICS_PATH = DEFAULT_DATA_DIR / "analytics.json"
 
 # YAML configuration presets ship alongside the package. The documented
 # template at src/ramen_cve/config/config.yaml records every key the tool

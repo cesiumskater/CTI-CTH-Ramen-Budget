@@ -1,0 +1,117 @@
+{
+  "_README": "Detection-analytic template catalog for `ramen-cve analytic`. Each entry is a platform-neutral detection skeleton keyed to one or more MITRE ATT&CK technique IDs (https://attack.mitre.org/). `analytic suggest <hunt-id>` surfaces the entries whose technique_ids overlap a hunt's attack_techniques (parent/sub-technique aware: T1059 matches T1059.001). `pseudo_query` is deliberately NOT KQL/SPL/EQL — those are generated per-CVE by `--format kql,spl,eql`; this is the logic you adapt to your SIEM. Add or correct entries here; ramen_cve loads this file at runtime, or point --analytics-file at your own catalog. Keep ids kebab-case and unique.",
+  "analytics": [
+    {
+      "id": "public-facing-exploit-attempt",
+      "name": "Anomalous child process from an internet-facing service",
+      "technique_ids": ["T1190"],
+      "description": "Exploitation of a public-facing application often manifests as the web/app server process (nginx, httpd, java, w3wp, node) spawning a shell or living-off-the-land binary it never normally launches. Baseline the legitimate child processes per service first.",
+      "data_sources": ["process_creation", "web_server_logs"],
+      "pseudo_query": "process_create WHERE parent_image IN (server_binaries) AND child_image IN (shell_binaries, lolbins) AND child_image NOT IN (baselined_children[parent_image])"
+    },
+    {
+      "id": "webshell-write-to-webroot",
+      "name": "Executable/script written into a web-served directory",
+      "technique_ids": ["T1190", "T1505.003"],
+      "description": "Post-exploitation webshell drop: a new script (.jsp/.aspx/.php) or binary appearing under a web-served path, especially written by the web server account. Pair with the exploit-attempt analytic to catch the full chain.",
+      "data_sources": ["file_creation", "web_server_logs"],
+      "pseudo_query": "file_create WHERE target_path UNDER webroot_dirs AND file_ext IN (script_exts) AND actor_account IN (web_service_accounts)"
+    },
+    {
+      "id": "suspicious-interpreter-spawn",
+      "name": "Command/script interpreter with encoded or network payload",
+      "technique_ids": ["T1059", "T1059.001", "T1059.003", "T1059.007"],
+      "description": "Command-and-scripting-interpreter abuse: powershell/cmd/bash/wscript launched with base64/encoded arguments, download cradles, or piped remote content. Cast wide on interpreter image, narrow on the argument shape.",
+      "data_sources": ["process_creation", "script_block_logs"],
+      "pseudo_query": "process_create WHERE image IN (interpreters) AND (cmdline MATCHES encoded_arg_pattern OR cmdline MATCHES download_cradle_pattern)"
+    },
+    {
+      "id": "driver-vuln-priv-esc",
+      "name": "Privilege escalation via exploitation for elevation",
+      "technique_ids": ["T1068"],
+      "description": "Exploitation-for-privilege-escalation: a non-privileged process suddenly running as SYSTEM/root, or a known-vulnerable driver/service loading. Correlate token-elevation events with the parent that triggered them.",
+      "data_sources": ["process_creation", "authentication_logs", "driver_load"],
+      "pseudo_query": "process_create WHERE integrity_level = SYSTEM AND parent_integrity_level < SYSTEM AND parent_image NOT IN (known_elevation_paths)"
+    },
+    {
+      "id": "client-exec-from-document",
+      "name": "Office/reader application spawning executable content",
+      "technique_ids": ["T1203"],
+      "description": "Exploitation-for-client-execution: a document handler (winword, excel, acrord32, outlook) spawning a shell, script host, or dropping an executable — the classic malicious-attachment detonation.",
+      "data_sources": ["process_creation"],
+      "pseudo_query": "process_create WHERE parent_image IN (office_reader_binaries) AND child_image IN (shell_binaries, script_hosts, lolbins)"
+    },
+    {
+      "id": "enumeration-file-and-directory",
+      "name": "Burst of file & directory discovery commands",
+      "technique_ids": ["T1083"],
+      "description": "File-and-directory discovery: a short window with many discovery commands (dir/ls/tree/find/Get-ChildItem) from one host/user, typical of hands-on-keyboard reconnaissance after initial access.",
+      "data_sources": ["process_creation"],
+      "pseudo_query": "process_create WHERE image IN (discovery_binaries) GROUP BY host, user OVER 5m HAVING count() > discovery_burst_threshold"
+    },
+    {
+      "id": "valid-account-anomalous-logon",
+      "name": "Valid-account logon from anomalous source or hours",
+      "technique_ids": ["T1078"],
+      "description": "Valid-accounts abuse: a successful interactive/remote logon from a new geo/ASN, at off-hours, or to a host the account never touches. Requires a per-account baseline of source and timing.",
+      "data_sources": ["authentication_logs"],
+      "pseudo_query": "logon_success WHERE (src_geo NOT IN baseline[account].geos OR hour NOT IN baseline[account].hours OR dest_host NOT IN baseline[account].hosts)"
+    },
+    {
+      "id": "adversary-in-the-middle",
+      "name": "Anomalous LLMNR/NBT-NS or ARP responder activity",
+      "technique_ids": ["T1557", "T1557.001"],
+      "description": "Adversary-in-the-middle: a host answering LLMNR/NBT-NS/mDNS broadcasts it never served before, or sudden ARP-reply volume — the signature of a poisoning tool harvesting credentials.",
+      "data_sources": ["network_traffic", "dns_query"],
+      "pseudo_query": "network WHERE proto IN (LLMNR, NBT-NS, mDNS) AND direction = response AND src_host NOT IN (known_name_servers)"
+    },
+    {
+      "id": "brute-force-authentication",
+      "name": "Authentication brute force / password spray",
+      "technique_ids": ["T1110", "T1110.003"],
+      "description": "Brute force: many failed logons for one account (guessing) or one failure each across many accounts from a single source (spraying). Track both fan-in and fan-out over a rolling window.",
+      "data_sources": ["authentication_logs"],
+      "pseudo_query": "logon_failure GROUP BY src OVER 10m HAVING distinct(account) > spray_threshold OR count() BY account > bruteforce_threshold"
+    },
+    {
+      "id": "c2-proxy-egress",
+      "name": "Beaconing / proxy egress to rare external host",
+      "technique_ids": ["T1090", "T1071.001"],
+      "description": "Command-and-control over a proxy/app-layer protocol: regular-interval outbound connections to a low-prevalence destination, or egress from a server that should never initiate outbound. Score on periodicity + destination rarity.",
+      "data_sources": ["proxy_egress", "network_traffic"],
+      "pseudo_query": "netflow WHERE direction = outbound AND dest_prevalence < rarity_floor GROUP BY src, dest HAVING periodicity_score > beacon_threshold"
+    },
+    {
+      "id": "dns-tunneling-exfil",
+      "name": "Anomalous DNS query volume / entropy",
+      "technique_ids": ["T1071.004", "T1048"],
+      "description": "Exfiltration or C2 over DNS: high query volume to one parent domain, long/high-entropy labels, or TXT/NULL record types at volume. Baseline per-domain query rate before alerting.",
+      "data_sources": ["dns_query", "dns_resolver"],
+      "pseudo_query": "dns_query GROUP BY parent_domain OVER 10m HAVING (mean(label_entropy) > entropy_floor OR count() > volume_floor) AND parent_domain NOT IN (allowlist)"
+    },
+    {
+      "id": "credential-access-from-store",
+      "name": "Access to credential stores / unsecured secrets",
+      "technique_ids": ["T1552", "T1552.001", "T1555"],
+      "description": "Unsecured-credentials / credentials-from-store: processes reading LSASS, browser credential DBs, .aws/.ssh, or grepping the filesystem for 'password'/'secret'. Narrow on the accessing process not being a known secrets manager.",
+      "data_sources": ["process_creation", "file_access"],
+      "pseudo_query": "file_access WHERE target_path IN (credential_store_paths) AND actor_image NOT IN (approved_secret_tools)"
+    },
+    {
+      "id": "dos-resource-exhaustion",
+      "name": "Service resource-exhaustion / availability drop",
+      "technique_ids": ["T1499", "T1499.002"],
+      "description": "Endpoint denial-of-service: a service's error/latency rate or resource use spiking to a sustained ceiling, often right after a crafted request pattern. Correlate the availability metric with a request-shape anomaly.",
+      "data_sources": ["application_logs", "network_traffic"],
+      "pseudo_query": "app_metric WHERE (error_rate > ceiling OR p99_latency > ceiling) AND preceded_by(anomalous_request_pattern, 2m)"
+    },
+    {
+      "id": "collection-from-info-repos",
+      "name": "Bulk read of information repositories",
+      "technique_ids": ["T1213", "T1213.002"],
+      "description": "Data-from-information-repositories: one account pulling an unusually large number of wiki/SharePoint/ticketing pages in a short window — staging for exfiltration or reconnaissance of internal docs.",
+      "data_sources": ["application_logs", "audit_logs"],
+      "pseudo_query": "repo_access WHERE action = read GROUP BY account OVER 15m HAVING count(distinct document) > bulk_read_threshold"
+    }
+  ]
+}

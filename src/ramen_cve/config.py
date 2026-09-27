@@ -160,6 +160,7 @@ _YAML_FLAT_KEY_MAP: dict[tuple[str, ...], str] = {
     ("filters", "end"): "end",
     ("filters", "date_mode"): "date_mode",
     ("filters", "sector"): "sector",
+    ("filters", "sector_weight"): "sector_weight",
     ("enrichment", "no_exploit_lookup"): "no_exploit_lookup",
     ("enrichment", "no_enrich_iocs"): "no_enrich_iocs",
     ("cache", "no_cache"): "no_cache",
@@ -314,6 +315,7 @@ def args_to_yaml_payload(args: argparse.Namespace) -> dict:
         "end": _stringify(getattr(args, "end", None)) or "",
         "date_mode": getattr(args, "date_mode", None),
         "sector": getattr(args, "sector", None) or "",
+        "sector_weight": getattr(args, "sector_weight", 1.0),
     }
     payload["enrichment"] = {
         "no_exploit_lookup": bool(getattr(args, "no_exploit_lookup", False)),

@@ -304,8 +304,24 @@ def _output(
     # supplied with a `criticality` column). With no inventory data the
     # host-weight collapses to 1.0 so the score still differentiates by
     # CVSS / EPSS / KEV — the field is never blank.
-    from .risk import apply_risk_scores
+    from .risk import apply_risk_scores, apply_sector_weight
     apply_risk_scores(enriched)
+    # Optional sector weighting (--sector-weight, opt-in): float CVEs whose
+    # linked actors target the analyst's --sector above merely-unattributed
+    # ones. No-op unless both --sector and a weight != 1.0 are set. Runs after
+    # the base scores so it scales a fully-formed risk_score.
+    _sector_scaled = apply_sector_weight(
+        enriched,
+        getattr(args, "sector", None),
+        getattr(args, "sector_weight", 1.0) or 1.0,
+    )
+    if _sector_scaled:
+        _log.info(
+            "Sector weight %.3g applied to %d CVE(s) targeting sector %r.",
+            getattr(args, "sector_weight", 1.0) or 1.0,
+            _sector_scaled,
+            (getattr(args, "sector", None) or "").strip().lower(),
+        )
 
     # SSVC scoring (additive, opt-in via --ssvc-profile). Runs AFTER the
     # TLP filter so we don't waste cycles scoring records that won't be

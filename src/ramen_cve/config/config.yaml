@@ -70,6 +70,11 @@ filters:
   # Optional sector filter — drops CVEs whose only attribution targets a
   # different sector. Lowercase tag (financial / energy / government / ...).
   sector: ""
+  # Optional sector weighting (opt-in, orthogonal to the filter above): a
+  # multiplier applied to risk_score for CVEs whose linked actors target the
+  # `sector` above, floating them up the risk ranking without dropping others.
+  # 1.0 = off. Requires `sector` to be set and a positive value.
+  sector_weight: 1.0
 
 # ----- Enrichment toggles --------------------------------------------------
 enrichment:

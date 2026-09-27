@@ -316,6 +316,37 @@ class Cache:
             for r in rows
         ]
 
+    def snapshot_as_of(self, as_of_iso: str) -> dict[str, dict]:
+        """Reconstruct each CVE's last-known state at or before `as_of_iso`.
+
+        Returns ``{cve_id: {"ts_iso", "bucket", "cvss_score", "epss_score"}}``
+        — for every CVE that had at least one run row on or before the cutoff,
+        its most recent such row. This is the "what did we know as of then?"
+        view the `replay` subcommand diffs; a pure read of the non-purged
+        `runs` history, so no schema change is needed.
+
+        `as_of_iso` is compared lexically, which is correct for the
+        second-precision ISO-8601 stamps `record_run` writes (`_utcnow()`,
+        naive UTC). Pass an end-of-day bound (e.g. ``"2024-01-15T23:59:59"``)
+        to include a whole calendar day.
+        """
+        rows = self._conn.execute(
+            "SELECT r.cve_id, r.ts_iso, r.bucket, r.cvss_score, r.epss_score "
+            "FROM runs r "
+            "WHERE r.ts_iso <= ? AND r.ts_iso = ("
+            "    SELECT MAX(r2.ts_iso) FROM runs r2 "
+            "    WHERE r2.cve_id = r.cve_id AND r2.ts_iso <= ?"
+            ")",
+            (as_of_iso, as_of_iso),
+        ).fetchall()
+        return {
+            r[0]: {
+                "ts_iso": r[1], "bucket": r[2],
+                "cvss_score": r[3], "epss_score": r[4],
+            }
+            for r in rows
+        }
+
     def log_audit(
         self,
         actor: str,

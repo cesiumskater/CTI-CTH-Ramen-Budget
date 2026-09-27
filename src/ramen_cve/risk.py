@@ -105,3 +105,46 @@ def apply_risk_scores(records: list[EnrichedCve]) -> None:
     """
     for rec in records:
         rec.risk_score = compute_risk_score(rec)
+
+
+def sector_matches(rec: EnrichedCve, sector: str) -> bool:
+    """True when any of the CVE's linked actors targets ``sector``.
+
+    ``sector`` is compared case-insensitively against each actor's
+    ``sectors_targeted`` tag list — the same match the ``--sector`` filter
+    uses, so filtering and weighting agree on what "relevant" means.
+    """
+    sector = (sector or "").strip().lower()
+    if not sector:
+        return False
+    return any(sector in (a.sectors_targeted or []) for a in rec.linked_actors)
+
+
+def apply_sector_weight(
+    records: list[EnrichedCve], sector: str | None, weight: float = 1.0
+) -> int:
+    """In-place: multiply ``risk_score`` by ``weight`` for sector-matched CVEs.
+
+    Layered on top of :func:`apply_risk_scores` (call it after), this floats
+    CVEs whose linked actors target the analyst's sector above merely
+    unattributed ones in the risk ranking — without dropping anything, which
+    is the ``--sector`` *filter*'s job. Orthogonal to that filter: run either,
+    both, or neither.
+
+    No-op (returns 0) when ``sector`` is blank, ``weight`` is None or exactly
+    1.0, or a record has no ``risk_score`` yet. Returns the number of records
+    whose score was scaled, so the caller can log it. Not idempotent — it
+    scales the current score, so call it exactly once per run (the pipeline
+    does).
+    """
+    sector = (sector or "").strip().lower()
+    if not sector or weight is None or float(weight) == 1.0:
+        return 0
+    scaled = 0
+    for rec in records:
+        if rec.risk_score is None:
+            continue
+        if sector_matches(rec, sector):
+            rec.risk_score *= float(weight)
+            scaled += 1
+    return scaled

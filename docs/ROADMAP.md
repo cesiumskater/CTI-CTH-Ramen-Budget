@@ -79,20 +79,29 @@ working core; the "ramen budget" stays the headline.
 - **MISP-native push / pull** via the optional `pymisp` extra. Different
   shape from generic STIX — MISP consumers want events with Galaxy tags.
 - **Vulnerability-scanner imports** (Nessus / Qualys / Rapid7 native) —
-  `import` subcommand into the existing inventory shape.
-- **Hunt analytics library** — per-ATT&CK-technique query templates;
-  `analytic suggest <hunt-id>` surfaces those whose techniques overlap.
-- **Backtesting / replay mode** — `replay --as-of YYYY-MM-DD` reads
+  `import` subcommand into the existing inventory shape. **Nessus shipped**
+  (`import --scanner nessus`, `src/ramen_cve/scanner.py`); Qualys / Rapid7
+  (CVE-centric formats, a different mapping) remain.
+- ~~**Hunt analytics library** — per-ATT&CK-technique query templates;
+  `analytic suggest <hunt-id>` surfaces those whose techniques overlap.~~
+  **Shipped.** Bundled catalog at `src/ramen_cve/data/analytics.json`; the
+  `analytic` subcommand (list / show / suggest) with parent/sub-technique
+  aware overlap.
+- ~~**Backtesting / replay mode** — `replay --as-of YYYY-MM-DD` reads
   cache only, re-runs the pipeline, diff-tables against the historical
-  `runs` table for that date.
+  `runs` table for that date.~~ **Shipped.** `replay --as-of [--to]` diffs
+  bucket snapshots from the `runs` history (`src/ramen_cve/replay.py`,
+  `cache.snapshot_as_of`); pure cache read, no schema change.
 - **Optional API mode** — a thin FastAPI surface as an `[api]` extra, so
   other tools can integrate ramen-cve without spawning a CLI per request.
   Token-auth only; no multi-tenant.
 - **Configurable cache backend** — current SQLite stays the default; an
   optional Redis backend as a `[redis]` extra for shared-host scenarios.
-- **Sector / geopolitical context** weighting — surface the actor sector
+- ~~**Sector / geopolitical context** weighting — surface the actor sector
   list in the Markdown cross-tab; optionally weight `risk_score` by sector
-  match.
+  match.~~ **Shipped.** The Markdown "Linked Adversaries" cross-tab carries a
+  Sectors-Targeted column, and `--sector-weight FACTOR` (with `--sector`)
+  weights `risk_score` by sector match.
 - **Anonymized intelligence sharing** — opt-in mechanism to contribute
   back to the bundled associations dataset (with explicit privacy warnings
   and TLP gating).
